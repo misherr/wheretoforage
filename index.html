@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#1a2419">
+<title>Bolete Washington</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+:root{
+  --moss:#1a2419; --moss-2:#243226; --bark:#4a3a2a; --cap:#b8742c; --cap-light:#e0a559;
+  --pore:#e9e2cf; --pore-dim:#b8b09a; --line:rgba(233,226,207,.14);
+  --c-med:#e2c452; --c-good:#e58a2b; --c-high:#d6432c; --c-vhigh:#8a1a30;
+  --sheet-h:46dvh;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--moss);color:var(--pore);
+  font-family:"Avenir Next","Avenir","Segoe UI",system-ui,sans-serif;font-size:15px;line-height:1.4;overscroll-behavior:none}
+#map{position:fixed;inset:0;background:#0f150f}
+.leaflet-container{font:inherit}
+.leaflet-control-attribution{font-size:9px;background:rgba(26,36,25,.7)!important;color:var(--pore-dim)!important}
+.leaflet-control-attribution a{color:var(--cap-light)!important}
+.leaflet-control-zoom{display:none}
+
+/* top strip */
+#top{position:fixed;top:0;left:0;right:0;z-index:900;padding:calc(env(safe-area-inset-top) + 8px) 10px 8px;
+  display:flex;align-items:center;gap:8px;pointer-events:none}
+#top>*{pointer-events:auto}
+#brand{background:var(--moss);border:1px solid var(--line);border-radius:14px;padding:6px 12px;display:flex;flex-direction:column;min-width:0;flex:1}
+#brand h1{margin:0;font-size:17px;font-weight:600;letter-spacing:-.01em;color:var(--pore)}
+#brand h1 em{font-style:normal;color:var(--cap-light)}
+#brand small{font-size:12px;color:var(--pore-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pill{background:var(--moss);border:1px solid var(--line);color:var(--pore);border-radius:14px;padding:9px 12px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap}
+.pill:active{background:var(--moss-2)}
+.pill.cap{background:var(--cap);border-color:var(--cap);color:#1a1208}
+.pill[disabled]{opacity:.5}
+
+/* right rail */
+#rail{position:fixed;right:10px;top:calc(env(safe-area-inset-top) + 70px);z-index:900;display:flex;flex-direction:column;gap:8px}
+#rail button{width:44px;height:44px;border-radius:12px;background:var(--moss);border:1px solid var(--line);color:var(--pore);font-size:20px;cursor:pointer;display:grid;place-items:center}
+#rail button:active{background:var(--moss-2)}
+#rail button svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+
+/* layers menu */
+#layers{position:fixed;left:10px;top:calc(env(safe-area-inset-top) + 70px);z-index:910;background:var(--moss);border:1px solid var(--line);border-radius:14px;padding:6px 6px;display:none;min-width:210px;box-shadow:0 8px 30px rgba(0,0,0,.4)}
+#layers.open{display:block}
+#layers label{display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:10px;font-size:14px;cursor:pointer}
+#layers label:active{background:var(--moss-2)}
+#layers input{width:18px;height:18px;accent-color:var(--cap)}
+#layers label i{width:12px;height:12px;border-radius:3px;flex:none}
+#layers label small{color:var(--pore-dim);font-size:11px;display:block}
+
+/* bottom timeline */
+#bottom{position:fixed;left:0;right:0;bottom:0;z-index:900;background:var(--moss);border-top:1px solid var(--line);padding:8px 12px calc(env(safe-area-inset-bottom) + 8px);transition:transform .25s}
+body.sheet-open #bottom{transform:translateY(120%)}
+#legends{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--pore-dim);margin-bottom:6px}
+#legends .lg{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+#legends .lg b{font-weight:600;color:var(--pore);margin-right:2px}
+#legends i{display:inline-block;width:11px;height:11px;border-radius:3px;vertical-align:-2px;margin-right:3px}
+#tl{display:flex;align-items:center;gap:10px}
+#play{width:40px;height:40px;border-radius:12px;border:1px solid var(--line);background:var(--moss-2);color:var(--pore);font-size:16px;cursor:pointer;flex:none;display:grid;place-items:center}
+#play svg{width:18px;height:18px;fill:currentColor}
+#tl .s{flex:1;min-width:0}
+#day{display:flex;justify-content:space-between;font-size:11px;color:var(--pore-dim);margin-bottom:2px}
+#day b{color:var(--cap-light);font-weight:600}
+#slider{width:100%;margin:0;accent-color:var(--cap);height:28px}
+#ticks{display:flex;justify-content:space-between;font-size:10px;color:var(--pore-dim);padding:0 2px}
+#ticks span.on{color:var(--cap-light);font-weight:700}
+
+/* progress */
+#prog{position:fixed;left:10px;right:10px;bottom:calc(env(safe-area-inset-bottom) + 130px);z-index:900;background:var(--moss);border:1px solid var(--line);border-radius:12px;padding:8px 12px;font-size:13px;display:none;transition:transform .25s}
+#prog .bar{height:4px;border-radius:2px;background:var(--moss-2);margin-top:6px;overflow:hidden}
+#prog .bar b{display:block;height:100%;width:0;background:var(--cap-light);transition:width .2s}
+body.sheet-open #prog{transform:translateY(calc(-1 * var(--sheet-h)))}
+
+/* bottom sheet */
+#sheet{position:fixed;left:0;right:0;bottom:0;height:var(--sheet-h);z-index:950;background:var(--moss);border-top:1px solid var(--line);border-radius:18px 18px 0 0;
+  transform:translateY(105%);transition:transform .28s cubic-bezier(.2,.8,.2,1);display:flex;flex-direction:column;box-shadow:0 -10px 40px rgba(0,0,0,.4)}
+#sheet.open{transform:translateY(0)}
+#sheet.tall{--sheet-h:88dvh}
+#grab{width:38px;height:4px;border-radius:2px;background:var(--pore-dim);opacity:.6;margin:8px auto 4px;flex:none}
+#sheet-hd{display:flex;align-items:flex-start;gap:10px;padding:4px 16px 8px;flex:none}
+#sheet-hd .t{flex:1;min-width:0}
+#sheet-hd .t h2{margin:0;font-size:16px;font-weight:600;line-height:1.25}
+#sheet-hd .t small{color:var(--pore-dim);font-size:12px}
+#close{width:32px;height:32px;border-radius:10px;border:1px solid var(--line);background:transparent;color:var(--pore);font-size:16px;cursor:pointer}
+#sheet-body{overflow-y:auto;-webkit-overflow-scrolling:touch;padding:0 16px calc(env(safe-area-inset-bottom) + 20px);flex:1}
+
+.verdict{display:flex;gap:14px;align-items:center;padding:12px 14px;border-radius:14px;background:var(--moss-2);margin-bottom:12px}
+.verdict .num{font-size:40px;font-weight:700;letter-spacing:-.03em;line-height:1;min-width:76px}
+.verdict .num small{display:block;font-size:11px;font-weight:600;letter-spacing:.02em;color:var(--pore-dim);margin-top:4px}
+.verdict p{margin:0;font-size:14px;line-height:1.35}
+.verdict p b{font-weight:600}
+
+.sec{margin:14px 0 6px;font-size:12px;color:var(--pore-dim);font-weight:600}
+.bars{display:grid;grid-template-columns:118px 1fr 40px;gap:6px 10px;align-items:center;font-size:13px}
+.bars .bg{height:8px;border-radius:4px;background:var(--moss-2);overflow:hidden}
+.bars .bg b{display:block;height:100%;border-radius:4px;background:var(--cap-light)}
+.bars .v{text-align:right;color:var(--pore-dim);font-variant-numeric:tabular-nums}
+.bars .k{color:var(--pore)}
+.note{font-size:12.5px;color:var(--pore-dim);margin:6px 0 0}
+
+.fc{display:flex;gap:4px;align-items:flex-end;height:74px;margin-top:6px}
+.fc div{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:3px;font-size:10px;color:var(--pore-dim)}
+.fc div b{width:100%;border-radius:4px 4px 2px 2px;min-height:2px}
+.fc div.today span{color:var(--cap-light);font-weight:700}
+
+.rain{display:flex;gap:3px;align-items:flex-end;height:54px;margin-top:6px}
+.rain div{flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:100%;align-items:center;gap:2px;font-size:9px;color:var(--pore-dim)}
+.rain div b{width:100%;background:#5b8fb0;border-radius:2px;min-height:1px}
+.rain div.hi b{background:#7fb3d3}
+
+dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:6px 0 0;font-size:13px}
+dl dt{color:var(--pore-dim)}dl dd{margin:0}
+a.lnk{color:var(--cap-light);text-decoration:none;font-weight:600}
+.actions{display:flex;gap:8px;margin-top:12px}
+
+/* top spots + model panels share sheet */
+.spot{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);cursor:pointer}
+.spot .sc{width:50px;height:50px;border-radius:12px;display:grid;place-items:center;font-size:18px;font-weight:700;color:#fff;flex:none}
+.spot .m{flex:1;min-width:0}.spot .m b{display:block;font-size:14px;font-weight:600}.spot .m span{font-size:12px;color:var(--pore-dim)}
+.model p{font-size:13.5px;margin:8px 0}.model h3{font-size:14px;margin:16px 0 4px;color:var(--cap-light)}
+.model ul{padding-left:18px;font-size:13px;margin:4px 0}.model li{margin:3px 0}
+
+.cell{cursor:pointer}
+.empty{padding:20px 0;color:var(--pore-dim);font-size:13.5px}
+@media (prefers-reduced-motion:reduce){#sheet,#legend,#prog{transition:none}}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="top">
+  <div id="brand"><h1><em>King bolete</em> Washington</h1><small id="status">Starting…</small></div>
+  <button class="pill cap" id="btn-top">Top spots</button>
+</div>
+
+<div id="rail">
+  <button id="btn-loc" title="My location"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="8"/></svg></button>
+  <button id="btn-base" title="Map style"><svg viewBox="0 0 24 24"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/></svg></button>
+  <button id="btn-refine" title="Refine this area" style="display:none"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-5-5"/><path d="M11 8v6M8 11h6"/></svg></button>
+  <button id="btn-layers" title="Layers"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></svg></button>
+  <button id="btn-model" title="How it works"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg></button>
+  <button id="btn-refresh" title="Refresh weather"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v5h-5"/></svg></button>
+</div>
+
+<div id="layers"></div>
+
+<div id="bottom">
+  <div id="legends"></div>
+  <div id="tl">
+    <button id="play" title="Play forecast"><svg viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg></button>
+    <div class="s"><div id="day"><span id="day-lbl"></span><b id="day-tag">Today</b></div><input id="slider" type="range" min="0" max="7" step="1" value="0"><div id="ticks"></div></div>
+  </div>
+</div>
+
+<div id="prog"><span id="prog-txt"></span><div class="bar"><b id="prog-bar"></b></div></div>
+
+<div id="sheet">
+  <div id="grab"></div>
+  <div id="sheet-hd"><div class="t"><h2 id="sh-title"></h2><small id="sh-sub"></small></div><button id="close">✕</button></div>
+  <div id="sheet-body"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+/* ===================== CONFIG ===================== */
+const PUBLIC_MODE=false; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
+const DLAT=0.0145, DLON=0.0214, BLK=4; // 1 sq mi cells at 47.5°N, grouped in 4x4 blocks
+const BLAT=DLAT*BLK, BLON=DLON*BLK;
+const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400, LAPSE=0.0065; // local refine below 1 mi when zoomed way in
+const PAST_DAYS = 26, FC_DAYS = 8, ANCHOR = 0.2; // 26 days covers the 3–24 day trigger window; anchors every ~14 mi keep the load under Open-Meteo's free quota
+const WA = [[-123.32,49.0],[-117.03,49.0],[-117.04,46.0],[-116.92,45.99],[-118.98,45.99],[-119.5,45.92],[-120.4,45.7],[-121.2,45.7],[-121.9,45.68],[-122.4,45.57],[-122.8,45.63],[-123.1,46.17],[-123.6,46.25],[-124.1,46.28],[-124.15,46.9],[-124.25,47.3],[-124.45,47.8],[-124.75,48.4],[-123.6,48.2],[-123.1,48.18],[-122.75,48.15],[-122.9,48.45],[-123.2,48.6],[-123.32,48.8]];
+const CREST = [[45.5,-121.6],[46.2,-121.5],[46.9,-121.5],[47.4,-121.4],[47.9,-121.1],[48.5,-120.85],[49.0,-120.9]];
+const BANDS = [[25,'Medium','#e2c452'],[45,'Good','#e58a2b'],[65,'High','#d6432c'],[80,'Very high','#8a1a30']];
+
+/* ===================== HELPERS ===================== */
+const $=id=>document.getElementById(id);
+const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+const lerp=(a,b,t)=>a+(b-a)*t;
+function interp(tbl,x){ if(x<=tbl[0][0])return tbl[0][1]; for(let i=1;i<tbl.length;i++){ if(x<=tbl[i][0]){const [x0,y0]=tbl[i-1],[x1,y1]=tbl[i];return lerp(y0,y1,(x-x0)/(x1-x0));}} return tbl[tbl.length-1][1]; }
+function trap(x,a,b,c,d){ if(x<=a||x>=d)return 0; if(x<b)return (x-a)/(b-a); if(x<=c)return 1; return (d-x)/(d-c); }
+const bell=(x,c,sd)=>Math.exp(-0.5*((x-c)/sd)**2);
+function inWA(lat,lon){ let ins=false; for(let i=0,j=WA.length-1;i<WA.length;j=i++){ const [xi,yi]=WA[i],[xj,yj]=WA[j]; if((yi>lat)!==(yj>lat) && lon<(xj-xi)*(lat-yi)/(yj-yi)+xi) ins=!ins;} return ins; }
+const crestLon=lat=>interp(CREST,lat);
+function doyOf(d){ const s=new Date(d.getFullYear(),0,0); return Math.floor((d-s)/86400000); }
+function localISO(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+const fmtDay=iso=>{const d=new Date(iso+'T12:00:00');return d.toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'});};
+const shortDay=iso=>new Date(iso+'T12:00:00').toLocaleDateString(undefined,{weekday:'narrow'});
+const ft=m=>Math.round(m*3.28084);
+const f=c=>Math.round(c*9/5+32);
+const inch=mm=>(mm/25.4).toFixed(2);
+function bandOf(s){ let b=null; for(const x of BANDS) if(s>=x[0]) b=x; return b; }
+function colorOf(s){ const b=bandOf(s); return b?b[2]:null; }
+function labelOf(s){ const b=bandOf(s); return b?b[1]:'Low'; }
+function dist(a,b){ const R=6371,dl=(b[0]-a[0])*Math.PI/180,dn=(b[1]-a[1])*Math.PI/180; const x=Math.sin(dl/2)**2+Math.cos(a[0]*Math.PI/180)*Math.cos(b[0]*Math.PI/180)*Math.sin(dn/2)**2; return 2*R*Math.asin(Math.sqrt(x))*0.621371; }
+
+/* ===================== HABITAT MODEL ===================== */
+function habitat(lat,lon,elev,doy){
+  const H={score:0,zone:'',hosts:'',elevNote:'',season:0,seasonNote:''};
+  if(elev==null||isNaN(elev)){H.zone='No terrain data';H.seasonNote='Elevation could not be read here';return H;}
+  if(elev<3){H.zone='Water';return H;}
+  const east = lon > crestLon(lat);
+  const basin = lat>45.9&&lat<47.9&&lon>-120.6&&lon<-117.8&&elev<800;
+  if(elev>2100){H.zone='Alpine / subalpine parkland';H.hosts='Above productive forest; sparse whitebark pine, subalpine fir krummholz';H.score=0.05;H.season=0.3;H.seasonNote='Too high and cold for reliable flushes';return H;}
+  if(east && (elev<500 || basin)){H.zone='Shrub-steppe / farmland';H.hosts='No ectomycorrhizal conifer hosts';H.season=0;H.seasonNote='Not king bolete country';return H;}
+  if(!east && elev<400 && (lon<-123.8 || (lat>48.0&&lon<-123.2))){
+    H.zone='Coastal Sitka spruce belt';H.hosts='Sitka spruce, shore pine, western hemlock — dune forests, spruce fringe, campground edges';
+    const s=trap(doy,255,278,330,355); H.season=s; H.seasonNote=s>=.9?'Coastal peak (Oct–Nov)':s>0?'Coastal season shoulder':'Coastal season is Oct–Nov';
+    H.score=(elev<150?1:lerp(1,.55,(elev-150)/250))*Math.max(s,.08); H.elevNote='Best low, within a few miles of salt water'; return H;
+  }
+  if(!east && elev<350){
+    H.zone='Puget / Chehalis lowland';H.hosts='Mostly Douglas-fir (weak host). Look for planted Sitka spruce, pines and true firs in parks, campuses, shelterbelts';
+    const s=trap(doy,272,290,330,342); H.season=s; H.seasonNote=s>0?'Lowland season (Oct–Nov)':'Lowland flushes run Oct–Nov';
+    H.score=0.3*Math.max(s,.08); H.elevNote='Spotty; habitat matters more than weather here'; return H;
+  }
+  if(!east){
+    H.zone= (lon<-123.0&&lat>47.3)?'Olympic montane forest':'West Cascades montane forest';
+    H.hosts='Pacific silver fir, noble fir, grand fir, western/mountain hemlock, western white pine; Engelmann spruce near the crest. Openings, road cuts, campgrounds under true fir are classic';
+    const s=trap(doy,220,237,288,306); const c=interp([[220,1450],[258,1150],[288,800],[319,450]],doy);
+    const e=0.3+0.7*bell(elev,c,350)*(elev>1800?0.6:1); H.season=s; H.score=Math.max(s,.06)*e;
+    H.seasonNote=s>=.9?'Fall montane peak (late Aug–mid Oct)':s>0?'Fall season shoulder':'Fall season Aug–Oct';
+    H.elevNote=`Sweet spot today ≈ ${ft(c-350)}–${ft(c+350)} ft, drifting downslope as fall goes on`; return H;
+  }
+  // east side
+  const hi=elev>=750;
+  H.zone= lat<46.8&&lon>-118.6?'Blue Mountains':(lat>47.5&&lon>-119.2?'Okanogan / Selkirk highlands':'East Cascades');
+  H.hosts= hi?'Grand fir, subalpine fir, Engelmann spruce, lodgepole & western white pine, Douglas-fir, larch mixes. Spring kings (B. rex-veris) under true fir/pine near snowmelt; fall B. edulis under spruce/fir':'Ponderosa pine / Douglas-fir transition — spring kings possible, fall spotty';
+  const fs=trap(doy,236,250,293,306); const fc=interp([[236,1500],[262,1300],[290,1000],[306,750]],doy);
+  const fe=0.3+0.7*bell(elev,fc,350);
+  const ss=trap(doy,128,140,176,192); const scn=interp([[128,800],[160,1250],[192,1650]],doy);
+  const se=0.3+0.7*bell(elev,scn,300);
+  const fall=fs*fe, spring=ss*se;
+  H.season=Math.max(fs,ss);
+  H.score=(hi?1:0.35)*Math.max(fall,spring,.06);
+  if(ss>0&&spring>=fall){H.seasonNote=ss>=.9?'Spring king peak (late May–June)':'Spring king shoulder';H.elevNote=`Spring kings follow the snowline; ≈ ${ft(scn-300)}–${ft(scn+300)} ft now`;}
+  else {H.seasonNote=fs>=.9?'Fall east-side peak (Sept–mid Oct)':fs>0?'Fall season shoulder':'Fall season Sept–Oct; spring kings May–June';H.elevNote=`Sweet spot today ≈ ${ft(fc-350)}–${ft(fc+350)} ft`;}
+  return H;
+}
+
+/* does this spot ever hold king boletes? (season-independent gate, so the cell set is stable year-round) */
+function everHabitat(lat,lon,elev){ return Math.max(habitat(lat,lon,elev,DOY).score,habitat(lat,lon,elev,160).score,habitat(lat,lon,elev,275).score,habitat(lat,lon,elev,300).score); }
+/* ===================== WEATHER SCORE MODEL ===================== */
+function kernel(a){ if(a<3)return 0; if(a<9)return (a-3)/6; if(a<=15)return 1; if(a<24)return (24-a)/9; return 0; }
+function tmaxSuit(t){ if(t<=2)return 0; if(t<10)return (t-2)/8; if(t<=22)return 1; if(t<30)return (30-t)/8; return 0; }
+function tminSuit(t){ if(t<=-2)return 0; if(t<3)return (t+2)/5; if(t<=13)return 1; if(t<19)return (19-t)/6; return 0; }
+function analyze(w,i,hab){
+  const {p,tmax,tmin,et0,snow,rh}=w; const n=p.length;
+  const at=(arr,k)=>arr[clamp(k,0,n-1)]??0;
+  // flush trigger: best rain event 3–24 days before i
+  let F=0,ev=null;
+  for(let d=Math.max(2,i-24);d<=i-3;d++){ const P3=at(p,d)+at(p,d-1)+at(p,d-2); const m=clamp((P3-10)/30,0,1); const v=m*kernel(i-d); if(v>F){F=v;ev={age:i-d,mm:P3,date:w.time[d]};} }
+  // most recent meaningful rain (any age)
+  let last=null; for(let d=i;d>=Math.max(2,i-30);d--){ const P3=at(p,d)+at(p,d-1)+at(p,d-2); if(P3>=10){last={age:i-d,mm:P3,date:w.time[d]};break;} }
+  // soil bucket
+  let S=20; for(let d=Math.max(0,i-30);d<=i;d++){ S=clamp(S+at(p,d)-0.7*(et0[d]??3),0,80); } const M=clamp(S/40,0,1);
+  let dry=0; for(let d=i;d>=0&&at(p,d)<1;d--)dry++;
+  // temperature (last 5 days)
+  let X=0,c=0; for(let d=i-4;d<=i;d++){ if(d<0)continue; X+=tmaxSuit(at(tmax,d))*tminSuit(at(tmin,d)); c++; } X=c?X/c:0.5;
+  let K=1,kill=null; let mn=99,sn=0,mx=-99;
+  for(let d=i-6;d<=i;d++){ if(d<0)continue; mn=Math.min(mn,at(tmin,d)); sn+=snow[d]??0; }
+  for(let d=i-2;d<=i;d++){ if(d<0)continue; mx=Math.max(mx,at(tmax,d)); }
+  if(sn>=3){K=0.05;kill='snow';} else if(mn<=-3){K=0.15;kill='frost';} else if(mx>=30){K=0.5;kill='heat';}
+  let rhm=null,rc=0,rs=0; for(let d=i-2;d<=i;d++){ if(d<0)continue; if(rh&&rh[d]!=null){rs+=rh[d];rc++;} } if(rc){rhm=rs/rc;}
+  const Hu= rhm==null?0.75:0.2+0.8*clamp((rhm-40)/30,0,1);
+  let tm1=0,tm2=0,c1=0,c2=0; for(let d=i-3;d<=i;d++){if(d>=0){tm1+=(at(tmax,d)+at(tmin,d))/2;c1++;}} for(let d=i-9;d<=i-4;d++){if(d>=0){tm2+=(at(tmax,d)+at(tmin,d))/2;c2++;}}
+  const drop=(c1&&c2)?(tm2/c2-tm1/c1):0; const C= drop>=2?0.1:0;
+  const score=clamp(100*hab.score*Math.pow(F,0.6)*Math.pow(M,0.4)*X*Math.sqrt(Hu)*K*(1+C),0,100);
+  return {score,F,M,X,Hu,K,C,kill,ev,last,dry,bucket:S,rh:rhm,mn,mx,drop};
+}
+function fullAnalysis(w,hab){
+  const i=w.today; const now=analyze(w,i,hab);
+  const fut=[]; for(let t=0;t<=7&&i+t<w.time.length;t++){ const r=analyze(w,i+t,hab); let r7=0; for(let d=i+t-6;d<=i+t;d++) if(d>=0) r7+=w.p[d]||0; fut.push({date:w.time[i+t],score:r.score,rain:w.p[i+t],rain7:r7,M:r.M,F:r.F}); }
+  let best=fut[0]; for(const x of fut) if(x.score>best.score+0.5) best=x;
+  const fRain=fut.slice(1).reduce((a,x)=>a+(x.rain||0),0);
+  return {now,fut,best,fRain,hab};
+}
+function verdict(A){
+  const {now,fut,best,fRain,hab}=A; const s=Math.round(now.score); const bs=Math.round(best.score);
+  const lab=labelOf(s).toLowerCase();
+  if(hab.score===0) return `Not king bolete habitat — ${hab.zone.toLowerCase()}.`;
+  if(hab.season<0.15) return `Out of season here. ${hab.seasonNote}.`;
+  if(now.kill==='snow') return `Snow on the ground. Fall flush is over at this elevation.`;
+  if(now.kill==='frost') return `Hard frost in the last week (${f(now.mn)}°F). The fall flush is over here — look lower or on the coast.`;
+  const evTxt=now.ev?`${inch(now.ev.mm)}" of rain ${now.ev.age} days ago`:null;
+  if(s>=65) return `<b>Prime right now.</b> ${evTxt?evTxt+' is producing':'Steady moisture is producing'}; temps ${f(now.mn)}–${f(now.mx)}°F. Go.`;
+  if(bs>=s+10 && bs>=30){
+    const lastTxt=now.last&&now.last.age<=6?`It rained ${inch(now.last.mm)}" ${now.last.age===0?'today':now.last.age+' days ago'}.`:(fRain>8?`${inch(fRain)}" of rain is forecast.`:'');
+    return `${lastTxt} Chances are <b>${lab}</b> today (${s}%) but should climb to <b>${labelOf(bs).toLowerCase()}</b> (${bs}%) around ${fmtDay(best.date)} as the flush comes up.`;
+  }
+  if(now.ev&&now.ev.age>15&&s<45) return `<b>Past prime.</b> The flush from ${inch(now.ev.mm)}" on ${fmtDay(now.ev.date)} is ${now.ev.age} days old and fading — you may find older, buggy caps. Needs new rain.`;
+  if(now.F===0&&now.dry>=10) return `<b>Dry.</b> No trigger rain (≥1") in the last ${now.dry} days and soil moisture is ${Math.round(now.M*100)}%. Not worth the drive.`;
+  if(now.F===0) return `No flush trigger yet — the last real soak was too recent or too light. Watch the forecast; a 1" storm followed by 7–12 cool days is what you want.`;
+  if(now.kill==='heat') return `Rain history is fine but highs near ${f(now.mx)}°F are shutting fruiting down. Wait for the cool-down.`;
+  if(now.X<0.4) return `Moisture is there, but temperatures (${f(now.mn)}–${f(now.mx)}°F) are outside the fruiting window. Marginal.`;
+  return `<b>${labelOf(s)}</b> chance. ${evTxt?evTxt+', soil moisture '+Math.round(now.M*100)+'%.':''} ${bs>s?`Slightly better around ${fmtDay(best.date)}.`:'Trend is flat to declining.'}`;
+}
+
+/* ===================== DATA ===================== */
+const wcache=new Map();   // weather anchors: key -> {w} | {failed:true}
+const ecache=new Map();   // elevation: key -> meters
+const key=(lat,lon)=>lat.toFixed(4)+','+lon.toFixed(4);
+let RH_OK=true;
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+let waitNote=null;
+let apiBlocked=null; // message when Open-Meteo has cut us off
+async function fetchJSON(u,tries=9){
+  if(PUBLIC_MODE){ const e=new Error('Live weather is disabled in public mode — data/weather.json is missing or stale'); e.blocked=true; apiBlocked=e.message; throw e; }
+  if(apiBlocked) { const e=new Error(apiBlocked); e.blocked=true; throw e; }
+  let lastReason='';
+  for(let k=0;k<tries;k++){
+    const r=await fetch(u);
+    if(r.ok) return r.json();
+    try{ lastReason=(await r.clone().json()).reason||''; }catch(_){ }
+    if(r.status===429&&/daily|hourly/i.test(lastReason)){ apiBlocked='Open-Meteo '+(/daily/i.test(lastReason)?'daily':'hourly')+' limit reached — weather is unavailable until it resets'; const e=new Error(apiBlocked); e.blocked=true; throw e; }
+    if(r.status===429){ const w=/minutely/i.test(lastReason)?16000:Math.min(16000,2000*2**k); waitNote&&waitNote(`Weather service per-minute limit — pausing ${Math.round(w/1000)}s, then continuing…`); await sleep(w); continue; }
+    if(r.status>=500){ await sleep(Math.min(12000,1500*2**k)); continue; }
+    const err=new Error(r.status+' '+lastReason); err.status=r.status; err.reason=lastReason; throw err;
+  }
+  const err=new Error('Weather service kept refusing ('+(lastReason||'rate limited')+')'); err.status=429; throw err;
+}
+/* ---- elevation from open terrain tiles (AWS Terrarium PNG, no key, no quota) ---- */
+const ELEV_Z=10; // ~76 m per pixel at 47°N — plenty for square-mile cells and slope/aspect
+const tcache=new Map(); let tilesBroken=false;
+function tileXY(lat,lon,z){ const n=2**z; const x=(lon+180)/360*n; const lr=lat*Math.PI/180; const y=(1-Math.log(Math.tan(lr)+1/Math.cos(lr))/Math.PI)/2*n; return {x,y}; }
+function loadTileData(url,cache,k){ if(cache.has(k)) return cache.get(k);
+  const pr=(async()=>{ let lastErr; for(let k=0;k<4;k++){ try{ const r=await fetch(url,{mode:'cors'}); if(!r.ok) throw new Error('tile '+r.status);
+      const bmp=await createImageBitmap(await r.blob()); const c=document.createElement('canvas'); c.width=c.height=256; const ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(bmp,0,0); return ctx.getImageData(0,0,256,256).data; }
+    catch(err){ lastErr=err; await sleep(800*(k+1)); } } throw lastErr; })();
+  pr.catch(()=>cache.delete(k)); cache.set(k,pr); return pr; }
+const loadTile=(z,x,y)=>loadTileData(`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`,tcache,z+'/'+x+'/'+y);
+/* ---- vegetation from LANDFIRE 2024 (USGS): type, canopy cover %, stand height (30 m) ---- */
+const LF='https://lfps.usgs.gov/arcgis/rest/services/Landfire_LF2024/';
+const LFL={evt:'LF2024_EVT_CONUS',evc:'LF2024_EVC_CONUS',evh:'LF2024_EVH_CONUS'};
+let vegBroken=false, vegFails=0, evtNames=null, vegNote='';
+const vcache=new Map(); // cell key -> veg summary
+async function loadEvtNames(){
+  try{ const r=await fetch(LF+LFL.evt+'/ImageServer/legend?renderingRule='+encodeURIComponent('{"rasterFunction":"LF2024_EVT_CONUS"}')+'&f=json'); const j=await r.json(); const m=new Map();
+    (j.layers||[]).forEach(l=>(l.legend||[]).forEach(it=>{ if(it.values&&it.values.length) it.values.forEach(v=>{const n=parseInt(v); if(!isNaN(n)) m.set(n,it.label);}); else if(it.label){ const mm=/^\s*(\d{4})\b/.exec(it.label); if(mm) m.set(+mm[1],it.label.replace(/^\s*\d{4}\W*/,'')); } }));
+    if(m.size>50) evtNames=m; else vegNote='vegetation names unavailable — using cover and height only';
+  }catch(err){ vegNote='vegetation names unavailable — using cover and height only'; }
+}
+// host quality of a LANDFIRE vegetation type for king boletes, by name
+const HOST_RULES=[
+  [/sitka spruce|coastal.*spruce/i,1.0,'Sitka spruce (coastal king country)'],
+  [/silver fir|mountain hemlock|subalpine|spruce-fir|engelmann|noble fir|red fir/i,1.0,'true fir / mountain hemlock / spruce'],
+  [/grand fir|white fir|mixed conifer|western white pine|lodgepole|mesic.*conifer/i,0.8,'mixed conifer'],
+  [/western hemlock|douglas-fir.*hemlock|hemlock.*douglas-fir/i,0.6,'Douglas-fir – western hemlock'],
+  [/ponderosa|larch|dry.*douglas-fir|douglas-fir.*dry|douglas-fir woodland/i,0.4,'dry pine / Douglas-fir'],
+  [/douglas-fir/i,0.45,'Douglas-fir'],
+  [/harvest|regenerat|plantation|managed tree/i,0.25,'recently logged / young plantation'],
+  [/krummholz|parkland|woodland/i,0.3,'open subalpine woodland'],
+  [/hardwood|oak|aspen|alder|cottonwood|maple|riparian|deciduous|broadleaf/i,0.1,'hardwood / riparian'],
+  [/shrub|grass|meadow|steppe|prairie|sparse|barren|snow|ice|water|develop|urban|agricultur|crop|pasture|orchard|vineyard|marsh|wetland|bog|fen|quarr|mine|road|burn|rock|talus|scree|dune|beach|salt|alpine/i,0,'not forest'],
+  [/forest|conifer|pine|fir|spruce|hemlock|cedar/i,0.5,'conifer forest']
+];
+function hostOf(name){ if(!name) return null; for(const [re,sc,lab] of HOST_RULES) if(re.test(name)) return {sc,lab}; return {sc:0.3,lab:'other vegetation'}; }
+async function sampleLayer(layer,pts){
+  const out=new Array(pts.length).fill(null); let chunk=1000; let i=0;
+  while(i<pts.length){ const b=pts.slice(i,i+chunk);
+    const body=new URLSearchParams({geometry:JSON.stringify({points:b.map(p=>[+p[1].toFixed(5),+p[0].toFixed(5)]),spatialReference:{wkid:4326}}),geometryType:'esriGeometryMultipoint',returnFirstValueOnly:'true',interpolation:'RSP_NearestNeighbor',f:'json'});
+    let j=null; for(let k=0;k<3&&!j;k++){ try{ const r=await fetch(LF+LFL[layer]+'/ImageServer/getSamples',{method:'POST',body}); const x=await r.json(); if(x.error) throw new Error(x.error.message||'error'); j=x; }catch(err){ if(k===2) throw err; await sleep(1500*(k+1)); } }
+    const smp=j.samples||[]; if(!smp.length) throw new Error('no samples');
+    smp.forEach((sm,k)=>{ const idx=(sm.locationId!=null&&sm.locationId<b.length)?sm.locationId:k; const v=parseFloat(sm.value); out[i+idx]=isNaN(v)?null:v; });
+    if(smp.length<b.length){ chunk=Math.max(50,smp.length); i+=smp.length; } else i+=b.length;
+  }
+  return out;
+}
+function fCanopy(c){ return c<10?0.15:c<25?0.15+0.85*(c-10)/15:c<=75?1:0.85; }
+function fHeight(h){ return h<3?0.05:h<8?0.05+0.45*(h-3)/5:h<15?0.5+0.5*(h-8)/7:1; }
+function vegMult(v){ return v.treeFrac===0?0:clamp(v.treeFrac*fCanopy(v.canopy)*fHeight(v.height)*(v.host==null?1:Math.max(v.host,0.02)),0,1); }
+function vegSummary(evt,evc,evh){
+  let n=0,tree=0,canopy=0,ht=0,host=0,hn=0; const names={};
+  for(let k=0;k<evc.length;k++){ n++; const c=evc[k], h=evh[k], t=evt[k];
+    const isTree=c!=null&&c>=101&&c<=199; if(isTree){ tree++; canopy+=c-100; ht+=(h!=null&&h>=101&&h<=199)?h-100:(h!=null&&h>=1&&h<=100?h:10); }
+    const name=evtNames&&t!=null?evtNames.get(t):null; if(name){ names[name]=(names[name]||0)+1; const hs=hostOf(name); if(isTree||hs.sc===0){ host+=hs.sc; hn++; } } }
+  if(!n) return null;
+  const treeFrac=tree/n, cv=tree?canopy/tree:0, hh=tree?ht/tree:0, hs=hn?host/hn:null;
+  const top=Object.entries(names).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([k,v])=>({name:k,share:v/n,host:hostOf(k)}));
+  const v={treeFrac,canopy:cv,height:hh,host:hs,top}; v.mult=vegMult(v); return v;
+}
+/* sample all three layers for a list of cells; 4 points per cell (quarter points) or 1 for sub-mile cells */
+async function vegFor(entries,perCell){
+  if(PUBLIC_MODE){ for(const e of entries){ const c=cells.get(cellKey(e.lat,e.lon)); if(c&&c.veg){ e.veg=c.veg; applyVeg(e); } } return; }
+  if(vegBroken||!entries.length) return;
+  if(perCell===4){ const rest=[]; for(const e of entries){ const v=vcache.get(key(e.lat,e.lon)); if(v){ e.veg=v; applyVeg(e); } else rest.push(e); } entries=rest; if(!entries.length) return; }
+  const pts=[]; entries.forEach(e=>{ const dl=(e.size||DLAT)/4, dn=(e.lonsize||e.size||DLON)/4; if(perCell===1) pts.push([e.lat,e.lon]); else pts.push([e.lat+dl,e.lon-dn],[e.lat+dl,e.lon+dn],[e.lat-dl,e.lon-dn],[e.lat-dl,e.lon+dn]); });
+  try{
+    const [evt,evc,evh]=await Promise.all([evtNames?sampleLayer('evt',pts):Promise.resolve(pts.map(()=>null)),sampleLayer('evc',pts),sampleLayer('evh',pts)]);
+    vegFails=0; const k=perCell===1?1:4;
+    entries.forEach((e,i)=>{ const v=vegSummary(evt.slice(i*k,i*k+k),evc.slice(i*k,i*k+k),evh.slice(i*k,i*k+k)); if(!v) return; e.veg=v; if(k===4) vcache.set(key(e.lat,e.lon),v); applyVeg(e); });
+  }catch(err){ console.warn('LANDFIRE sampling failed',err); if(++vegFails>=3){ vegBroken=true; vegNote='LANDFIRE vegetation service unreachable — habitat is terrain-only'; } }
+}
+function applyVeg(e){
+  const base=habitat(e.lat,e.lon,e.elev,DOY); const v=e.veg; base.score*=v.mult;
+  if(v.mult===0){ base.zone+=' — no forest'; base.seasonNote=v.treeFrac===0?'LANDFIRE maps no tree cover here':'Vegetation unsuitable'; }
+  else if(v.height<8){ base.elevNote=(base.elevNote?base.elevNote+' · ':'')+'Young regenerating stand ('+Math.round(v.height)+' m) — low odds until it matures'; }
+  else if(v.host!=null&&v.host<0.5){ base.elevNote=(base.elevNote?base.elevNote+' · ':'')+'Weak host forest type here — look for pockets of true fir, spruce or pine'; }
+  e.hab=base; if(e.w) e.A=fullAnalysis(e.w,base); else if(base.score<=0.08) e.A={now:{score:0},fut:[],best:{score:0},fRain:0,hab:base};
+}
+async function getElevAPI(pts,onProgress){ // fallback only — Open-Meteo meters every coordinate
+  const need=pts.filter(p=>!ecache.has(key(p[0],p[1])));
+  for(let i=0;i<need.length;i+=100){ const bb=need.slice(i,i+100); onProgress&&onProgress(null,i/need.length);
+    const j=await fetchJSON(`https://api.open-meteo.com/v1/elevation?latitude=${bb.map(p=>p[0].toFixed(4)).join(',')}&longitude=${bb.map(p=>p[1].toFixed(4)).join(',')}`);
+    bb.forEach((p,k)=>ecache.set(key(p[0],p[1]),j.elevation[k])); await sleep(150); }
+  return pts.map(p=>ecache.get(key(p[0],p[1])));
+}
+async function getElev(pts,onProgress){
+  if(tilesBroken) return getElevAPI(pts,onProgress);
+  const need=pts.filter(p=>!ecache.has(key(p[0],p[1])));
+  if(need.length){
+    const byTile=new Map();
+    for(const p of need){ const t=tileXY(p[0],p[1],ELEV_Z); const tx=Math.floor(t.x),ty=Math.floor(t.y); const k=tx+','+ty; if(!byTile.has(k)) byTile.set(k,{tx,ty,pts:[]}); byTile.get(k).pts.push({p,px:Math.min(255,Math.floor((t.x-tx)*256)),py:Math.min(255,Math.floor((t.y-ty)*256))}); }
+    const tiles=[...byTile.values()]; let done=0, fails=0;
+    const worker=async()=>{ while(tiles.length){ const t=tiles.shift(); try{ const d=await loadTile(ELEV_Z,t.tx,t.ty);
+        for(const q of t.pts){ const i=(q.py*256+q.px)*4; ecache.set(key(q.p[0],q.p[1]),d[i]*256+d[i+1]+d[i+2]/256-32768); } }
+      catch(err){ fails++; console.warn('tile failed',err); }
+      done++; onProgress&&onProgress(null,done/(done+tiles.length)); } };
+    await Promise.all([worker(),worker(),worker(),worker(),worker(),worker()]);
+    if(fails&&fails>=done){ tilesBroken=true; console.warn('terrain tiles unreachable — falling back to elevation API'); return getElevAPI(pts,onProgress); }
+    const missing=need.filter(p=>ecache.get(key(p[0],p[1]))==null);
+    if(missing.length&&!apiBlocked){ try{ await getElevAPI(missing.slice(0,2000)); }catch(err){ console.warn('elevation fallback failed',err); } }
+  }
+  return pts.map(p=>ecache.get(key(p[0],p[1])));
+}
+async function fetchWeather(pts){
+  const vars=['precipitation_sum','temperature_2m_max','temperature_2m_min','et0_fao_evapotranspiration','snowfall_sum'];
+  const u=v=>`https://api.open-meteo.com/v1/forecast?latitude=${pts.map(p=>p[0].toFixed(3)).join(',')}&longitude=${pts.map(p=>p[1].toFixed(3)).join(',')}&daily=${v.join(',')}&past_days=${PAST_DAYS}&forecast_days=${FC_DAYS}&timezone=America%2FLos_Angeles`;
+  let j;
+  try{ j=await fetchJSON(u(RH_OK?[...vars,'relative_humidity_2m_mean']:vars)); }
+  catch(err){ if(RH_OK&&err.status===400){ RH_OK=false; j=await fetchJSON(u(vars)); } else throw err; }
+  if(!Array.isArray(j)) j=[j];
+  const today=localISO(new Date());
+  return j.map(x=>{ const d=x.daily; let ti=d.time.indexOf(today); if(ti<0) ti=Math.min(PAST_DAYS,d.time.length-1);
+    return {time:d.time,p:d.precipitation_sum.map(v=>v??0),tmax:d.temperature_2m_max,tmin:d.temperature_2m_min,et0:d.et0_fao_evapotranspiration||[],snow:d.snowfall_sum||[],rh:d.relative_humidity_2m_mean||null,today:ti,elev:x.elevation}; });
+}
+let lastFailed=0;
+async function getWeather(anchors,onProgress){
+  const need=anchors.filter(a=>{const e=wcache.get(key(a[0],a[1])); return !e||e.failed;});
+  const B=50; let done=0;
+  for(let i=0;i<need.length;i+=B){ const c=need.slice(i,i+B); let ws=null;
+    try{ ws=await fetchWeather(c); }catch(err){ console.warn('weather batch failed',err); if(err.blocked||apiBlocked){ c.forEach(a=>{ if(!wcache.get(key(a[0],a[1]))?.w) lastFailed++; }); break; } }
+    c.forEach((a,k)=>{ if(ws&&ws[k]) wcache.set(key(a[0],a[1]),{w:ws[k]}); else { wcache.set(key(a[0],a[1]),{failed:true}); lastFailed++; } });
+    done+=c.length; onProgress&&onProgress(`Weather ${done} of ${need.length} anchor points…`,0.3+0.7*done/need.length);
+    if(i+B<need.length) await sleep(250); }
+  return anchors.map(a=>{const e=wcache.get(key(a[0],a[1])); return e&&e.w?e.w:null;});
+}
+const DOY=doyOf(new Date());
+/* terrain: slope & aspect from an elevation grid */
+function terrainAt(getE,lat,lon,d,dl){
+  dl=dl??d;
+  const eN=getE(lat+d,lon),eS=getE(lat-d,lon),eE=getE(lat,lon+dl),eW=getE(lat,lon-dl),e0=getE(lat,lon);
+  if(e0==null) return {slope:0,aspect:null};
+  const my=d*111320, mx=dl*111320*Math.cos(lat*Math.PI/180);
+  const dzdy=(eN!=null&&eS!=null)?(eN-eS)/(2*my):(eN!=null?(eN-e0)/my:(eS!=null?(e0-eS)/my:0));
+  const dzdx=(eE!=null&&eW!=null)?(eE-eW)/(2*mx):(eE!=null?(eE-e0)/mx:(eW!=null?(e0-eW)/mx:0));
+  const slope=Math.atan(Math.hypot(dzdx,dzdy))*180/Math.PI;
+  let aspect=slope<1.5?null:(Math.atan2(-dzdx,-dzdy)*180/Math.PI+360)%360; // direction the slope faces
+  return {slope,aspect};
+}
+const compass=a=>a==null?'flat':['N','NE','E','SE','S','SW','W','NW'][Math.round(a/45)%8];
+/* adjust anchor weather to a specific elevation + aspect */
+function adjustWeather(w,elev,terr){
+  const dz=elev-(w.elev??elev); const dT=-LAPSE*dz;
+  const sw=terr?clamp(terr.slope/15,0,1):0; const north=terr&&terr.aspect!=null?Math.cos(terr.aspect*Math.PI/180):0; // +1 north, -1 south
+  const tAsp= -1.0*north*sw;              // south faces run warmer, north cooler (°C)
+  const etMul= 1-0.18*north*sw;           // north slopes lose less water, south more
+  return {time:w.time,today:w.today,p:w.p,snow:w.snow,rh:w.rh,elev:elev,
+    tmax:w.tmax.map(t=>t==null?t:t+dT+tAsp*1.4), tmin:w.tmin.map(t=>t==null?t:t+dT+tAsp*0.6),
+    et0:w.et0.map(v=>(v??3)*etMul), meta:{dz,dT,tAsp,etMul,anchorElev:w.elev}};
+}
+function makeEntry(lat,lon,size,elev,terr,w){
+  const hab=habitat(lat,lon,elev,DOY);
+  const e={lat,lon,size,elev,terr,hab,veg:null,w:null,A:null,failed:false};
+  if(hab.score<=0.08&&everHabitat(lat,lon,elev)<=0.08){ e.A={now:{score:0},fut:[],best:{score:0},fRain:0,hab}; return e; }
+  if(!w){ e.failed=true; return e; }
+  e.w=adjustWeather(w,elev,terr); e.A=hab.score<=0.08?{now:{score:0},fut:[],best:{score:0},fRain:0,hab}:fullAnalysis(e.w,hab); return e;
+}
+const snapAnchor=(lat,lon,sp)=>[Math.floor(lat/sp)*sp+sp/2,Math.floor(lon/sp)*sp+sp/2];
+/* build a grid of cells: elevation per cell, terrain from neighbours, weather from anchors */
+async function buildCells(pts,size,anchorSp,onProgress){
+  waitNote=t=>onProgress&&onProgress(t,null);
+  onProgress&&onProgress('Reading terrain…',0.05);
+  const el=await getElev(pts);
+  const getE=(la,lo)=>ecache.get(key(la,lo));
+  const habs=pts.map((p,i)=>habitat(p[0],p[1],el[i],DOY));
+  const anchorsSet=new Map(); pts.forEach((p,i)=>{ if(habs[i].score>0.08){ const a=anchorSp?snapAnchor(p[0],p[1],anchorSp):p; anchorsSet.set(key(a[0],a[1]),a);} });
+  const anchors=[...anchorsSet.values()];
+  lastFailed=0; const ws=await getWeather(anchors,onProgress);
+  const wByKey=new Map(); anchors.forEach((a,i)=>wByKey.set(key(a[0],a[1]),ws[i]));
+  const entries=pts.map((p,i)=>{ const a=anchorSp?snapAnchor(p[0],p[1],anchorSp):p; const terr=terrainAt(getE,p[0],p[1],size); const e=makeEntry(p[0],p[1],size,el[i],terr,wByKey.get(key(a[0],a[1]))||null); e.lonsize=size; return e; });
+  await vegFor(entries.filter(e=>everHabitat(e.lat,e.lon,e.elev)>0.08),1);
+  return entries;
+}
+/* one exact point: 5 elevation samples for slope/aspect + weather for that point */
+async function pointEntry(lat,lon,onProgress){
+  waitNote=t=>onProgress&&onProgress(t,null);
+  const d=0.0015; const pts=[[lat,lon],[lat+d,lon],[lat-d,lon],[lat,lon+d],[lat,lon-d]];
+  const el=await getElev(pts); const getE=(la,lo)=>ecache.get(key(la,lo));
+  const terr=terrainAt(getE,lat,lon,d);
+  const hab=habitat(lat,lon,el[0],DOY);
+  let w=null;
+  if(PUBLIC_MODE||weatherAsOf){ const a=snapAnchor(lat,lon,ANCHOR); const wa=wcache.get(key(a[0],a[1])); w=wa&&wa.w?wa.w:null; }
+  else if(hab.score>0.08){ lastFailed=0; [w]=await getWeather([[lat,lon]],onProgress); }
+  const e=makeEntry(lat,lon,DLAT/3,el[0],terr,w); e.lonsize=DLON/3;
+  await vegFor([e],4);
+  return e;
+}
+
+/* ===================== MAP ===================== */
+const map=L.map('map',{zoomControl:false,attributionControl:true}).setView([47.4,-121.2],7);
+const bases={
+  topo:L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',{maxZoom:17,attribution:'© OpenStreetMap, SRTM | OpenTopoMap'}),
+  usgs:L.tileLayer('https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}',{maxZoom:16,attribution:'USGS'}),
+  sat:L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:18,attribution:'Esri, Maxar, Earthstar'})
+};
+const baseOrder=['topo','usgs','sat']; let baseIdx=0; bases.topo.addTo(map);
+let marker=null, userLoc=null, fineBounds=null, fineEntries=[];
+let T=0; // selected forecast day 0..7
+const cells=new Map();       // 1-sq-mi cells: cellKey -> entry
+const cellKey=(la,lo)=>Math.floor(la/DLAT+1e-9)+':'+Math.floor(lo/DLON+1e-9);
+const cellCenter=(i,j)=>[+((i+0.5)*DLAT).toFixed(5),+((j+0.5)*DLON).toFixed(5)];
+
+/* ---- overlays ---- */
+const OVERLAYS={
+  chance:{name:'Chance of king boletes',sub:'Scored for the selected day',order:4,
+    bands:[[25,'Medium','#e2c452'],[45,'Good','#e58a2b'],[65,'High','#d6432c'],[80,'Very high','#8a1a30']],
+    val:e=>{if(e.failed)return null; const x=e.A&&e.A.fut&&e.A.fut[Math.min(T,e.A.fut.length-1)]; return x?x.score:(e.A?0:null);}},
+  habitat:{name:'Habitat quality',sub:'Host trees, elevation band, season',order:1,
+    bands:[[0.08,'Fair','#7f8a4a'],[0.4,'Good','#4f8a3f'],[0.65,'Very good','#2b6b3a'],[0.85,'Best','#134d2c']],
+    val:e=>e.hab?e.hab.score:null},
+  rain:{name:'Rain, trailing 7 days',sub:'Through the selected day (inches)',order:2,
+    bands:[[2.5,'0.1"','#a9c7e0'],[10,'0.4"','#6fa5cc'],[25,'1"','#3a7fb5'],[50,'2"+','#1f4f8a']],
+    val:e=>{const x=e.A&&e.A.fut&&e.A.fut[Math.min(T,e.A.fut.length-1)]; return x?x.rain7:null;}},
+  soil:{name:'Soil moisture',sub:'Bucket model, selected day',order:3,
+    bands:[[0.15,'Dry','#c9b27a'],[0.35,'Damp','#a58c58'],[0.6,'Moist','#7a6a3c'],[0.85,'Wet','#4a4a2a']],
+    val:e=>{const x=e.A&&e.A.fut&&e.A.fut[Math.min(T,e.A.fut.length-1)]; return x?x.M:null;}}
+};
+const active=new Set(['chance']);
+function bandFor(ov,v){ let b=null; for(const x of ov.bands) if(v>=x[0]) b=x; return b; }
+
+/* ---- single canvas for all cells ---- */
+const CellCanvas=L.Layer.extend({
+  onAdd(m){ this._m=m; const c=this._c=L.DomUtil.create('canvas','leaflet-zoom-hide'); c.style.position='absolute'; c.style.pointerEvents='none'; m.getPanes().overlayPane.appendChild(c); m.on('moveend zoomend viewreset resize',this._reset,this); this._reset(); },
+  onRemove(m){ m.getPanes().overlayPane.removeChild(this._c); m.off('moveend zoomend viewreset resize',this._reset,this); },
+  _reset(){ const m=this._m,sz=m.getSize(),r=window.devicePixelRatio||1; L.DomUtil.setPosition(this._c,m.containerPointToLayerPoint([0,0])); this._c.width=sz.x*r; this._c.height=sz.y*r; this._c.style.width=sz.x+'px'; this._c.style.height=sz.y+'px'; this.draw(); },
+  draw(){ const m=this._m; if(!m) return; const ctx=this._c.getContext('2d'),r=window.devicePixelRatio||1; ctx.setTransform(r,0,0,r,0,0); const sz=m.getSize(); ctx.clearRect(0,0,sz.x,sz.y);
+    const vb=m.getBounds().pad(0.02); const n=active.size; const order=[...active].sort((a,b)=>OVERLAYS[a].order-OVERLAYS[b].order);
+    const rect=(e,dlat,dlon,col,op)=>{ const p1=m.latLngToContainerPoint([e.lat+dlat/2,e.lon-dlon/2]), p2=m.latLngToContainerPoint([e.lat-dlat/2,e.lon+dlon/2]); ctx.globalAlpha=op; ctx.fillStyle=col; ctx.fillRect(p1.x,p1.y,Math.max(1,p2.x-p1.x),Math.max(1,p2.y-p1.y)); };
+    for(const k of order){ const ov=OVERLAYS[k]; const op=n>1?0.4:(k==='chance'?0.65:0.5);
+      for(const e of cells.values()){ if(e.lat<vb.getSouth()||e.lat>vb.getNorth()||e.lon<vb.getWest()||e.lon>vb.getEast()) continue; if(fineEntries.length&&fineBounds.contains([e.lat,e.lon])) continue; const v=ov.val(e); if(v==null) continue; const bd=bandFor(ov,v); if(!bd) continue; rect(e,DLAT,DLON,bd[2],op); }
+      for(const e of fineEntries){ const v=ov.val(e); if(v==null) continue; const bd=bandFor(ov,v); if(!bd) continue; rect(e,e.size,e.lonsize||e.size,bd[2],op); } }
+    ctx.globalAlpha=1; }
+});
+const cellLayer=new CellCanvas().addTo(map);
+function renderAll(){ cellLayer.draw(); renderLegends(); }
+function renderLegends(){ $('legends').innerHTML=[...active].sort((a,b)=>OVERLAYS[a].order-OVERLAYS[b].order).map(k=>{const ov=OVERLAYS[k];return `<div class="lg"><b>${ov.name}</b>`+ov.bands.map(x=>`<span><i style="background:${x[2]}"></i>${x[1]}</span>`).join('')+`</div>`;}).join(''); }
+function buildLayersMenu(){ $('layers').innerHTML=Object.keys(OVERLAYS).sort((a,b)=>OVERLAYS[a].order-OVERLAYS[b].order).reverse().map(k=>{const ov=OVERLAYS[k];return `<label><input type="checkbox" data-k="${k}" ${active.has(k)?'checked':''}><i style="background:${ov.bands[Math.floor(ov.bands.length/2)][2]}"></i><span>${ov.name}<small>${ov.sub}</small></span></label>`;}).join('');
+  $('layers').querySelectorAll('input').forEach(inp=>inp.onchange=()=>{ if(inp.checked) active.add(inp.dataset.k); else active.delete(inp.dataset.k); renderAll(); }); }
+
+/* ---- timeline ---- */
+let playing=false, playTimer=null;
+function dayISO(t){ const d=new Date(); d.setDate(d.getDate()+t); return localISO(d); }
+function setDay(t){ T=clamp(t,0,7); $('slider').value=T; const iso=dayISO(T); $('day-lbl').textContent=fmtDay(iso); $('day-tag').textContent=T===0?'Today':T===1?'Tomorrow':`+${T} days`; $('ticks').querySelectorAll('span').forEach((el,i)=>el.classList.toggle('on',i===T)); renderAll(); }
+function stopPlay(){ playing=false; clearInterval(playTimer); $('play').innerHTML='<svg viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg>'; }
+function togglePlay(){ if(playing){stopPlay();return;} playing=true; $('play').innerHTML='<svg viewBox="0 0 24 24"><rect x="5" y="4" width="5" height="16" rx="1"/><rect x="14" y="4" width="5" height="16" rx="1"/></svg>'; if(T>=7) setDay(0); playTimer=setInterval(()=>{ if(T>=7){ stopPlay(); return; } setDay(T+1); },1100); }
+$('ticks').innerHTML=[0,1,2,3,4,5,6,7].map(t=>`<span>${t===0?'Now':shortDay(dayISO(t))}</span>`).join('');
+$('slider').oninput=e=>{ stopPlay(); setDay(+e.target.value); };
+$('play').onclick=togglePlay;
+buildLayersMenu(); setDay(0);
+
+function gridPts(b,size){ const pts=[]; const la0=Math.floor(b.getSouth()/size)*size, lo0=Math.floor(b.getWest()/size)*size; for(let la=la0;la<=b.getNorth();la+=size) for(let lo=lo0;lo<=b.getEast();lo+=size){ const lat=+(la+size/2).toFixed(4), lon=+(lo+size/2).toFixed(4); if(inWA(lat,lon)) pts.push([lat,lon]); } return pts; }
+
+function progress(txt,frac){ const p=$('prog'); if(txt==null&&frac==null){p.style.display='none';return;} p.style.display='block'; if(txt!=null) $('prog-txt').textContent=txt; if(frac!=null) $('prog-bar').style.width=Math.round(frac*100)+'%'; }
+function setStatus(t){ $('status').textContent=t; }
+
+/* ===================== STATIC DATA (baked cells + daily weather file) ===================== */
+const STATIC={cells:null,weather:null,tried:false}; let weatherAsOf=null;
+async function tryStatic(){
+  if(STATIC.tried) return; STATIC.tried=true;
+  try{ const r=await fetch('data/cells.json',{cache:'no-cache'}); if(r.ok) STATIC.cells=await r.json(); }catch(_){}
+  try{ const r=await fetch('data/weather.json',{cache:'no-cache'}); if(r.ok) STATIC.weather=await r.json(); }catch(_){}
+  if(STATIC.weather) ingestWeather(STATIC.weather);
+}
+function ingestWeather(j){
+  const today=localISO(new Date()); let ti=j.time.indexOf(today);
+  if(ti<0){ ti=today>j.time[j.time.length-1]?j.time.length-1:Math.min(j.past_days,j.time.length-1); }
+  j.anchors.forEach(a=>{ wcache.set(key(a.lat,a.lon),{w:{time:j.time,p:a.p.map(v=>v??0),tmax:a.tmax,tmin:a.tmin,et0:a.et0||[],snow:a.snow||[],rh:a.rh||null,today:ti,elev:a.elev}}); });
+  weatherAsOf=new Date(j.generated);
+}
+function weatherAgeNote(){ if(!weatherAsOf) return ''; const h=(Date.now()-weatherAsOf)/3600000; const when=weatherAsOf.toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'}); return h>36?` · weather file is ${Math.round(h/24)} days old (${when})`:` · weather as of ${when}`; }
+async function loadFromStatic(gen){
+  const j=STATIC.cells; const names=j.names||[];
+  progress(`Loading ${j.rows.length.toLocaleString()} baked square-mile cells…`,0.1);
+  const need=new Map();
+  j.rows.forEach(r=>{ const a=snapAnchor(r[0],r[1],ANCHOR); const k=key(a[0],a[1]); const e=wcache.get(k); if(!e||!e.w) need.set(k,a); });
+  const totalA=new Set(j.rows.map(r=>{const a=snapAnchor(r[0],r[1],ANCHOR); return key(a[0],a[1]);})).size;
+  if(need.size){ if(PUBLIC_MODE){ if(need.size>totalA*0.2) apiBlocked=weatherAsOf?'data/weather.json does not cover most cells — ask the site owner to re-run the weather update':'data/weather.json is missing — ask the site owner to run the weather update'; } else { progress(`Fetching weather for ${need.size} anchors (no weather file found)…`,0.2); await getWeather([...need.values()],(t)=>{ if(t&&/limit|pausing/i.test(t)) progress(t,null); }); } }
+  if(gen!==loadGen) return;
+  let i=0;
+  for(const r of j.rows){
+    const [lat,lon,elev,slope,aspect,vg]=r; ecache.set(key(lat,lon),elev);
+    const terr={slope,aspect:aspect<0?null:aspect};
+    const a=snapAnchor(lat,lon,ANCHOR); const wa=wcache.get(key(a[0],a[1])); const w=wa&&wa.w?wa.w:null;
+    const e=makeEntry(lat,lon,DLAT,elev,terr,w); e.lonsize=DLON;
+    if(vg){ const top=(vg[4]||[]).map(([ni,sh])=>({name:names[ni],share:sh,host:hostOf(names[ni])})); const v={treeFrac:vg[0],canopy:vg[1],height:vg[2],host:vg[3]<0?null:vg[3],top}; v.mult=vegMult(v); e.veg=v; vcache.set(key(lat,lon),v); applyVeg(e); }
+    cells.set(cellKey(lat,lon),e);
+    if(++i%4000===0){ progress(`Loading baked cells… ${i.toLocaleString()}`,0.2+0.8*i/j.rows.length); renderAll(); await sleep(0); }
+  }
+}
+function download(name,text){ const b=new Blob([text],{type:'application/json'}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(u); a.remove();},2000); }
+function exportCells(){
+  const names=[]; const idx=n=>{ let i=names.indexOf(n); if(i<0){ names.push(n); i=names.length-1; } return i; }; const rows=[];
+  for(const e of cells.values()){ if(e.elev==null||isNaN(e.elev)||e.size!==DLAT) continue; const v=e.veg;
+    rows.push([+e.lat.toFixed(5),+e.lon.toFixed(5),Math.round(e.elev),e.terr?+e.terr.slope.toFixed(1):0,e.terr&&e.terr.aspect!=null?Math.round(e.terr.aspect):-1,
+      v?[+v.treeFrac.toFixed(2),Math.round(v.canopy),+v.height.toFixed(1),v.host==null?-1:+v.host.toFixed(2),v.top.map(t=>[idx(t.name),+t.share.toFixed(2)])]:null]); }
+  download('cells.json',JSON.stringify({version:1,generated:new Date().toISOString(),dlat:DLAT,dlon:DLON,anchor:ANCHOR,names,rows}));
+  return rows.length;
+}
+function exportWeather(){
+  const anchors=[]; let time=null; const r1=a=>(a||[]).map(v=>v==null?null:Math.round(v*10)/10);
+  for(const [k,v] of wcache){ if(!v.w) continue; const [lat,lon]=k.split(',').map(Number); time=time||v.w.time; anchors.push({lat,lon,elev:v.w.elev,p:r1(v.w.p),tmax:r1(v.w.tmax),tmin:r1(v.w.tmin),et0:r1(v.w.et0),snow:r1(v.w.snow),rh:v.w.rh?v.w.rh.map(x=>x==null?null:Math.round(x)):null}); }
+  download('weather.json',JSON.stringify({generated:new Date().toISOString(),past_days:PAST_DAYS,forecast_days:FC_DAYS,time,anchors}));
+  return anchors.length;
+}
+
+/* ===================== STATEWIDE LOAD: terrain -> rank -> stream 1-mi cells best-first ===================== */
+let loading=false, queue=[], totalAnchors=0, doneAnchors=0, loadGen=0, vegQueue=[], vegDone=0, anchorGroups=[];
+async function vegWorker(gen){ while(gen===loadGen&&(queue.length||vegQueue.length||loading)){ if(!vegQueue.length){ await sleep(400); continue; } let batch=[]; while(vegQueue.length&&batch.length<240) batch=batch.concat(vegQueue.shift()); await vegFor(batch,4); vegDone+=batch.length; if(gen===loadGen){ renderAll(); statusLine(true); } } }
+async function loadState(){
+  if(loading) return; loading=true; $('btn-refresh').disabled=true; const gen=++loadGen;
+  cells.clear(); fineEntries=[]; fineBounds=null; queue=[]; vegQueue=[]; vegDone=0; renderAll();
+  try{
+    await tryStatic();
+    if(STATIC.cells){ await loadFromStatic(gen); if(gen!==loadGen) return; progress(null,null); renderAll(); statusLine(); loading=false; $('btn-refresh').disabled=false; return; }
+    if(PUBLIC_MODE) throw new Error('data/cells.json not found — public mode needs the baked cell file');
+    if(!evtNames&&!vegBroken) await loadEvtNames();
+    const vegRun=vegWorker(gen); Promise.all([vegRun,vegWorker(gen)]).catch(()=>{});
+    // stage 1: 5 terrain samples per block (~2.8 x 2.6 mi) -> habitat; blocks with no habitat are dropped
+    progress('Reading terrain tiles across Washington…',0.02); waitNote=t=>progress(t,null);
+    const centres=[]; const I0=Math.floor(45.5/BLAT),I1=Math.ceil(49.0/BLAT),J0=Math.floor(-124.8/BLON),J1=Math.ceil(-116.9/BLON);
+    for(let I=I0;I<=I1;I++) for(let J=J0;J<=J1;J++){ const lat=+((I*BLK+2)*DLAT).toFixed(5), lon=+((J*BLK+2)*DLON).toFixed(5); if(inWA(lat,lon)) centres.push({I,J,lat,lon}); }
+    const samp=[]; centres.forEach(c=>{ samp.push([c.lat,c.lon],[c.lat+DLAT,c.lon+DLON],[c.lat-DLAT,c.lon-DLON],[c.lat+DLAT,c.lon-DLON],[c.lat-DLAT,c.lon+DLON]); });
+    const el=await getElev(samp,(t,f)=>progress('Reading terrain tiles across Washington…',0.02+0.12*f));
+    if(gen!==loadGen) return;
+    const blocks=[]; centres.forEach((c,i)=>{ let best=null,bs=-1; for(let k=0;k<5;k++){ const sc=everHabitat(samp[i*5+k][0],samp[i*5+k][1],el[i*5+k]); if(sc>bs){ bs=sc; best=habitat(samp[i*5+k][0],samp[i*5+k][1],el[i*5+k],DOY); } } if(bs>0.08) blocks.push({...c,elev:el[i*5],hab:best,pri:bs}); });
+    // stage 2: group blocks under 14-mi weather anchors, order by habitat strength; viewport jumps the queue
+    const byA=new Map(); blocks.forEach(b=>{ const a=snapAnchor(b.lat,b.lon,ANCHOR); const k=key(a[0],a[1]); if(!byA.has(k)) byA.set(k,{a,blocks:[],pri:0}); const g=byA.get(k); g.blocks.push(b); g.pri+=b.pri; });
+    anchorGroups=[...byA.values()]; queue=anchorGroups.slice().sort((x,y)=>y.pri-x.pri); totalAnchors=queue.length; doneAnchors=0; lastFailed=0;
+    progress(`Loading weather for ${totalAnchors} anchor points, best habitat first…`,0.15);
+    // stage 3: fetch weather per anchor batch, then score every square mile under those anchors
+    while(queue.length&&gen===loadGen){
+      const batch=nextChunk(50);
+      const ws=await getWeather(batch.map(g=>g.a),(t,f)=>{ if(t&&/limit|pausing|rate/i.test(t)) progress(t,null); });
+      if(gen!==loadGen) return;
+      for(let i=0;i<batch.length;i++){ await scoreBlocks(batch[i].blocks,ws[i]); }
+      doneAnchors+=batch.length;
+      progress(`Scoring square miles — ${doneAnchors} of ${totalAnchors} weather anchors done${apiBlocked?' (weather blocked)':''}`,0.15+0.85*doneAnchors/totalAnchors);
+      renderAll(); statusLine(true);
+      if(apiBlocked) break;
+    }
+    if(gen!==loadGen) return;
+    // retry passes: anchors whose weather was refused, and cells whose terrain didn't read
+    for(let pass=0;pass<3&&gen===loadGen&&!apiBlocked;pass++){
+      const bad=anchorGroups.filter(g=>{const e=wcache.get(key(g.a[0],g.a[1])); return !e||!e.w;});
+      const noTerrain=[...cells.values()].filter(e=>e.elev==null||isNaN(e.elev));
+      if(!bad.length&&!noTerrain.length) break;
+      progress(`Retrying ${bad.length} weather anchors and ${noTerrain.length} cells with missing terrain (pass ${pass+1})…`,null);
+      await sleep(pass?25000:8000); if(gen!==loadGen) return;
+      if(noTerrain.length){ noTerrain.forEach(e=>ecache.delete(key(e.lat,e.lon))); }
+      lastFailed=0; const ws=bad.length?await getWeather(bad.map(g=>g.a),(t)=>{ if(t&&/limit|pausing/i.test(t)) progress(t,null); }):[];
+      for(let i=0;i<bad.length;i++){ if(ws[i]) await scoreBlocks(bad[i].blocks,ws[i]); }
+      if(noTerrain.length){ const byBlock=new Map(); noTerrain.forEach(e=>{ const g=anchorGroups.find(g=>g.blocks.some(b=>Math.abs(b.lat-e.lat)<=BLAT/2+1e-6&&Math.abs(b.lon-e.lon)<=BLON/2+1e-6)); if(g){ const w=wcache.get(key(g.a[0],g.a[1])); g.blocks.forEach(b=>{ if(Math.abs(b.lat-e.lat)<=BLAT/2+1e-6&&Math.abs(b.lon-e.lon)<=BLON/2+1e-6) byBlock.set(b.I+':'+b.J,{b,w:w&&w.w||null}); }); } });
+        for(const {b,w} of byBlock.values()) await scoreBlocks([b],w); }
+      renderAll(); statusLine(true);
+    }
+    while(vegQueue.length&&gen===loadGen&&!vegBroken){ progress(`Checking vegetation (LANDFIRE) — ${vegDone.toLocaleString()} cells done`,null); await sleep(600); }
+    if(gen!==loadGen) return;
+    progress(null,null); statusLine();
+  }catch(err){ console.error(err); setStatus(apiBlocked||('Load failed: '+(err.message||'check connection')+' — refresh to retry')); progress(null,null); renderAll(); }
+  loading=false; $('btn-refresh').disabled=false;
+}
+function nextChunk(n){
+  const vb=map.getBounds().pad(0.1); const out=[];
+  for(let i=0;i<queue.length&&out.length<n;i++){ const g=queue[i]; if(g.blocks.some(b=>vb.contains([b.lat,b.lon]))){ out.push(...queue.splice(i,1)); i--; } }
+  while(out.length<n&&queue.length) out.push(queue.shift());
+  return out;
+}
+async function scoreBlocks(blocks,w){
+  const pts=[]; blocks.forEach(b=>{ for(let i=0;i<BLK;i++) for(let j=0;j<BLK;j++){ const c=cellCenter(b.I*BLK+i,b.J*BLK+j); if(inWA(c[0],c[1])) pts.push(c); } });
+  try{
+    const el=await getElev(pts); const getE=(la,lo)=>ecache.get(key(la,lo));
+    const habs=pts.map((p,i)=>habitat(p[0],p[1],el[i],DOY));
+    const made=[];
+    pts.forEach((p,i)=>{ if(everHabitat(p[0],p[1],el[i])<=0.08) return;
+      const terr=terrainAt(getE,p[0],p[1],DLAT,DLON); const e=makeEntry(p[0],p[1],DLAT,el[i],terr,w); e.lonsize=DLON; cells.set(cellKey(p[0],p[1]),e); made.push(e); });
+    if(made.length) vegQueue.push(made);
+  }catch(err){ console.warn('block scoring failed',err); }
+}
+function statusLine(partial){
+  let med=0,tot=0,miss=0; for(const e of cells.values()){ if(e.A&&!e.failed){ tot++; if(e.A.now.score>=25) med++; } else miss++; }
+  const t=new Date().toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+  if(apiBlocked){ setStatus(`${apiBlocked} · habitat layer still works · ${t}`); return; }
+  const vn=vegNote?' · '+vegNote:(partial&&vegQueue.length?' · vegetation check pending for '+vegQueue.reduce((a,b)=>a+b.length,0).toLocaleString()+' cells':'');
+  setStatus(`${new Date().toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'})} · ${med.toLocaleString()} sq mi at medium+ of ${tot.toLocaleString()} scored${partial?' · loading (paced to stay under the weather API limit)':''}${miss?' · '+miss.toLocaleString()+' cells missing weather'+(partial?'':' — tap refresh to retry'):''}${vn}${weatherAgeNote()} · ${t}`);
+}
+
+/* ---- local sub-mile refine when zoomed way in ---- */
+let refineTimer=null, refining=false, refinePending=false, lastRefineZoom=null;
+function pickSize(b){ for(const sz of FINE_SIZES){ if(gridPts(b,sz).length<=FINE_CAP) return sz; } return null; }
+async function refine(){
+  if(refining){ refinePending=true; return; }
+  const b=map.getBounds().pad(0.05); const sz=pickSize(b); if(!sz) return;
+  refining=true; try{ const pts=gridPts(b,sz); fineEntries=await buildCells(pts,sz,ANCHOR,()=>{}); fineBounds=b; renderAll(); }
+  catch(err){ console.error(err); }
+  refining=false; if(refinePending){ refinePending=false; refine(); }
+}
+map.on('moveend zoomend',()=>{ clearTimeout(refineTimer); const z=map.getZoom(); $('btn-refine').style.display=z>=12?'grid':'none';
+  if(z>=12){ refineTimer=setTimeout(()=>{ if(!fineBounds||!fineBounds.contains(map.getBounds())||map.getZoom()!==lastRefineZoom){ lastRefineZoom=map.getZoom(); refine(); } },800); }
+  else if(fineEntries.length){ fineEntries=[]; fineBounds=null; renderAll(); } });
+
+/* ---- tap: show the cell instantly; exact-point forecast on request ---- */
+async function exactPoint(lat,lon){
+  openSheet('Checking this exact spot…',''); $('sheet-body').innerHTML='<div class="empty">Reading elevation, slope and aspect, then 30 days of weather and the forecast for this precise point.</div>';
+  try{ const e=await pointEntry(+lat.toFixed(4),+lon.toFixed(4)); if(!e||e.failed) throw 0; e.exact=true; showPoint(e); }
+  catch(err){ $('sheet-body').innerHTML=`<div class="empty">${apiBlocked?apiBlocked+'. The free quota resets on a daily cycle — try again later today or tomorrow morning.':'Could not load weather for this point ('+(err&&err.message||'no response')+'). Tap again in a minute.'}</div>`; }
+}
+map.on('click',ev=>{ if($('layers').classList.contains('open')){$('layers').classList.remove('open');return;} const {lat,lng}=ev.latlng; if(!inWA(lat,lng)){setStatus('Outside Washington');return;}
+  if(marker) marker.remove(); marker=L.circleMarker([lat,lng],{radius:7,color:'#fff',weight:2,fillColor:'#b8742c',fillOpacity:1}).addTo(map);
+  let e=null; if(fineEntries.length&&fineBounds&&fineBounds.contains([lat,lng])) e=fineEntries.find(x=>Math.abs(x.lat-lat)<=x.size/2&&Math.abs(x.lon-lng)<=(x.lonsize||x.size)/2);
+  if(!e) e=cells.get(cellKey(lat,lng));
+  if(e&&e.A&&!e.failed){ e.tap=[lat,lng]; showPoint(e); } else exactPoint(lat,lng);
+});
+
+/* ===================== SHEET ===================== */
+const sheet=$('sheet');
+function openSheet(title,sub,tall){ $('sh-title').innerHTML=title; $('sh-sub').textContent=sub; sheet.classList.toggle('tall',!!tall); sheet.classList.add('open'); document.body.classList.add('sheet-open'); $('sheet-body').scrollTop=0; }
+function closeSheet(){ sheet.classList.remove('open'); document.body.classList.remove('sheet-open'); }
+$('close').onclick=closeSheet;
+$('grab').onclick=()=>sheet.classList.toggle('tall');
+let ty=null; sheet.addEventListener('touchstart',e=>{ty=e.touches[0].clientY},{passive:true}); sheet.addEventListener('touchend',e=>{ if(ty==null)return; const dy=e.changedTouches[0].clientY-ty; if(dy>70&&$('sheet-body').scrollTop<=0) { if(sheet.classList.contains('tall')) sheet.classList.remove('tall'); else closeSheet(); } else if(dy<-70) sheet.classList.add('tall'); ty=null; },{passive:true});
+
+function bar(k,v,note){ return `<div class="k">${k}</div><div class="bg"><b style="width:${Math.round(v*100)}%"></b></div><div class="v">${Math.round(v*100)}</div>`; }
+function showPoint(e){
+  const A=e.A, hab=e.hab, s=A?Math.round(A.now.score):0; const col=colorOf(s)||'#6b7a6a';
+  const title=`${hab.zone}`;
+  const tr=e.terr? (e.terr.aspect==null?' · flat':` · ${compass(e.terr.aspect)}-facing, ${Math.round(e.terr.slope)}° slope`):'';
+  const what=e.exact?'Exact point':(e.size&&e.size<DLAT?`${(e.size*69).toFixed(1)} mi cell`:'1 sq mi cell');
+  const sub=`${what} · ${ft(e.elev).toLocaleString()} ft${tr}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi away':''}`;
+  openSheet(title,sub,false);
+  let h=`<div class="verdict"><div class="num" style="color:${col}">${s}%<small>${labelOf(s)}</small></div><p>${verdict(A)}</p></div>`;
+  if(A&&A.fut&&A.fut.length){
+    const mx=Math.max(20,...A.fut.map(x=>x.score));
+    h+=`<div class="sec">Next 7 days</div><div class="fc">`+A.fut.map((x,i)=>`<div class="${i===0?'today':''}"><span>${Math.round(x.score)}</span><b style="height:${Math.max(3,Math.round(x.score/mx*46))}px;background:${colorOf(x.score)||'#3a4a3b'}"></b><span>${i===0?'Now':shortDay(x.date)}</span></div>`).join('')+`</div>`;
+    if(A.fRain>0.5) h+=`<p class="note">${inch(A.fRain)}" of rain forecast over the next week${A.fRain>=20?' — a real trigger':A.fRain>=8?' — helps hold moisture':' — not enough to trigger a new flush'}.</p>`;
+  }
+  if(A&&A.now.F!==undefined){
+    const n=A.now;
+    h+=`<div class="sec">Why</div><div class="bars">`+bar('Trigger rain',n.F)+bar('Soil moisture',n.M)+bar('Temperatures',n.X)+bar('Humidity',n.Hu)+bar('Habitat & season',hab.score)+`</div>`;
+    const bits=[];
+    if(n.ev) bits.push(`Best trigger: ${inch(n.ev.mm)}" around ${fmtDay(n.ev.date)} (${n.ev.age} d ago; flushes peak 7–15 d after)`); else bits.push('No rain event ≥0.4" in the 3–24 day trigger window');
+    bits.push(`Soil water index ${Math.round(n.bucket)}/80 mm · ${n.dry} dry day${n.dry===1?'':'s'} in a row`);
+    bits.push(`Last 5 days ${f(n.mn)}–${f(n.mx)}°F${n.drop>=2?' · cooling trend (+)':''}${n.rh!=null?' · RH '+Math.round(n.rh)+'%':''}`);
+    if(n.kill) bits.push(n.kill==='frost'?'Hard frost in the last week':n.kill==='snow'?'Fresh snow in the last week':'Heat ≥86°F in the last 3 days');
+    if(e.w&&e.w.meta){ const m=e.w.meta; const parts=[]; if(Math.abs(m.dz)>=30) parts.push(`${m.dT>0?'+':''}${(m.dT*1.8).toFixed(1)}°F lapse-rate correction from the weather grid point at ${ft(m.anchorElev).toLocaleString()} ft`); if(e.terr&&e.terr.aspect!=null&&Math.abs(m.tAsp)>=0.2) parts.push(`${compass(e.terr.aspect)} aspect: ${m.tAsp>0?'warmer':'cooler'} by ~${Math.abs(m.tAsp*1.8).toFixed(1)}°F, ${m.etMul<1?'holds':'loses'} moisture ${Math.round(Math.abs(1-m.etMul)*100)}% ${m.etMul<1?'longer':'faster'}`); if(parts.length) bits.push(parts.join(' · ')); }
+    h+=`<p class="note">${bits.join('<br>')}</p>`;
+  }
+  let vegH='';
+  if(e.veg){ const v=e.veg; vegH=`<dt>Forest (LANDFIRE 2024)</dt><dd>${Math.round(v.treeFrac*100)}% tree-covered · canopy ${Math.round(v.canopy)}% · stand height ${Math.round(v.height*3.28)} ft${v.host!=null?' · host quality '+Math.round(v.host*100)+'/100':''}</dd>`+(v.top.length?`<dt>Types</dt><dd>${v.top.map(t=>`${Math.round(t.share*100)}% ${t.name}${t.host?' <span style="color:var(--pore-dim)">('+t.host.lab+')</span>':''}`).join('<br>')}</dd>`:''); }
+  else if(!vegBroken&&hab.score>0.08) vegH=`<dt>Forest</dt><dd style="color:var(--pore-dim)">Vegetation check pending</dd>`;
+  h+=`<div class="sec">Ecology</div><dl>${vegH}<dt>Hosts</dt><dd>${hab.hosts}</dd><dt>Season</dt><dd>${hab.seasonNote}</dd>${hab.elevNote?`<dt>Elevation</dt><dd>${hab.elevNote}</dd>`:''}</dl>`;
+  if(e.w){
+    const w=e.w,i=w.today; const days=[]; for(let d=Math.max(0,i-20);d<=i;d++) days.push(d); const mxp=Math.max(5,...days.map(d=>w.p[d]));
+    h+=`<div class="sec">Rain, last 3 weeks (inches)</div><div class="rain">`+days.map(d=>`<div class="${w.p[d]>=10?'hi':''}"><b style="height:${Math.round(w.p[d]/mxp*38)}px"></b><span>${w.p[d]>=2.5?inch(w.p[d]).replace(/^0/,''):''}</span></div>`).join('')+`</div><p class="note">Left = 3 weeks ago, right = today. Lighter bars ≥0.4".</p>`;
+  }
+  h+=`<div class="actions">${e.exact?'':`<button class="pill cap" id="btn-exact">Exact point forecast</button>`}<a class="pill" href="https://maps.apple.com/?ll=${e.lat},${e.lon}&q=Bolete%20spot" target="_blank" rel="noopener">Open in Maps</a><a class="pill" href="https://www.google.com/maps/@${e.lat},${e.lon},14z/data=!3m1!1e3" target="_blank" rel="noopener">Satellite</a></div>`;
+  $('sheet-body').innerHTML=h;
+  const bx=$('btn-exact'); if(bx){ const tp=e.tap||[e.lat,e.lon]; bx.onclick=()=>exactPoint(tp[0],tp[1]); }
+  map.panTo([e.lat,e.lon],{animate:true});
+}
+
+function showTop(){
+  const pool=[...cells.values()].filter(e=>e.A&&!e.failed);
+  const byK=new Map(); pool.forEach(e=>byK.set(key(e.lat,e.lon),e));
+  const spread=(list,n,minMi)=>{ const out=[]; for(const e of list){ if(out.every(o=>dist([o.lat,o.lon],[e.lat,e.lon])>=minMi)) out.push(e); if(out.length>=n) break; } return out; };
+  const all=spread(pool.filter(e=>e.A.now.score>=25).sort((a,b)=>b.A.now.score-a.A.now.score),8,10);
+  const rising=spread(pool.filter(e=>e.A.best&&e.A.best.score>=45&&e.A.best.score>=e.A.now.score+10).sort((a,b)=>b.A.best.score-a.A.best.score),6,10);
+  const near=userLoc? spread(pool.filter(e=>e.A.now.score>=25).sort((a,b)=>dist(userLoc,[a.lat,a.lon])-dist(userLoc,[b.lat,b.lon])),5,5):null;
+  openSheet('Where to go today',loading?'Still loading — best areas are scored first':'Best square miles across the state',true);
+  const row=e=>{const s=Math.round(e.A.now.score);return `<div class="spot" data-k="${key(e.lat,e.lon)}"><div class="sc" style="background:${colorOf(s)||'#556a55'}">${s}</div><div class="m"><b>${e.hab.zone}</b><span>${ft(e.elev).toLocaleString()} ft${e.terr&&e.terr.aspect!=null?' · '+compass(e.terr.aspect)+' face':''} · ${e.lat.toFixed(2)}, ${e.lon.toFixed(2)}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi':''}${e.A.best.score>e.A.now.score+5?' · peaks '+fmtDay(e.A.best.date):''}</span></div></div>`;};
+  let h='';
+  if(!all.length) h+=`<div class="empty">Nothing at medium or better anywhere scored so far. ${rising.length?'But conditions are building — see below.':'Play the timeline to see if rain is coming.'}</div>`;
+  else h+=`<div class="sec">Highest chance now</div>`+all.map(row).join('');
+  if(near&&near.length) h+=`<div class="sec">Closest to you (medium or better)</div>`+near.map(row).join('');
+  if(rising.length) h+=`<div class="sec">Coming up this week</div>`+rising.map(row).join('');
+  h+=`<p class="note">Each entry is one square mile; entries are kept at least 10 mi apart so you see distinct areas. Tap one to zoom there.</p>`;
+  $('sheet-body').innerHTML=h;
+  $('sheet-body').querySelectorAll('.spot').forEach(el=>el.onclick=()=>{ const e=byK.get(el.dataset.k); map.setView([e.lat,e.lon],11); showPoint(e); });
+}
+
+function showModel(){
+  openSheet('How the forecast works','Model notes and what to trust',true);
+  const wire=()=>{ const a=$('btn-export-cells'),b=$('btn-export-weather'),n=$('export-note'); if(!a) return;
+    a.onclick=()=>{ if(loading||vegQueue.length){ n.textContent='Wait for the load (including the vegetation check) to finish first.'; return; } const k=exportCells(); n.textContent=`Exported ${k.toLocaleString()} cells. Put the file at data/cells.json in the repo.`; };
+    b.onclick=()=>{ const k=exportWeather(); n.textContent=`Exported ${k} weather anchors. Put it at data/weather.json (the daily job will overwrite it).`; }; };
+  setTimeout(wire,0);
+  $('sheet-body').innerHTML=`<div class="model">
+<p>The state is scored in one-square-mile cells. A fast terrain pass finds every cell that can hold king boletes (roughly a third of the state), a coarse weather pass ranks those areas, then the cells stream in best-first — whatever is in your view jumps the queue. Each cell gets a 0–100 chance for <i>today</i> plus a 7-day projection, from live Open-Meteo weather (30 days of history + forecast for that exact point) combined with a habitat model of Washington's forests. Score = habitat × trigger rain × soil moisture × temperature window × humidity, with kill switches for frost, snow and heat.</p>
+<h3>Trigger rain</h3><p>Fruiting is set off by a soaking rain event, not by general dampness. The model looks for the best 3-day rain total of at least 0.4", scoring fully at ~1.6", in a window 3–24 days back. A flush ramps up from day 3, peaks days 9–15, and fades out by ~24 days — the pattern reported in <i>Boletus edulis</i> phenology studies (Spain, Italy, Pacific Northwest) and matched by forager experience: "a week to ten days after the first big fall rain."</p>
+<h3>Soil moisture</h3><p>A simple bucket: rain in, 70% of reference evapotranspiration out, capped at 80 mm. A flush needs moisture to persist while primordia expand; a hot dry stretch after the trigger aborts it. This is the "chances were high but it dried out" case.</p>
+<h3>Temperature</h3><p>Best with highs 50–72°F and lows 37–55°F. Above ~86°F fruiting shuts down; a hard frost (≤27°F) ends the fall season at that elevation. A cooling trend of 3.5°F+ over the previous week adds a bonus — temperature drop after rain is one of the strongest signals in the literature.</p>
+<h3>Humidity</h3><p>3-day mean relative humidity; ≥70% is ideal, below 40% dries caps and slows growth. Coastal fog belts score well here.</p>
+<h3>Habitat and season</h3><ul>
+<li><b>Coastal Sitka spruce belt</b> (Olympic coast, Grays Harbor, Long Beach, Strait) — Oct–Nov, low elevation, spruce and shore pine.</li>
+<li><b>West Cascades / Olympic montane</b> — late Aug–mid Oct under true firs, hemlock, white pine. The productive elevation band drops from ~4,500 ft in August to ~2,000 ft by November; the model tracks that.</li>
+<li><b>East Cascades, Okanogan, Selkirks, Blues</b> — fall under spruce/fir, plus the spring king (<i>B. rex-veris</i>) May–June following snowmelt upslope.</li>
+<li><b>Puget lowland</b> — weighted low: Douglas-fir is a poor host; look for planted spruce, pine and fir.</li>
+<li><b>Shrub-steppe and alpine</b> — scored near zero.</li></ul>
+<p>Each cell is also checked against LANDFIRE 2024 (USGS, 30 m): four samples per square mile of vegetation type, tree canopy cover and stand height. Cells with no tree cover drop out; young regenerating stands under ~25 ft are heavily marked down; and the named vegetation type sets a host-quality factor — Sitka spruce, silver fir, mountain hemlock and spruce-fir systems score full, Douglas-fir–hemlock moderate, hardwoods, shrub, harvested regeneration and non-forest low or zero. LANDFIRE is a model of vegetation, not a survey, so treat it as a strong hint — Use the topo (green = forest) and satellite basemaps to pick real stands of the host trees, then tap the exact spot for a point forecast.</p>
+<h3>Elevation, slope and aspect</h3><p>Weather is pulled at anchor points every ~14 mi (about 450 across the state's forest), which is the only API traffic — roughly a fifth of Open-Meteo's free daily quota per full load. Every cell and every tapped spot then gets its own elevation from open terrain tiles (Mapzen/AWS Terrarium, ~75 m resolution, decoded in the browser so it costs no API calls), and temperatures are shifted by the standard lapse rate (3.5°F per 1,000 ft). Slope and aspect come from the surrounding terrain: north-facing slopes are modeled ~2°F cooler and lose moisture ~18% slower, south-facing the reverse — so early-season north slopes and late-season sunny slopes score the way experienced foragers expect. Weather itself comes from NOAA/ECMWF model grids that assimilate the regional station network; the app does not read individual stations directly.</p>
+<h3>Data files</h3><p>For a public deployment the app reads two static files instead of calling any API from the phone: <code>data/cells.json</code> (elevation, slope, aspect and LANDFIRE vegetation for every cell — bake it once here) and <code>data/weather.json</code> (all weather anchors — refreshed once a day by the GitHub Actions job in the repo). Export after a complete live load.</p>
+<div class="actions"><button class="pill cap" id="btn-export-cells">Export cells.json</button><button class="pill" id="btn-export-weather">Export weather.json</button></div><p class="note" id="export-note"></p>
+<h3>Reading the number</h3><ul><li>Medium 25–44 · Good 45–64 · High 65–79 · Very high 80+</li><li>"Rising" means the trigger has happened but the flush hasn't surfaced yet.</li><li>"Past prime" means you'll mostly find aged, maggoty caps.</li></ul>
+<p>Sources of weather: Open-Meteo best-match model (NOAA GFS/HRRR blended with ICON, ERA5-based reanalysis for history). Mountain microclimates vary; treat any cell as a hypothesis, not a promise.</p></div>`;
+}
+
+/* ===================== CONTROLS ===================== */
+$('btn-top').onclick=showTop;
+$('btn-model').onclick=showModel;
+$('btn-refine').onclick=refine;
+$('btn-refresh').onclick=()=>{ apiBlocked=null; STATIC.tried=false; STATIC.cells=null; STATIC.weather=null; let miss=0; for(const e of cells.values()) if(!e.A||e.failed) miss++; if(!miss) wcache.clear(); loadState(); };
+$('btn-layers').onclick=ev=>{ ev.stopPropagation(); $('layers').classList.toggle('open'); };
+$('btn-base').onclick=()=>{ bases[baseOrder[baseIdx]].remove(); baseIdx=(baseIdx+1)%baseOrder.length; bases[baseOrder[baseIdx]].addTo(map); setStatus(['Topo map','USGS topo','Satellite'][baseIdx]); };
+$('btn-loc').onclick=()=>{ if(!navigator.geolocation){setStatus('Location not available');return;} setStatus('Finding you…'); navigator.geolocation.getCurrentPosition(pos=>{ userLoc=[pos.coords.latitude,pos.coords.longitude]; L.circleMarker(userLoc,{radius:6,color:'#fff',weight:2,fillColor:'#4a90d9',fillOpacity:1}).addTo(map); map.setView(userLoc,9); setStatus('Centered on your location'); },()=>setStatus('Location permission denied'),{enableHighAccuracy:false,timeout:10000}); };
+
+loadState();
+</script>
+</body>
+</html>
