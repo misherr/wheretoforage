@@ -593,6 +593,26 @@ function makeEntry(lat,lon,size,elev,terr,w){
   e.w=adjustWeather(w,elev,terr); e.A=hab.score<=0.08?{now:{score:0},fut:[],best:{score:0},fRain:0,hab}:fullAnalysis(e.w,hab); return e;
 }
 const snapAnchor=(lat,lon,sp)=>[Math.floor(lat/sp)*sp+sp/2,Math.floor(lon/sp)*sp+sp/2];
+/* Baked weather (data/weather.json) sits on a fixed lattice: active anchors are multiples of
+   LATTICE*STRIDE. Read the two from the file so halving STRIDE to densify needs no change here;
+   fall back to what scripts/fetch-weather.mjs ships with. A cell joins to the nearest active point. */
+let WLATTICE=0.025, WSTRIDE=8;
+const latticeAnchor=(lat,lon)=>{ const sp=WLATTICE*WSTRIDE, r=x=>Math.round(Math.round(x/sp)*sp*1e4)/1e4; return [r(lat),r(lon)]; };
+/* ---- TEMPORARY dual-key anchor lookup -------------------------------------------------------
+   Weather files written before the lattice change key anchors at snapAnchor(lat,lon,0.2) half-steps
+   (46.9, -124.1); lattice files key them at multiples of LATTICE*STRIDE (47.0, -124.0). Trying the
+   lattice key first and falling back to the legacy one makes deploy order irrelevant — whichever
+   weather.json happens to be live, or if a weather run fails partway, the map still resolves.
+   REMOVABLE once a lattice-format weather.json has been live for a cycle: delete legacyAnchor and
+   the fallback branch below, leaving the latticeAnchor lookup. ------------------------------- */
+const legacyAnchor=(lat,lon)=>snapAnchor(lat,lon,ANCHOR);
+function anchorHit(lat,lon){
+  const a=latticeAnchor(lat,lon), ka=key(a[0],a[1]), wa=wcache.get(ka);
+  if(wa&&wa.w) return {k:ka,a,w:wa.w};
+  const b=legacyAnchor(lat,lon), kb=key(b[0],b[1]), wb=wcache.get(kb);
+  if(wb&&wb.w) return {k:kb,a:b,w:wb.w};
+  return {k:ka,a,w:null};
+}
 /* build a grid of cells: elevation per cell, terrain from neighbours, weather from anchors */
 async function buildCells(pts,size,anchorSp,onProgress){
   waitNote=t=>onProgress&&onProgress(t,null);
@@ -616,7 +636,7 @@ async function pointEntry(lat,lon,onProgress){
   const terr=terrainAt(getE,lat,lon,d);
   const hab=habitat(lat,lon,el[0],DOY);
   let w=null;
-  if(PUBLIC_MODE||weatherAsOf){ const a=snapAnchor(lat,lon,ANCHOR); const wa=wcache.get(key(a[0],a[1])); w=wa&&wa.w?wa.w:null; }
+  if(PUBLIC_MODE||weatherAsOf){ w=anchorHit(lat,lon).w; }
   else if(hab.score>0.08){ lastFailed=0; [w]=await getWeather([[lat,lon]],onProgress); }
   const e=makeEntry(lat,lon,DLAT/3,el[0],terr,w); e.lonsize=DLON/3;
   await vegFor([e],4);
@@ -706,6 +726,7 @@ async function tryStatic(){
   if(STATIC.weather) ingestWeather(STATIC.weather);
 }
 function ingestWeather(j){
+  if(j.LATTICE>0) WLATTICE=j.LATTICE; if(j.STRIDE>0) WSTRIDE=j.STRIDE;   // lattice the file was built on
   const today=localISO(new Date()); let ti=j.time.indexOf(today);
   if(ti<0){ ti=today>j.time[j.time.length-1]?j.time.length-1:Math.min(j.past_days,j.time.length-1); }
   j.anchors.forEach(a=>{ wcache.set(key(a.lat,a.lon),{w:{time:j.time,p:a.p.map(v=>v??0),tmax:a.tmax,tmin:a.tmin,et0:a.et0||[],snow:a.snow||[],rh:a.rh||null,today:ti,elev:a.elev}}); });
@@ -716,15 +737,16 @@ async function loadFromStatic(gen){
   const j=STATIC.cells; const names=j.names||[];
   progress(`Loading ${j.rows.length.toLocaleString()} baked square-mile cells…`,0.1);
   const need=new Map();
-  j.rows.forEach(r=>{ const a=snapAnchor(r[0],r[1],ANCHOR); const k=key(a[0],a[1]); const e=wcache.get(k); if(!e||!e.w) need.set(k,a); });
-  const totalA=new Set(j.rows.map(r=>{const a=snapAnchor(r[0],r[1],ANCHOR); return key(a[0],a[1]);})).size;
+  const seenA=new Set();
+  j.rows.forEach(r=>{ const h=anchorHit(r[0],r[1]); seenA.add(h.k); if(!h.w) need.set(h.k,h.a); });
+  const totalA=seenA.size;
   if(need.size){ if(PUBLIC_MODE){ if(need.size>totalA*0.2) apiBlocked=weatherAsOf?'data/weather.json does not cover most cells — ask the site owner to re-run the weather update':'data/weather.json is missing — ask the site owner to run the weather update'; } else { progress(`Fetching weather for ${need.size} anchors (no weather file found)…`,0.2); await getWeather([...need.values()],(t)=>{ if(t&&/limit|pausing/i.test(t)) progress(t,null); }); } }
   if(gen!==loadGen) return;
   let i=0;
   for(const r of j.rows){
     const [lat,lon,elev,slope,aspect,vg]=r; ecache.set(key(lat,lon),elev);
     const terr={slope,aspect:aspect<0?null:aspect};
-    const a=snapAnchor(lat,lon,ANCHOR); const wa=wcache.get(key(a[0],a[1])); const w=wa&&wa.w?wa.w:null;
+    const w=anchorHit(lat,lon).w;
     const e=makeEntry(lat,lon,DLAT,elev,terr,w); e.lonsize=DLON;
     if(vg){ const top=(vg[4]||[]).map(([ni,sh])=>({name:names[ni],share:sh,host:hostOf(names[ni])})); const v={treeFrac:vg[0],canopy:vg[1],height:vg[2],host:vg[3]<0?null:vg[3],top}; v.mult=vegMult(v); e.veg=v; vcache.set(key(lat,lon),v); applyVeg(e); }
     cells.set(cellKey(lat,lon),e);
@@ -943,7 +965,7 @@ function showTop(){
   const all=spread(pool.filter(e=>e.A.now.score>=25).sort((a,b)=>b.A.now.score-a.A.now.score),8,10);
   const rising=spread(pool.filter(e=>e.A.best&&e.A.best.score>=45&&e.A.best.score>=e.A.now.score+10).sort((a,b)=>b.A.best.score-a.A.best.score),6,10);
   const near=userLoc? spread(pool.filter(e=>e.A.now.score>=25).sort((a,b)=>dist(userLoc,[a.lat,a.lon])-dist(userLoc,[b.lat,b.lon])),5,5):null;
-  rising.slice(0,3).forEach(e=>{ const a=snapAnchor(e.lat,e.lon,ANCHOR); const wa=wcache.get(key(a[0],a[1])); const w=wa&&wa.w?wa.w:null;
+  rising.slice(0,3).forEach(e=>{ const w=anchorHit(e.lat,e.lon).w;
     console.log(`[rising] ${e.lat}, ${e.lon}`,{fut:e.A.fut,habScore:e.hab.score,seasonNote:e.hab.seasonNote,'w.p':w&&w.p,'w.today':w&&w.today}); });
   openSheet('Where to go today',loading?'Still loading — best areas are scored first':'Best square miles across the state',true);
   const row=(e,useBest)=>{const s=Math.round(useBest?e.A.best.score:e.A.now.score);const peak=useBest?' on '+fmtDay(e.A.best.date):(e.A.best.score>e.A.now.score+5?' · peaks '+fmtDay(e.A.best.date):'');return `<div class="spot" data-k="${key(e.lat,e.lon)}"${useBest?' data-rising="1"':''}><div class="sc" style="background:${colorOf(s)||'#556a55'}">${s}</div><div class="m"><b>${e.hab.zone}</b><span>${ft(e.elev).toLocaleString()} ft${e.terr&&e.terr.aspect!=null?' · '+compass(e.terr.aspect)+' face':''} · ${e.lat.toFixed(2)}, ${e.lon.toFixed(2)}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi':''}${peak}</span></div></div>`;};
