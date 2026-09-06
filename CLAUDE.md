@@ -85,6 +85,58 @@ tuned by hand against field experience, not derived from a spec.
 See [README.md](README.md) for full troubleshooting notes (missing
 cells.json, connect timeouts, workflow permissions).
 
+## Local development
+
+No build step — serve the repo root as static files with whatever you have
+installed:
+
+```bash
+python -m http.server 8080
+```
+
+or, with Node:
+
+```bash
+npx serve -l 8080
+```
+
+Then open http://localhost:8080. **Before testing, check `PUBLIC_MODE`**
+(`index.html:170`) — `false` hits live Open-Meteo/LANDFIRE APIs from the
+browser; `true` reads only the baked `data/cells.json` + `data/weather.json`
+(same as production).
+
+## Branch workflow
+
+- `main` is production — GitHub Pages deploys from it, and the weather
+  workflow (`weather.yml`) commits `data/weather.json` to it on its own every
+  6 hours.
+- `dev` is where all day-to-day work happens. Commit there; never push to
+  `main` directly unless explicitly told to.
+- **Landing a change** (once it's confirmed good): rebase `dev` onto `main`
+  first, since `main` accumulates automated `weather.json` commits `dev`
+  won't have, then fast-forward `main` and push.
+  ```bash
+  git checkout dev
+  git fetch origin
+  git rebase origin/main
+  git checkout main
+  git merge --ff-only origin/main
+  git merge dev
+  git push origin main
+  git checkout dev
+  ```
+- **Rolling back a bad deploy**: revert the last commit on `main` and push —
+  Pages redeploys automatically. Bring the same revert into `dev` too so it
+  doesn't get reintroduced next merge.
+  ```bash
+  git checkout main
+  git pull
+  git revert HEAD
+  git push origin main
+  git checkout dev
+  git rebase main
+  ```
+
 ## Repo
 
 https://github.com/misherr/wheretoforage
