@@ -101,9 +101,17 @@ body.sheet-open #tap-hint{opacity:0}
 .verdict .num small{display:block;font-size:11px;font-weight:600;letter-spacing:.02em;color:var(--pore-dim);margin-top:4px}
 .verdict p{margin:0;font-size:14px;line-height:1.35}
 .verdict p b{font-weight:600}
-.stage{display:flex;gap:11px;align-items:center;padding:9px 12px;border-radius:12px;background:var(--moss-2);margin-bottom:12px}
-.stage b{font-size:13px;font-weight:600;display:block}
+.stage{display:flex;gap:11px;align-items:center;padding:12px 14px;border-radius:12px;background:var(--moss-2);margin-bottom:12px;cursor:pointer}
+.stage b{font-size:14px;font-weight:600;display:block}
 .stage span{font-size:12.5px;color:var(--pore-dim);display:block}
+.stage .chev{margin-left:auto;flex:none;display:grid;place-items:center;width:30px;height:30px;border-radius:9px;background:var(--moss);color:var(--pore-dim);font-size:16px;transition:transform .2s}
+.stage.open{border-radius:12px 12px 0 0;margin-bottom:0}
+.stage.open .chev{transform:rotate(180deg)}
+.stage-detail{background:var(--moss-2);border-radius:0 0 12px 12px;padding:2px 12px 12px;margin-bottom:12px}
+.stage-detail .bars .k{display:flex;align-items:center;gap:6px}
+.stage-detail .bars svg{width:16px;height:16px;flex:none}
+.elev-bars .k{display:flex;align-items:center;gap:6px}
+.elev-bars svg{width:16px;height:16px;flex:none}
 
 .sec{margin:14px 0 6px;font-size:12px;color:var(--pore-dim);font-weight:600}
 .bars{display:grid;grid-template-columns:118px 1fr 40px;gap:6px 10px;align-items:center;font-size:13px}
@@ -310,17 +318,89 @@ function verdict(A){
   if(now.X<0.4) return `Moisture is there, but temperatures (${f(now.mn)}–${f(now.mx)}°F) are outside the fruiting window. Marginal.`;
   return `<b>${labelOf(s)}</b> chance. ${evTxt?evTxt+', soil moisture '+Math.round(now.M*100)+'%.':''} ${bs>s?`Slightly better around ${fmtDay(best.date)}.`:'Trend is flat to declining.'}`;
 }
-function stageOf(A){
-  const {now,hab}=A;
+function stageMix(age){
+  return {
+    emerging: trap(age,-1,0,3,5),
+    buttons:  trap(age,3,5,7,9),
+    prime:    trap(age,7,9,15,19),
+    past:     trap(age,15,19,22,26),
+    rotten:   trap(age,22,26,32,40)
+  };
+}
+const STAGE_KEYS=['emerging','buttons','prime','past','rotten'];
+const STAGE_LABELS={emerging:'Emerging',buttons:'Buttons',prime:'Prime',past:'Past prime',rotten:'Rotten'};
+function stageBreakdown(p,i){
+  const mix={emerging:0,buttons:0,prime:0,past:0,rotten:0}; let tot=0; const events=[];
+  for(let d=2; d<=i; d++){
+    const P3=(p[d]||0)+(p[d-1]||0)+(p[d-2]||0);
+    if(P3<10) continue;
+    const P3n=(p[d+1]||0)+(p[d]||0)+(p[d-1]||0);
+    if(d<i && P3n>P3) continue;
+    const mass=clamp((P3-10)/30,0,1); if(mass<=0) continue;
+    const age=i-d, m=stageMix(age);
+    let s=0; for(const k of STAGE_KEYS) s+=m[k];
+    if(s>0.001){ for(const k of STAGE_KEYS) mix[k]+=mass*m[k]; tot+=mass*s; events.push({age,mm:P3,mass}); }
+    d+=2;
+  }
+  if(tot<=0.001) return null;
+  const pct={}; for(const k of STAGE_KEYS) pct[k]=mix[k]/tot;
+  let top=STAGE_KEYS[0]; for(const k of STAGE_KEYS) if(pct[k]>pct[top]) top=k;
+  return {pct,top,standing:tot,events};
+}
+function stageOf(w,i,hab){
   if(hab.score===0||hab.season<0.15) return null;
-  if(now.kill==='frost'||now.kill==='snow') return null;
-  if(now.last&&now.last.age<=2) return {key:'emerging',label:'Emerging',note:'Soaking rain '+now.last.age+' days ago — primordia still underground, nothing to pick yet'};
-  if(!now.ev) return null;
-  const age=now.ev.age;
-  if(age<=6) return {key:'buttons',label:'Buttons',note:'Day '+age+' after the trigger rain — first buttons breaking through'};
-  if(age<=16) return {key:'prime',label:'Prime',note:'Day '+age+' — peak fruiting window'};
-  if(age<=23) return {key:'past',label:'Past prime',note:'Day '+age+' — caps flattening, expect worm damage'};
-  return {key:'rotten',label:'Rotten',note:'Day '+age+' — anything from this flush is gone; needs new rain'};
+  const kill=analyze(w,i,hab).kill;
+  if(kill==='frost'||kill==='snow') return null;
+  const b=stageBreakdown(w.p,i);
+  if(!b) return null;
+  const pct=b.pct;
+  const notes={
+    emerging:Math.round(pct.emerging*100)+'% of what is out there is still underground, just emerging',
+    buttons:Math.round(pct.buttons*100)+'% of what is out there is in the button stage',
+    prime:Math.round(pct.prime*100)+'% of what is out there is at peak',
+    past:Math.round(pct.past*100)+'% of what is out there is past prime',
+    rotten:Math.round(pct.rotten*100)+'% of what is out there has rotted'
+  };
+  return {...b, key:b.top, label:STAGE_LABELS[b.top], note:notes[b.top]};
+}
+/* real neighbouring cells, bucketed by elevation — thresholds derived from the sample, not from assumed cell size */
+function elevationBands(lat,lon,dayIdx){
+  const R=3.5, dLat=4/69, dLon=4/(69*Math.cos(lat*Math.PI/180));
+  const near=[];
+  for(const e of cells.values()){
+    if(!e.A||e.failed) continue;
+    if(Math.abs(e.lat-lat)>dLat||Math.abs(e.lon-lon)>dLon) continue;
+    if(dist([lat,lon],[e.lat,e.lon])>R) continue;
+    near.push(e);
+  }
+  const n=near.length;
+  if(n<6) return null;
+  const sizeLat=near.reduce((a,e)=>a+e.size,0)/n;
+  const sizeLon=near.reduce((a,e)=>a+(e.lonsize||e.size),0)/n;
+  const cellAreaSqMi=(sizeLat*69)*(sizeLon*69*Math.cos(lat*Math.PI/180));
+  const areaSqMi=n*cellAreaSqMi;
+  if(areaSqMi/(Math.PI*R*R)<0.4) return null;
+  const elevs=near.map(e=>e.elev);
+  const minE=Math.min(...elevs), maxE=Math.max(...elevs);
+  if(maxE-minE<120) return {flat:true};
+  const k=clamp(Math.round(Math.sqrt(n)),4,10);
+  const w=(maxE-minE)/k;
+  const buckets=Array.from({length:k},()=>[]);
+  near.forEach(e=>{ let b=Math.floor((e.elev-minE)/w); if(b>=k)b=k-1; if(b<0)b=0; buckets[b].push(e); });
+  const minKeep=Math.max(2,Math.round(n*0.05));
+  const bands=[];
+  buckets.forEach((list,b)=>{
+    if(list.length<minKeep) return;
+    const lo=minE+b*w, hi=(b===k-1)?maxE:minE+(b+1)*w;
+    const score=list.reduce((a,e)=>a+(e.A.fut&&e.A.fut[dayIdx]?e.A.fut[dayIdx].score:e.A.now.score),0)/list.length;
+    const withW=list.filter(e=>e.w);
+    const step=Math.max(1,Math.floor(withW.length/40));
+    const sub=[]; for(let idx=0;idx<withW.length&&sub.length<40;idx+=step) sub.push(withW[idx]);
+    const tally={}; sub.forEach(e=>{ const bd=stageBreakdown(e.w.p,e.w.today+dayIdx); if(bd) tally[bd.top]=(tally[bd.top]||0)+1; });
+    let stage=null,bestC=0; for(const kk in tally) if(tally[kk]>bestC){bestC=tally[kk];stage=kk;}
+    bands.push({lo,hi,n:list.length,score,stage});
+  });
+  return {bands,range:[minE,maxE],n,areaSqMi};
 }
 function stageIcon(key){
   return {
@@ -785,8 +865,14 @@ $('grab').onclick=()=>sheet.classList.toggle('tall');
 let ty=null; sheet.addEventListener('touchstart',e=>{ty=e.touches[0].clientY},{passive:true}); sheet.addEventListener('touchend',e=>{ if(ty==null)return; const dy=e.changedTouches[0].clientY-ty; if(dy>70&&$('sheet-body').scrollTop<=0) { if(sheet.classList.contains('tall')) sheet.classList.remove('tall'); else closeSheet(); } else if(dy<-70) sheet.classList.add('tall'); ty=null; },{passive:true});
 
 function bar(k,v,note){ return `<div class="k">${k}</div><div class="bg"><b style="width:${Math.round(v*100)}%"></b></div><div class="v">${Math.round(v*100)}</div>`; }
+function stageBar(key,pct){ return `<div class="k">${stageIcon(key)}${STAGE_LABELS[key]}</div><div class="bg"><b style="width:${Math.round(pct*100)}%"></b></div><div class="v">${Math.round(pct*100)}</div>`; }
+let stageOpen=false, elevOpen=false, lastShownKey=null;
 function showPoint(e,t){
   t=t||0;
+  const pk=key(e.lat,e.lon)+(e.exact?':exact':'');
+  const samePoint=pk===lastShownKey; const prevScroll=samePoint?$('sheet-body').scrollTop:0;
+  if(!samePoint){ stageOpen=false; elevOpen=false; }
+  lastShownKey=pk;
   const A=e.A, hab=e.hab; const now=(t===0||!e.w)?A.now:analyze(e.w,e.w.today+t,hab); const s=A?Math.round(now.score):0; const col=colorOf(s)||'#6b7a6a';
   const title=`${hab.zone}`;
   const tr=e.terr? (e.terr.aspect==null?' · flat':` · ${compass(e.terr.aspect)}-facing, ${Math.round(e.terr.slope)}° slope`):'';
@@ -794,8 +880,26 @@ function showPoint(e,t){
   const sub=`${what} · ${ft(e.elev).toLocaleString()} ft${tr}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi away':''}${t>0&&A.fut[t]?' · '+fmtDay(A.fut[t].date):''}`;
   openSheet(title,sub,false);
   let h=`<div class="verdict"><div class="num" style="color:${col}">${s}<small>${labelOf(s)}</small></div><p>${t===0?verdict(A):`Forecast for ${fmtDay(A.fut[t].date)}.`}</p></div>`;
-  const stage=stageOf({now,hab});
-  if(stage) h+=`<div class="stage">${stageIcon(stage.key)}<div><b>${stage.label}</b><span>${stage.note}</span></div></div>`;
+  const stage=e.w?stageOf(e.w,e.w.today+t,hab):null;
+  if(stage){
+    h+=`<div class="stage${stageOpen?' open':''}" id="stage-strip">${stageIcon(stage.key)}<div><b>${stage.label}</b><span>${stage.note}</span></div><span class="chev">▾</span></div>`;
+    h+=`<div class="stage-detail" id="stage-detail"${stageOpen?'':' hidden'}><div class="bars">`+STAGE_KEYS.map(k=>stageBar(k,stage.pct[k])).join('')+`</div></div>`;
+  }
+  const eb=elevationBands(e.lat,e.lon,t);
+  if(eb){
+    if(eb.flat){
+      h+=`<div class="sec">Best elevation nearby</div><p class="note">Terrain nearby is too uniform for an elevation call.</p>`;
+    } else if(eb.bands.length){
+      let best=eb.bands[0]; for(const b of eb.bands) if(b.score>best.score) best=b;
+      const bestLabel=best.stage?STAGE_LABELS[best.stage].toLowerCase():'mixed conditions';
+      const sorted=eb.bands.slice().sort((a,b)=>a.lo-b.lo);
+      h+=`<div class="stage${elevOpen?' open':''}" id="elev-strip">${best.stage?stageIcon(best.stage):''}<div><b>Best elevation nearby</b><span>Target ${ft(best.lo).toLocaleString()}–${ft(best.hi).toLocaleString()} ft — mostly ${bestLabel}</span></div><span class="chev">▾</span></div>`;
+      h+=`<div class="stage-detail" id="elev-detail"${elevOpen?'':' hidden'}><div class="bars elev-bars">`+sorted.map(b=>{
+        const hl=b===best;
+        return `<div class="k"${hl?' style="border-left:3px solid var(--cap);padding-left:6px;margin-left:-9px"':''}>${b.stage?stageIcon(b.stage):''}${ft(b.lo).toLocaleString()}–${ft(b.hi).toLocaleString()} ft</div><div class="bg"><b style="width:${Math.max(0,Math.round(b.score))}%"></b></div><div class="v">${Math.round(b.score)}</div>`;
+      }).join('')+`</div><p class="note">From ${eb.n} cells covering about ${Math.round(eb.areaSqMi)} sq mi within 3.5 miles.</p></div>`;
+    }
+  }
   if(A&&A.fut&&A.fut.length){
     const mx=Math.max(20,...A.fut.map(x=>x.score));
     h+=`<div class="sec">Next 7 days</div><div class="fc">`+A.fut.map((x,i)=>`<div class="${i===t?'today':''}"><span>${Math.round(x.score)}</span><b style="height:${Math.max(3,Math.round(x.score/mx*46))}px;background:${colorOf(x.score)||'#3a4a3b'}"></b><span>${i===0?'Now':shortDay(x.date)}</span></div>`).join('')+`</div>`;
@@ -822,7 +926,12 @@ function showPoint(e,t){
   }
   h+=`<div class="actions">${e.exact?'':`<button class="pill cap" id="btn-exact">Exact point forecast</button>`}<a class="pill" href="https://maps.apple.com/?ll=${e.lat},${e.lon}&q=Bolete%20spot" target="_blank" rel="noopener">Open in Maps</a><a class="pill" href="https://www.google.com/maps/@${e.lat},${e.lon},14z/data=!3m1!1e3" target="_blank" rel="noopener">Satellite</a></div>`;
   $('sheet-body').innerHTML=h;
+  if(samePoint) $('sheet-body').scrollTop=prevScroll;
   const bx=$('btn-exact'); if(bx){ const tp=e.tap||[e.lat,e.lon]; bx.onclick=()=>exactPoint(tp[0],tp[1]); }
+  const stEl=$('stage-strip'), stDet=$('stage-detail');
+  if(stEl) stEl.onclick=()=>{ stageOpen=!stageOpen; stEl.classList.toggle('open',stageOpen); stDet.hidden=!stageOpen; };
+  const evEl=$('elev-strip'), evDet=$('elev-detail');
+  if(evEl) evEl.onclick=()=>{ elevOpen=!elevOpen; evEl.classList.toggle('open',elevOpen); evDet.hidden=!elevOpen; };
   $('sheet-body').querySelectorAll('.fc>div').forEach((el,i)=>el.onclick=()=>showPoint(e,i));
   map.panTo([e.lat,e.lon],{animate:true});
 }
