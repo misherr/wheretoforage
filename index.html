@@ -620,11 +620,14 @@ async function buildCells(pts,size,anchorSp,onProgress){
   const el=await getElev(pts);
   const getE=(la,lo)=>ecache.get(key(la,lo));
   const habs=pts.map((p,i)=>habitat(p[0],p[1],el[i],DOY));
-  const anchorsSet=new Map(); pts.forEach((p,i)=>{ if(habs[i].score>0.08){ const a=anchorSp?snapAnchor(p[0],p[1],anchorSp):p; anchorsSet.set(key(a[0],a[1]),a);} });
-  const anchors=[...anchorsSet.values()];
-  lastFailed=0; const ws=await getWeather(anchors,onProgress);
-  const wByKey=new Map(); anchors.forEach((a,i)=>wByKey.set(key(a[0],a[1]),ws[i]));
-  const entries=pts.map((p,i)=>{ const a=anchorSp?snapAnchor(p[0],p[1],anchorSp):p; const terr=terrainAt(getE,p[0],p[1],size); const e=makeEntry(p[0],p[1],size,el[i],terr,wByKey.get(key(a[0],a[1]))||null); e.lonsize=size; return e; });
+  // Weather resolves through anchorHit like every other cell->anchor join, so the baked archive is
+  // used when it covers the area. Only points it cannot cover need a live fetch, and those are
+  // grouped onto the coarse anchor grid so we ask for a handful rather than one point per fine cell.
+  // In PUBLIC_MODE a complete archive leaves this set empty, so no request is attempted at all.
+  const needSet=new Map();
+  pts.forEach((p,i)=>{ if(habs[i].score>0.08&&!anchorHit(p[0],p[1]).w){ const a=anchorSp?snapAnchor(p[0],p[1],anchorSp):p; needSet.set(key(a[0],a[1]),a); } });
+  if(needSet.size){ lastFailed=0; await getWeather([...needSet.values()],onProgress); }
+  const entries=pts.map((p,i)=>{ const terr=terrainAt(getE,p[0],p[1],size); const e=makeEntry(p[0],p[1],size,el[i],terr,anchorHit(p[0],p[1]).w); e.lonsize=size; return e; });
   await vegFor(entries.filter(e=>everHabitat(e.lat,e.lon,e.elev)>0.08),1);
   return entries;
 }
@@ -856,8 +859,19 @@ function pickSize(b){ for(const sz of FINE_SIZES){ if(gridPts(b,sz).length<=FINE
 async function refine(){
   if(refining){ refinePending=true; return; }
   const b=map.getBounds().pad(0.05); const sz=pickSize(b); if(!sz) return;
-  refining=true; try{ const pts=gridPts(b,sz); fineEntries=await buildCells(pts,sz,ANCHOR,()=>{}); fineBounds=b; renderAll(); }
-  catch(err){ console.error(err); }
+  refining=true;
+  // A sub-mile refine is a local nicety: if it cannot get weather that must not put the whole app
+  // into the "weather unavailable" state or disable the elevation-API fallback, so any apiBlocked
+  // raised underneath is rolled back here. Nor do we install fineBounds unless something actually
+  // resolved — an all-failed fine grid would suppress the baked cells and leave a blank hole.
+  const prevBlocked=apiBlocked;
+  try{
+    const pts=gridPts(b,sz); const fe=await buildCells(pts,sz,ANCHOR,()=>{});
+    if(fe.some(e=>e.A&&!e.failed)){ fineEntries=fe; fineBounds=b; renderAll(); }
+    else console.warn('refine: no fine cell resolved weather — keeping the baked cells');
+  }
+  catch(err){ console.warn('refine failed (local only)',err); }
+  finally{ apiBlocked=prevBlocked; }
   refining=false; if(refinePending){ refinePending=false; refine(); }
 }
 map.on('moveend zoomend',()=>{ clearTimeout(refineTimer); const z=map.getZoom(); $('btn-refine').style.display=z>=12?'grid':'none';

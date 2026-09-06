@@ -25,19 +25,101 @@ Screen."
   host-quality score, top vegetation types). Generated once via the app's own
   export button in live mode. **Do not regenerate or overwrite** — the
   checked-in copy is the real data the user produced.
-- **`scripts/fetch-weather.mjs`** — Node script, no dependencies. Derives
-  ~475 anchor points from `data/cells.json`, fetches Open-Meteo daily weather
-  (26 days history + 8 days forecast) for each, writes `data/weather.json`.
-  Has per-request timeout, retry-on-thrown-fetch-error (handles
-  `UND_ERR_CONNECT_TIMEOUT`), checkpoint/resume (safe to re-run after a
-  partial failure), and aborts without overwriting good data if more than
-  25% of anchors fail.
+- **`scripts/fetch-weather.mjs`** — Node script, no dependencies. Maintains
+  `data/weather.json` as a **rolling archive**: anchors that already have
+  history refetch only `past_days=3`, new ones `past_days=26`, both with
+  `forecast_days=8`, and the fresh window is merged into the stored series by
+  date (fresh values overwrite overlapping days, new days append, each anchor
+  trimmed to 30 past days + forecast). Open-Meteo bills
+  `max(1, days/14 × variables/10)`, so the short window costs 1.0 per anchor
+  instead of 2.43. Requests 10 daily variables because the variable count is
+  free at the rolling window; a probe drops any the API rejects *or* returns
+  all-null for (currently both 0–7 cm soil aggregates, which only populate
+  under `models=ecmwf_ifs025` — do not pin that model, it would change the
+  provenance of precipitation and temperature and move every score). Writes
+  `LATTICE`, `STRIDE` and `today_index`. Keeps per-request timeout,
+  retry-on-thrown-fetch-error, checkpoint/resume, and the >25% failure abort.
+- **`scripts/fetch-weather.test.mjs`** — `node --test scripts/fetch-weather.test.mjs`.
+  Covers the merge (a rolling fetch merged into an archive must equal a single
+  full fetch, including at the window boundary), trimming, ragged-series
+  detection, the stride-nesting property, and the anchor join.
 - **`.github/workflows/weather.yml`** — runs the fetch script every 6 hours
   (`workflow_dispatch` also enabled for manual runs) and commits
   `data/weather.json` if it changed. Four scheduled runs/day is roughly
   8,000 of Open-Meteo's 10,000 free daily calls — don't add a fifth without
   reducing per-run weight.
 - **`README.md`** — deployment steps and workflow-failure troubleshooting.
+
+## Cell → anchor join (read this before touching weather lookup)
+
+Cells are one square mile; weather is fetched for a much sparser set of
+**anchors**. Every cell has to find its anchor, and that join is the single
+most breakage-prone seam in the app: get it wrong and the map renders nothing
+while every individual tap still returns correct data, which makes it look
+like a rendering bug rather than a lookup bug.
+
+**Rule: all cell → anchor resolution goes through `anchorHit(lat, lon)` in
+`index.html`. Never derive anchor coordinates independently.** It returns
+`{k, a, w}` — the cache key, the anchor coordinate, and the weather object or
+`null`. If you find yourself writing `snapAnchor(...)` or rounding a
+coordinate to a grid in order to look up weather, you are creating a sixth
+consumer that will drift out of sync.
+
+Anchors sit on a fixed lattice: active points are multiples of
+`LATTICE × STRIDE` (currently `0.025 × 8 = 0.2°`), and a cell joins to the
+*nearest* one. `LATTICE` and `STRIDE` are read from `weather.json` at ingest
+(falling back to `0.025` / `8`), so halving `STRIDE` to densify needs no app
+change.
+
+### Every consumer of the join
+
+| Where | What it does |
+| --- | --- |
+| `loadFromStatic()` — `need` / `totalA` | decides which anchors are missing; feeds the 20% coverage guard |
+| `loadFromStatic()` — per-row | attaches weather to each baked cell |
+| `pointEntry()` | exact-point forecast (the tap-through path) |
+| `showTop()` — rising debug log | reads the anchor series for the top 3 rising spots |
+| **`buildCells()`** | **sub-mile refine grid — the one missed during the lattice migration** |
+
+`buildCells()` is the trap. It reads as live-mode-only code because it calls
+`getWeather()`, so it was skipped when the other four were converted to the
+lattice. But in `PUBLIC_MODE` it does not fetch — it *reads `wcache`*, which
+makes it a full consumer of the join. When it still derived half-step keys via
+`snapAnchor(lat, lon, 0.2)` against a lattice `weather.json`, every fine entry
+came back `failed`, `drawOverlay` suppressed the baked cells inside
+`fineBounds` and drew nothing in their place, and zooming past the refine
+threshold punched a blank hole in the map. Tapping still worked because the
+tap handler rejects failed fine entries and falls through to `pointEntry()`,
+which was already on the lattice.
+
+It now resolves weather through `anchorHit()` and only calls `getWeather()`
+for points that cannot resolve from the cache — an empty set in `PUBLIC_MODE`
+with a complete archive, so no request is attempted at all. A refine that
+fails is scoped to itself: it rolls back any `apiBlocked` raised underneath
+(a sub-mile nicety must not put the whole app into the "weather unavailable"
+state or disable the elevation-API fallback) and refuses to install
+`fineBounds` unless at least one fine cell actually resolved, so a coverage
+gap can never blank the overlay again.
+
+### The script must agree with the app
+
+`anchorFor()` in `scripts/fetch-weather.mjs` and `anchorHit()` in
+`index.html` have to derive the *identical* anchor from the same coordinate,
+or the join misses. Both round straight to the nearest multiple of
+`LATTICE × STRIDE`. Do not reintroduce rounding via the lattice index and then
+to `STRIDE`: that double rounding disagreed for 5,844 of 48,032 cells and put
+7 requested anchors outside the file. A unit test sweeps the whole state and
+asserts the two expressions match at every point — if you change either side,
+that test is what catches you.
+
+### Temporary dual-key fallback — removable
+
+`anchorHit()` tries the lattice key first and falls back to the legacy
+`snapAnchor(lat, lon, 0.2)` half-step key, so the app renders against either
+file format and deploy order cannot take the site dark. **Remove it once a
+lattice-format `weather.json` has been live for a cycle**: delete
+`legacyAnchor` and the fallback branch inside `anchorHit()`, keeping the
+lattice path.
 
 ## Scoring model (hand-tuned — do not refactor or "clean up" without asking)
 
