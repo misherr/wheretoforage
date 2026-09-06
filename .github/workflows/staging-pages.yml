@@ -1,0 +1,44 @@
+name: Deploy staging Pages
+
+# Staging deploys through Actions rather than straight from the branch, purely so the CNAME file does
+# not have to live in git. Production and staging need different values in the same path
+# (wheretoforage.com vs dev.wheretoforage.com); with branch-based publishing GitHub writes that file
+# into the branch itself, which put a commit on the staging mirror that the source branch did not have
+# and forced every later deploy to be a force-push. Writing it into the artifact at build time instead
+# keeps the branch byte-identical to dev, so `git push preview dev:dev` stays a plain fast-forward and
+# the branch can never carry a CNAME that would break production if it were ever merged back.
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    # Only the staging mirror publishes this way. The production repo serves Pages straight from main
+    # with its own committed CNAME, so this job must never run there — the guard is what makes it safe
+    # for this file to live in the shared tree and travel to main on a merge.
+    if: github.repository == 'misherr/wheretoforage-dev'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Point the artifact at the staging domain
+        run: echo 'dev.wheretoforage.com' > CNAME
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+      - id: deployment
+        uses: actions/deploy-pages@v4
