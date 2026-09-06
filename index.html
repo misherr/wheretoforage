@@ -167,7 +167,7 @@ a.lnk{color:var(--cap-light);text-decoration:none;font-weight:600}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 /* ===================== CONFIG ===================== */
-const PUBLIC_MODE=false; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
+const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
 const DLAT=0.0145, DLON=0.0214, BLK=4; // 1 sq mi cells at 47.5°N, grouped in 4x4 blocks
 const BLAT=DLAT*BLK, BLON=DLON*BLK;
 const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400, LAPSE=0.0065; // local refine below 1 mi when zoomed way in
