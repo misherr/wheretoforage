@@ -36,6 +36,9 @@ html,body{margin:0;height:100%;background:var(--moss);color:var(--pore);
 .pill:active{background:var(--moss-2)}
 .pill.cap{background:var(--cap);border-color:var(--cap);color:#1a1208}
 .pill[disabled]{opacity:.5}
+#btn-top{background-image:linear-gradient(105deg,transparent 0%,transparent 42%,rgba(255,255,255,.8) 48%,rgba(255,255,255,.95) 50%,rgba(255,255,255,.8) 52%,transparent 58%,transparent 100%),linear-gradient(180deg,#f8e6ac 0%,#eeca79 14%,#d9a94a 45%,#b8862c 78%,#8f661d 100%);background-size:300% 100%,100% 100%;background-position:200% 0,0 0;background-repeat:no-repeat,no-repeat;color:#2a1608;border:none;text-shadow:0 1px 0 rgba(255,255,255,.35);box-shadow:0 1px 0 rgba(255,255,255,.55) inset,0 -3px 4px rgba(0,0,0,.28) inset,0 3px 10px rgba(0,0,0,.35),0 2px 12px rgba(232,192,99,.28);animation:shine 7s linear infinite}
+@keyframes shine{0%{background-position:200% 0,0 0}100%{background-position:-100% 0,0 0}}
+@media (prefers-reduced-motion:reduce){#btn-top{animation:none}}
 
 /* right rail */
 #rail{position:fixed;right:10px;top:calc(env(safe-area-inset-top) + 70px);z-index:900;display:flex;flex-direction:column;gap:8px}
@@ -74,6 +77,11 @@ body.sheet-open #bottom{transform:translateY(120%)}
 #prog .bar{height:4px;border-radius:2px;background:var(--moss-2);margin-top:6px;overflow:hidden}
 #prog .bar b{display:block;height:100%;width:0;background:var(--cap-light);transition:width .2s}
 body.sheet-open #prog{transform:translateY(calc(-1 * var(--sheet-h)))}
+
+/* tap hint */
+#tap-hint{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 114px);transform:translateX(-50%);z-index:895;background:var(--moss);border:1px solid var(--line);border-radius:14px;padding:6px 12px;font-size:11px;color:var(--pore-dim);white-space:nowrap;pointer-events:none;display:none;opacity:1;transition:opacity .4s}
+#tap-hint.fade{opacity:0}
+body.sheet-open #tap-hint{opacity:0}
 
 /* bottom sheet */
 #sheet{position:fixed;left:0;right:0;bottom:0;height:var(--sheet-h);z-index:950;background:var(--moss);border-top:1px solid var(--line);border-radius:18px 18px 0 0;
@@ -133,20 +141,20 @@ a.lnk{color:var(--cap-light);text-decoration:none;font-weight:600}
 <div id="map"></div>
 
 <div id="top">
-  <div id="brand"><h1><em>King bolete</em> Washington</h1><small id="status">Starting…</small></div>
+  <div id="brand"><h1><em>King bolete</em> Washington</h1><small id="status">Loading…</small></div>
   <button class="pill cap" id="btn-top">Top spots</button>
 </div>
 
 <div id="rail">
   <button id="btn-loc" title="My location"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="8"/></svg></button>
-  <button id="btn-base" title="Map style"><svg viewBox="0 0 24 24"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/></svg></button>
+  <button id="btn-base" title="Map style"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></svg></button>
   <button id="btn-refine" title="Refine this area" style="display:none"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-5-5"/><path d="M11 8v6M8 11h6"/></svg></button>
-  <button id="btn-layers" title="Layers"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></svg></button>
+  <button id="btn-layers" title="Layers"><svg viewBox="0 0 24 24"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/></svg></button>
   <button id="btn-model" title="How it works"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg></button>
   <button id="btn-refresh" title="Refresh weather"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v5h-5"/></svg></button>
 </div>
 
-<div id="layers"></div>
+<div id="layers" class="open"></div>
 
 <div id="bottom">
   <div id="legends"></div>
@@ -156,7 +164,9 @@ a.lnk{color:var(--cap-light);text-decoration:none;font-weight:600}
   </div>
 </div>
 
-<div id="prog"><span id="prog-txt"></span><div class="bar"><b id="prog-bar"></b></div></div>
+<div id="tap-hint">Tap anywhere on the map for that spot's forecast</div>
+
+<div id="prog" style="display:block"><span id="prog-txt">Loading the map…</span><div class="bar"><b id="prog-bar"></b></div></div>
 
 <div id="sheet">
   <div id="grab"></div>
@@ -516,8 +526,11 @@ const bases={
   usgs:L.tileLayer('https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}',{maxZoom:16,attribution:'USGS'}),
   sat:L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:18,attribution:'Esri, Maxar, Earthstar'})
 };
-const baseOrder=['topo','usgs','sat']; let baseIdx=0; bases.topo.addTo(map);
+const baseOrder=['sat','topo','usgs']; let baseIdx=0; bases.sat.addTo(map);
 let marker=null, userLoc=null, fineBounds=null, fineEntries=[];
+let hintArmed=localStorage.getItem('tapHintSeen')===null;
+function showTapHint(){ const el=$('tap-hint'); if(!el) return; el.classList.remove('fade'); el.style.display='block'; }
+function dismissTapHint(){ const el=$('tap-hint'); if(!el||el.style.display!=='block') return; el.classList.add('fade'); localStorage.setItem('tapHintSeen','1'); setTimeout(()=>{ el.style.display='none'; },400); }
 let T=0; // selected forecast day 0..7
 const cells=new Map();       // 1-sq-mi cells: cellKey -> entry
 const cellKey=(la,lo)=>Math.floor(la/DLAT+1e-9)+':'+Math.floor(lo/DLON+1e-9);
@@ -555,7 +568,7 @@ const CellCanvas=L.Layer.extend({
     ctx.globalAlpha=1; }
 });
 const cellLayer=new CellCanvas().addTo(map);
-function renderAll(){ cellLayer.draw(); renderLegends(); }
+function renderAll(){ cellLayer.draw(); renderLegends(); if(hintArmed&&cells.size){ hintArmed=false; showTapHint(); } }
 function renderLegends(){ $('legends').innerHTML=[...active].sort((a,b)=>OVERLAYS[a].order-OVERLAYS[b].order).map(k=>{const ov=OVERLAYS[k];return `<div class="lg"><b>${ov.name}</b>`+ov.bands.map(x=>`<span><i style="background:${x[2]}"></i>${x[1]}</span>`).join('')+`</div>`;}).join(''); }
 function buildLayersMenu(){ $('layers').innerHTML=Object.keys(OVERLAYS).sort((a,b)=>OVERLAYS[a].order-OVERLAYS[b].order).reverse().map(k=>{const ov=OVERLAYS[k];return `<label><input type="checkbox" data-k="${k}" ${active.has(k)?'checked':''}><i style="background:${ov.bands[Math.floor(ov.bands.length/2)][2]}"></i><span>${ov.name}<small>${ov.sub}</small></span></label>`;}).join('');
   $('layers').querySelectorAll('input').forEach(inp=>inp.onchange=()=>{ if(inp.checked) active.add(inp.dataset.k); else active.delete(inp.dataset.k); renderAll(); }); }
@@ -569,7 +582,9 @@ function togglePlay(){ if(playing){stopPlay();return;} playing=true; $('play').i
 $('ticks').innerHTML=[0,1,2,3,4,5,6,7].map(t=>`<span>${t===0?'Now':shortDay(dayISO(t))}</span>`).join('');
 $('slider').oninput=e=>{ stopPlay(); setDay(+e.target.value); };
 $('play').onclick=togglePlay;
+progress('Loading the map…',0.01);
 buildLayersMenu(); setDay(0);
+if(window.innerWidth<640) $('layers').classList.remove('open');
 
 function gridPts(b,size){ const pts=[]; const la0=Math.floor(b.getSouth()/size)*size, lo0=Math.floor(b.getWest()/size)*size; for(let la=la0;la<=b.getNorth();la+=size) for(let lo=lo0;lo<=b.getEast();lo+=size){ const lat=+(la+size/2).toFixed(4), lon=+(lo+size/2).toFixed(4); if(inWA(lat,lon)) pts.push([lat,lon]); } return pts; }
 
@@ -728,6 +743,7 @@ async function exactPoint(lat,lon){
   catch(err){ $('sheet-body').innerHTML=`<div class="empty">${apiBlocked?apiBlocked+'. The free quota resets on a daily cycle — try again later today or tomorrow morning.':'Could not load weather for this point ('+(err&&err.message||'no response')+'). Tap again in a minute.'}</div>`; }
 }
 map.on('click',ev=>{ if($('layers').classList.contains('open')){$('layers').classList.remove('open');return;} const {lat,lng}=ev.latlng; if(!inWA(lat,lng)){setStatus('Outside Washington');return;}
+  dismissTapHint();
   if(marker) marker.remove(); marker=L.circleMarker([lat,lng],{radius:7,color:'#fff',weight:2,fillColor:'#b8742c',fillOpacity:1}).addTo(map);
   let e=null; if(fineEntries.length&&fineBounds&&fineBounds.contains([lat,lng])) e=fineEntries.find(x=>Math.abs(x.lat-lat)<=x.size/2&&Math.abs(x.lon-lng)<=(x.lonsize||x.size)/2);
   if(!e) e=cells.get(cellKey(lat,lng));
@@ -788,13 +804,15 @@ function showTop(){
   const all=spread(pool.filter(e=>e.A.now.score>=25).sort((a,b)=>b.A.now.score-a.A.now.score),8,10);
   const rising=spread(pool.filter(e=>e.A.best&&e.A.best.score>=45&&e.A.best.score>=e.A.now.score+10).sort((a,b)=>b.A.best.score-a.A.best.score),6,10);
   const near=userLoc? spread(pool.filter(e=>e.A.now.score>=25).sort((a,b)=>dist(userLoc,[a.lat,a.lon])-dist(userLoc,[b.lat,b.lon])),5,5):null;
+  rising.slice(0,3).forEach(e=>{ const a=snapAnchor(e.lat,e.lon,ANCHOR); const wa=wcache.get(key(a[0],a[1])); const w=wa&&wa.w?wa.w:null;
+    console.log(`[rising] ${e.lat}, ${e.lon}`,{fut:e.A.fut,habScore:e.hab.score,seasonNote:e.hab.seasonNote,'w.p':w&&w.p,'w.today':w&&w.today}); });
   openSheet('Where to go today',loading?'Still loading — best areas are scored first':'Best square miles across the state',true);
-  const row=e=>{const s=Math.round(e.A.now.score);return `<div class="spot" data-k="${key(e.lat,e.lon)}"><div class="sc" style="background:${colorOf(s)||'#556a55'}">${s}</div><div class="m"><b>${e.hab.zone}</b><span>${ft(e.elev).toLocaleString()} ft${e.terr&&e.terr.aspect!=null?' · '+compass(e.terr.aspect)+' face':''} · ${e.lat.toFixed(2)}, ${e.lon.toFixed(2)}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi':''}${e.A.best.score>e.A.now.score+5?' · peaks '+fmtDay(e.A.best.date):''}</span></div></div>`;};
+  const row=(e,useBest)=>{const s=Math.round(useBest?e.A.best.score:e.A.now.score);const peak=useBest?' on '+fmtDay(e.A.best.date):(e.A.best.score>e.A.now.score+5?' · peaks '+fmtDay(e.A.best.date):'');return `<div class="spot" data-k="${key(e.lat,e.lon)}"><div class="sc" style="background:${colorOf(s)||'#556a55'}">${s}</div><div class="m"><b>${e.hab.zone}</b><span>${ft(e.elev).toLocaleString()} ft${e.terr&&e.terr.aspect!=null?' · '+compass(e.terr.aspect)+' face':''} · ${e.lat.toFixed(2)}, ${e.lon.toFixed(2)}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi':''}${peak}</span></div></div>`;};
   let h='';
   if(!all.length) h+=`<div class="empty">Nothing at medium or better anywhere scored so far. ${rising.length?'But conditions are building — see below.':'Play the timeline to see if rain is coming.'}</div>`;
-  else h+=`<div class="sec">Highest chance now</div>`+all.map(row).join('');
-  if(near&&near.length) h+=`<div class="sec">Closest to you (medium or better)</div>`+near.map(row).join('');
-  if(rising.length) h+=`<div class="sec">Coming up this week</div>`+rising.map(row).join('');
+  else h+=`<div class="sec">Highest chance now</div>`+all.map(e=>row(e)).join('');
+  if(near&&near.length) h+=`<div class="sec">Closest to you (medium or better)</div>`+near.map(e=>row(e)).join('');
+  if(rising.length) h+=`<div class="sec">Coming up this week</div>`+rising.map(e=>row(e,true)).join('');
   h+=`<p class="note">Each entry is one square mile; entries are kept at least 10 mi apart so you see distinct areas. Tap one to zoom there.</p>`;
   $('sheet-body').innerHTML=h;
   $('sheet-body').querySelectorAll('.spot').forEach(el=>el.onclick=()=>{ const e=byK.get(el.dataset.k); map.setView([e.lat,e.lon],11); showPoint(e); });
@@ -832,7 +850,7 @@ $('btn-model').onclick=showModel;
 $('btn-refine').onclick=refine;
 $('btn-refresh').onclick=()=>{ apiBlocked=null; STATIC.tried=false; STATIC.cells=null; STATIC.weather=null; let miss=0; for(const e of cells.values()) if(!e.A||e.failed) miss++; if(!miss) wcache.clear(); loadState(); };
 $('btn-layers').onclick=ev=>{ ev.stopPropagation(); $('layers').classList.toggle('open'); };
-$('btn-base').onclick=()=>{ bases[baseOrder[baseIdx]].remove(); baseIdx=(baseIdx+1)%baseOrder.length; bases[baseOrder[baseIdx]].addTo(map); setStatus(['Topo map','USGS topo','Satellite'][baseIdx]); };
+$('btn-base').onclick=()=>{ bases[baseOrder[baseIdx]].remove(); baseIdx=(baseIdx+1)%baseOrder.length; bases[baseOrder[baseIdx]].addTo(map); setStatus(['Satellite','Topo map','USGS topo'][baseIdx]); };
 $('btn-loc').onclick=()=>{ if(!navigator.geolocation){setStatus('Location not available');return;} setStatus('Finding you…'); navigator.geolocation.getCurrentPosition(pos=>{ userLoc=[pos.coords.latitude,pos.coords.longitude]; L.circleMarker(userLoc,{radius:6,color:'#fff',weight:2,fillColor:'#4a90d9',fillOpacity:1}).addTo(map); map.setView(userLoc,9); setStatus('Centered on your location'); },()=>setStatus('Location permission denied'),{enableHighAccuracy:false,timeout:10000}); };
 
 loadState();
