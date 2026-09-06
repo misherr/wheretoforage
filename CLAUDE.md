@@ -66,10 +66,20 @@ coordinate to a grid in order to look up weather, you are creating a sixth
 consumer that will drift out of sync.
 
 Anchors sit on a fixed lattice: active points are multiples of
-`LATTICE × STRIDE` (currently `0.025 × 8 = 0.2°`), and a cell joins to the
-*nearest* one. `LATTICE` and `STRIDE` are read from `weather.json` at ingest
-(falling back to `0.025` / `8`), so halving `STRIDE` to densify needs no app
-change.
+`LATTICE × STRIDE` (currently `0.025 × 4 = 0.1°`, ~1,820 anchors), and a cell
+joins to the *nearest* one. `LATTICE` and `STRIDE` are read from `weather.json`
+at ingest (falling back to `0.025` / `8`), so halving `STRIDE` to densify needs
+no app change.
+
+Densifying is a one-line change to `STRIDE` in the fetch script. Because
+activity is `i % STRIDE === 0`, halving it keeps every existing anchor active,
+so the archive is retained and only the *new* lattice points pay a full 26+8
+fetch — the load guard accepts any stored stride that is a multiple of the
+current one. Cost scales linearly with anchor count, and at 4 runs/day the
+ceiling is ~2,500 anchors: the 10,000/day and 300,000/month limits bind at
+exactly the same point, since the monthly cap is 30× the daily. **A further
+halving to `STRIDE 2` (~7,300 anchors) would not fit** — it would need roughly
+29,000 calls/day.
 
 ### Every consumer of the join
 
@@ -120,6 +130,53 @@ file format and deploy order cannot take the site dark. **Remove it once a
 lattice-format `weather.json` has been live for a cycle**: delete
 `legacyAnchor` and the fallback branch inside `anchorHit()`, keeping the
 lattice path.
+
+## Staging site
+
+`dev` is mirrored to **https://dev.wheretoforage.com** (repo `misherr/wheretoforage-dev`,
+remote `preview`). Deploying is one plain push, no force and no follow-up:
+
+```bash
+git push preview dev:dev
+```
+
+### Why it deploys through Actions
+
+Production and staging need *different* values in the same `CNAME` path
+(`wheretoforage.com` vs `dev.wheretoforage.com`). With branch-based publishing
+GitHub writes that file into the publishing branch itself, which put a commit on
+`preview/dev` that `dev` did not have. Every later deploy then needed
+`--force` plus re-asserting the domain, and the branch could never be merged
+back toward `main` without pointing production's domain at the staging host.
+
+So staging publishes via `.github/workflows/staging-pages.yml`, which writes
+`CNAME` into the *artifact* at build time. The branch stays byte-identical to
+`dev`, no CNAME with the wrong value exists in any branch, and `preview` is an
+ordinary fast-forward remote.
+
+That workflow lives in the shared tree and will travel to `main` on a merge, so
+its job is guarded by `if: github.repository == 'misherr/wheretoforage-dev'`.
+**Do not remove that guard** — it is the only thing stopping the production repo
+from deploying itself with the staging domain. Production stays on branch-based
+Pages (`build_type: legacy`, `main:/`) with its own committed `CNAME`.
+
+### Where staging gets weather
+
+Staging has no weather job — a second schedule would double the Open-Meteo
+spend — so it borrows production's archive over CORS (GitHub Pages serves
+`data/weather.json` with `Access-Control-Allow-Origin: *`). Precedence in
+`loadWeatherFile()`:
+
+1. **Local, when it is on a different lattice than production.** A dev archive
+   with a different `LATTICE`/`STRIDE` *is* the thing being staged, so it wins.
+   Once production catches up the strides match and this reverts on its own.
+2. **Production** otherwise — it is refreshed every 6h, dev's committed copy is
+   whatever was last merged and is usually stale.
+3. **Local** as the fallback if production is unreachable.
+
+The host guard checks `PROD_HOSTS` first, so adding a subdomain to
+`STAGING_HOSTS` can never switch production onto a borrowed file. `localhost`
+matches neither and keeps using its own local file.
 
 ## Scoring model (hand-tuned — do not refactor or "clean up" without asking)
 

@@ -734,16 +734,26 @@ const PROD_HOSTS=['wheretoforage.com','www.wheretoforage.com'];
 const STAGING_HOSTS=['dev.wheretoforage.com'];
 const PROD_WEATHER_URL='https://wheretoforage.com/data/weather.json';
 const isStaging=!PROD_HOSTS.includes(location.hostname)&&(STAGING_HOSTS.includes(location.hostname)||location.hostname.endsWith('github.io'));
+const readJSON=async u=>{ try{ const r=await fetch(u,{cache:'no-cache'}); if(r.ok){ const j=await r.json(); if(j&&j.time&&j.anchors) return j; } }catch(_){} return null; };
 async function loadWeatherFile(){
   if(isStaging){
-    try{
-      const r=await fetch(PROD_WEATHER_URL,{cache:'no-cache'});
-      if(r.ok){ const j=await r.json(); if(j&&j.time&&j.anchors){ weatherSource='production'; return j; } }
-      console.warn('staging: production weather returned',r.status,'— falling back to the local copy');
-    }catch(err){ console.warn('staging: production weather fetch failed — falling back to the local copy',err); }
+    const [local,prod]=await Promise.all([readJSON('data/weather.json'),readJSON(PROD_WEATHER_URL)]);
+    // Normally production is the better archive — it is refreshed every 6h while dev's committed copy
+    // is whatever was last merged. The exception is a lattice change: if dev carries an archive on a
+    // different LATTICE/STRIDE then that density is precisely what is being staged, so it wins until
+    // production catches up, at which point the strides match again and this reverts on its own.
+    if(local&&prod&&(local.LATTICE!==prod.LATTICE||local.STRIDE!==prod.STRIDE)){
+      weatherSource=`local (lattice preview: STRIDE ${local.STRIDE} vs production ${prod.STRIDE})`;
+      return local;
+    }
+    if(prod){ weatherSource='production'; return prod; }
+    if(local){ weatherSource='local (staging fallback)'; return local; }
+    console.warn('staging: no weather archive available from production or locally');
+    return null;
   }
-  try{ const r=await fetch('data/weather.json',{cache:'no-cache'}); if(r.ok){ weatherSource=isStaging?'local (staging fallback)':'local'; return await r.json(); } }catch(_){}
-  return null;
+  const local=await readJSON('data/weather.json');
+  if(local) weatherSource='local';
+  return local;
 }
 async function tryStatic(){
   if(STATIC.tried) return; STATIC.tried=true;

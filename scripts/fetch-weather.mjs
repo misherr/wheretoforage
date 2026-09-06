@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 // Verified for 8 -> 4 -> 2 by assertStrideNesting() below and by the unit test. It only holds while
 // the lattice origin stays 0 and each new stride divides the previous one, so halve - never rescale.
 export const LATTICE = 0.025;
-export const STRIDE = 8;
+export const STRIDE = 4;
 
 export const PAST_KEEP = 30;   // past days retained in the archive (model needs 26; 30 gives headroom)
 export const FC = 8;           // forecast days, counting today
@@ -209,12 +209,24 @@ async function main() {
   if (fs.existsSync(WEATHER_FILE)) {
     try {
       const prev = JSON.parse(fs.readFileSync(WEATHER_FILE, 'utf8'));
-      if (prev.LATTICE !== LATTICE || prev.STRIDE !== STRIDE) {
-        console.log(`archive lattice ${prev.LATTICE}/${prev.STRIDE} != ${LATTICE}/${STRIDE} — discarding and rebuilding in full`);
+      // Densifying is the whole point of the lattice: when STRIDE is divided down, every stored anchor
+      // is still an active point (i % prevSTRIDE === 0 implies i % STRIDE === 0 when prevSTRIDE is a
+      // multiple of STRIDE), so its history stays valid and only the new points need a full fetch.
+      // Anything else — a different LATTICE, or a coarser/indivisible STRIDE — moves the anchors and
+      // the archive has to go.
+      const compatible = prev.LATTICE === LATTICE && Number.isInteger(prev.STRIDE) && prev.STRIDE % STRIDE === 0;
+      if (!compatible) {
+        console.log(`archive lattice ${prev.LATTICE}/${prev.STRIDE} is not a superset of ${LATTICE}/${STRIDE} — discarding and rebuilding in full`);
         rebuilt = true;
       } else if (Array.isArray(prev.anchors) && Array.isArray(prev.time)) {
+        if (prev.STRIDE !== STRIDE) console.log(`densifying: STRIDE ${prev.STRIDE} -> ${STRIDE} (${round4(LATTICE * prev.STRIDE)}deg -> ${round4(LATTICE * STRIDE)}deg); stored anchors keep their history`);
         for (const a of prev.anchors) {
-          store.set(anchorKey(a.lat, a.lon), { lat: a.lat, lon: a.lon, elev: a.elev, u: a.u || null, series: toDateMap(prev.time, a) });
+          const series = toDateMap(prev.time, a);
+          // A date whose every field is null is padding, not data — an anchor that joined the archive
+          // later than the others carries one. Treating it as coverage would keep the shared axis
+          // anchored to a day nobody can actually fill, so drop it and let the axis close up.
+          for (const [d, row] of series) if (FIELDS.every(f => row[f.key] == null)) series.delete(d);
+          store.set(anchorKey(a.lat, a.lon), { lat: a.lat, lon: a.lon, elev: a.elev, u: a.u || null, series });
         }
         console.log(`archive: ${store.size} anchors, ${prev.time.length} days (${prev.time[0]} .. ${prev.time[prev.time.length - 1]})`);
       }
@@ -242,7 +254,15 @@ async function main() {
   }
   const resumed = list.length - full.length - roll.length;
   if (resumed) console.log(`resuming: ${resumed} anchors already refreshed within 5h`);
-  console.log(`fetch plan: ${full.length} full (${PAST_FULL}+${FC}d), ${roll.length} rolling (${PAST_ROLL}+${FC}d)`);
+
+  // New anchors joining an existing archive fetch deep enough to reach its earliest day, so a
+  // densification does not cost the older anchors their extra history. Open-Meteo allows 92 past days.
+  let archiveStart = null;
+  for (const a of store.values()) for (const d of a.series.keys()) if (!archiveStart || d < archiveStart) archiveStart = d;
+  const depthNeeded = archiveStart ? Math.round((Date.parse(today + 'T12:00:00Z') - Date.parse(archiveStart + 'T12:00:00Z')) / 86400e3) : 0;
+  const pastForNew = Math.min(92, Math.max(PAST_FULL, depthNeeded));
+  if (pastForNew !== PAST_FULL) console.log(`new anchors fetch ${pastForNew} past days to match the archive back to ${archiveStart}`);
+  console.log(`fetch plan: ${full.length} full (${pastForNew}+${FC}d), ${roll.length} rolling (${PAST_ROLL}+${FC}d)`);
 
   const runStamp = new Date().toISOString();
   let failed = 0;
@@ -264,10 +284,19 @@ async function main() {
   }
 
   // Build the shared time axis and the aligned per-anchor arrays. All anchors must sit on one axis.
+  // The axis starts at the *latest* first-date across anchors, not the earliest: a newly added anchor
+  // can only reach back past_days, so taking the union would mark every new anchor short of the older
+  // ones' deepest history, refetch them all pointlessly, and still have to pad with nulls. Starting
+  // where everyone has data costs at most a day or two of depth and keeps the series dense.
   function materialize() {
     const present = new Set();
-    for (const a of store.values()) for (const d of a.series.keys()) present.add(d);
-    const axis = axisWanted.filter(d => present.has(d));
+    let start = null;
+    for (const a of store.values()) {
+      let first = null;
+      for (const d of a.series.keys()) { present.add(d); if (!first || d < first) first = d; }
+      if (first && (!start || first > start)) start = first;
+    }
+    const axis = axisWanted.filter(d => present.has(d) && (!start || d >= start));
     const rows = [];
     for (const a of store.values()) {
       const s = trimSeries(a.series, axis);
@@ -317,7 +346,7 @@ async function main() {
     }
   }
 
-  if (full.length) await fetchGroup(full, PAST_FULL, 'full');
+  if (full.length) await fetchGroup(full, pastForNew, 'full');
   if (roll.length) await fetchGroup(roll, PAST_ROLL, 'roll');
 
   // ---- ragged check: every anchor must cover the shared axis, else refetch it in full ----
@@ -326,7 +355,7 @@ async function main() {
   for (const [k, a] of store) if (axis.some(d => !a.series.has(d))) ragged.push(anchors.get(k) || [a.lat, a.lon]);
   if (ragged.length) {
     console.log(`${ragged.length} anchors diverge from the shared time axis — refetching them in full`);
-    await fetchGroup(ragged, PAST_FULL, 'refetch');
+    await fetchGroup(ragged, pastForNew, 'refetch');
     axis = materialize().axis;
     let stillRagged = 0;
     for (const a of store.values()) if (axis.some(d => !a.series.has(d))) stillRagged++;
