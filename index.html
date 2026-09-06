@@ -721,12 +721,32 @@ function progress(txt,frac){ const p=$('prog'); if(txt==null&&frac==null){p.styl
 function setStatus(t){ $('status').textContent=t; }
 
 /* ===================== STATIC DATA (baked cells + daily weather file) ===================== */
-const STATIC={cells:null,weather:null,tried:false}; let weatherAsOf=null;
+const STATIC={cells:null,weather:null,tried:false}; let weatherAsOf=null, weatherSource='local';
+/* The dev-branch staging site has no weather job of its own — a second scheduled fetch would double
+   the Open-Meteo spend — so it borrows production's file, which GitHub Pages serves with
+   Access-Control-Allow-Origin: *. Its own committed data/weather.json is whatever dev last merged and
+   is usually stale, so production is preferred and the local copy is the fallback when the cross-origin
+   fetch fails. Never active on production: the prod hosts are excluded explicitly, and the rule is
+   further limited to github.io, so localhost keeps using its local file for development. */
+const PROD_HOSTS=['wheretoforage.com','www.wheretoforage.com'];
+const PROD_WEATHER_URL='https://wheretoforage.com/data/weather.json';
+const isStaging=!PROD_HOSTS.includes(location.hostname)&&location.hostname.endsWith('github.io');
+async function loadWeatherFile(){
+  if(isStaging){
+    try{
+      const r=await fetch(PROD_WEATHER_URL,{cache:'no-cache'});
+      if(r.ok){ const j=await r.json(); if(j&&j.time&&j.anchors){ weatherSource='production'; return j; } }
+      console.warn('staging: production weather returned',r.status,'— falling back to the local copy');
+    }catch(err){ console.warn('staging: production weather fetch failed — falling back to the local copy',err); }
+  }
+  try{ const r=await fetch('data/weather.json',{cache:'no-cache'}); if(r.ok){ weatherSource=isStaging?'local (staging fallback)':'local'; return await r.json(); } }catch(_){}
+  return null;
+}
 async function tryStatic(){
   if(STATIC.tried) return; STATIC.tried=true;
   try{ const r=await fetch('data/cells.json',{cache:'no-cache'}); if(r.ok) STATIC.cells=await r.json(); }catch(_){}
-  try{ const r=await fetch('data/weather.json',{cache:'no-cache'}); if(r.ok) STATIC.weather=await r.json(); }catch(_){}
-  if(STATIC.weather) ingestWeather(STATIC.weather);
+  STATIC.weather=await loadWeatherFile();
+  if(STATIC.weather){ if(isStaging) console.log(`staging: weather from ${weatherSource}`); ingestWeather(STATIC.weather); }
 }
 function ingestWeather(j){
   if(j.LATTICE>0) WLATTICE=j.LATTICE; if(j.STRIDE>0) WSTRIDE=j.STRIDE;   // lattice the file was built on
