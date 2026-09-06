@@ -593,25 +593,37 @@ function makeEntry(lat,lon,size,elev,terr,w){
   e.w=adjustWeather(w,elev,terr); e.A=hab.score<=0.08?{now:{score:0},fut:[],best:{score:0},fRain:0,hab}:fullAnalysis(e.w,hab); return e;
 }
 const snapAnchor=(lat,lon,sp)=>[Math.floor(lat/sp)*sp+sp/2,Math.floor(lon/sp)*sp+sp/2];
-/* Baked weather (data/weather.json) sits on a fixed lattice: active anchors are multiples of
-   LATTICE*STRIDE. Read the two from the file so halving STRIDE to densify needs no change here;
-   fall back to what scripts/fetch-weather.mjs ships with. A cell joins to the nearest active point. */
-let WLATTICE=0.025, WSTRIDE=8;
-const latticeAnchor=(lat,lon)=>{ const sp=WLATTICE*WSTRIDE, r=x=>Math.round(Math.round(x/sp)*sp*1e4)/1e4; return [r(lat),r(lon)]; };
-/* ---- TEMPORARY dual-key anchor lookup -------------------------------------------------------
-   Weather files written before the lattice change key anchors at snapAnchor(lat,lon,0.2) half-steps
-   (46.9, -124.1); lattice files key them at multiples of LATTICE*STRIDE (47.0, -124.0). Trying the
-   lattice key first and falling back to the legacy one makes deploy order irrelevant — whichever
-   weather.json happens to be live, or if a weather run fails partway, the map still resolves.
-   REMOVABLE once a lattice-format weather.json has been live for a cycle: delete legacyAnchor and
-   the fallback branch below, leaving the latticeAnchor lookup. ------------------------------- */
-const legacyAnchor=(lat,lon)=>snapAnchor(lat,lon,ANCHOR);
+/* Baked weather (data/weather.json) sits on a fixed lattice: the active anchors of a grid are the
+   multiples of LATTICE*stride. The archive carries two grids — a dense past grid and a coarse
+   forecast grid — but ingestWeather() splices them into one series per dense anchor, so from here
+   down there is still exactly one weather series per anchor and one join that finds it. WBASE is the
+   finest stride in the file, WCOARSE the coarsest; both are read from the file, so changing either
+   needs no change here. */
+let WLATTICE=0.025, WBASE=8, WCOARSE=8;
+const snapLattice=(lat,lon,stride)=>{ const sp=WLATTICE*stride, r=x=>Math.round(Math.round(x/sp)*sp*1e4)/1e4; return [r(lat),r(lon)]; };
+const latticeAnchor=(lat,lon)=>snapLattice(lat,lon,WBASE);
+/* A cell joins to the nearest anchor of the finest grid, falling back through the coarser strides.
+   That fallback is not decoration: the dense grid backfills across more than one scheduled run, so
+   until it is complete a cell's 0.05° anchor may not exist yet while its 0.1° or 0.2° ancestor does.
+   Because the strides nest, every coarser snap of the same point is a real anchor position — so an
+   incomplete backfill degrades resolution instead of blanking the overlay, which is the failure this
+   join has produced twice before. It also subsumes the old legacy-key fallback: a single-grid archive
+   (production's, borrowed over CORS by staging) sets WBASE and WCOARSE to that file's one stride and
+   the loop runs exactly once. Returns {k,a,w} exactly as before. */
 function anchorHit(lat,lon){
-  const a=latticeAnchor(lat,lon), ka=key(a[0],a[1]), wa=wcache.get(ka);
-  if(wa&&wa.w) return {k:ka,a,w:wa.w};
-  const b=legacyAnchor(lat,lon), kb=key(b[0],b[1]), wb=wcache.get(kb);
-  if(wb&&wb.w) return {k:kb,a:b,w:wb.w};
-  return {k:ka,a,w:null};
+  const d=snapLattice(lat,lon,WBASE), kd=key(d[0],d[1]), e=wcache.get(kd);
+  if(e&&e.w) return {k:kd,a:d,w:e.w};
+  /* Coarser levels snap the DENSE ANCHOR, never the original coordinate. The archive builds its
+     coarse set as the parents of the dense anchors, so deriving a parent any other way is double
+     rounding — the trap that cost 5,844 cells during the stride migration. It cost 2 more here:
+     cell (48.36475,-124.7085) snaps to dense (48.35,-124.7) whose parent is (48.4,-124.6), but the
+     cell snapped straight to 0.2° gives (48.4,-124.8), which no dense anchor points at and which is
+     therefore not in the file. Two cells rendered blank on the coast until this chained instead. */
+  for(let s=WBASE*2;s<=WCOARSE;s*=2){
+    const a=snapLattice(d[0],d[1],s), k=key(a[0],a[1]), c=wcache.get(k);
+    if(c&&c.w) return {k,a,w:c.w};
+  }
+  return {k:kd,a:d,w:null};
 }
 /* build a grid of cells: elevation per cell, terrain from neighbours, weather from anchors */
 async function buildCells(pts,size,anchorSp,onProgress){
@@ -734,16 +746,21 @@ const PROD_HOSTS=['wheretoforage.com','www.wheretoforage.com'];
 const STAGING_HOSTS=['dev.wheretoforage.com'];
 const PROD_WEATHER_URL='https://wheretoforage.com/data/weather.json';
 const isStaging=!PROD_HOSTS.includes(location.hostname)&&(STAGING_HOSTS.includes(location.hostname)||location.hostname.endsWith('github.io'));
-const readJSON=async u=>{ try{ const r=await fetch(u,{cache:'no-cache'}); if(r.ok){ const j=await r.json(); if(j&&j.time&&j.anchors) return j; } }catch(_){} return null; };
+// Either archive format counts as usable: single-grid {time, anchors} or two-grid {past, forecast}.
+const isArchive=j=>!!j&&((Array.isArray(j.time)&&Array.isArray(j.anchors))||(!!j.past&&!!j.forecast&&Array.isArray(j.past.anchors)&&Array.isArray(j.forecast.anchors)));
+const readJSON=async u=>{ try{ const r=await fetch(u,{cache:'no-cache'}); if(r.ok){ const j=await r.json(); if(isArchive(j)) return j; } }catch(_){} return null; };
 async function loadWeatherFile(){
   if(isStaging){
     const [local,prod]=await Promise.all([readJSON('data/weather.json'),readJSON(PROD_WEATHER_URL)]);
-    // Normally production is the better archive — it is refreshed every 6h while dev's committed copy
-    // is whatever was last merged. The exception is a lattice change: if dev carries an archive on a
-    // different LATTICE/STRIDE then that density is precisely what is being staged, so it wins until
-    // production catches up, at which point the strides match again and this reverts on its own.
-    if(local&&prod&&(local.LATTICE!==prod.LATTICE||local.STRIDE!==prod.STRIDE)){
-      weatherSource=`local (lattice preview: STRIDE ${local.STRIDE} vs production ${prod.STRIDE})`;
+    // Normally production is the better archive — it is refreshed on schedule while dev's committed
+    // copy is whatever was last merged. The exception is a grid change: if dev carries an archive on a
+    // different layout then that layout is precisely what is being staged, so it wins until production
+    // catches up, at which point the signatures match again and this reverts on its own. The signature
+    // covers the whole layout rather than one stride, so going from one grid to two counts as a
+    // difference for exactly the same reason a stride change does.
+    const sig=j=>j&&j.past&&j.forecast?`2:${j.LATTICE}/${j.past.stride}/${j.forecast.stride}`:`1:${j&&j.LATTICE}/${j&&j.STRIDE}`;
+    if(local&&prod&&sig(local)!==sig(prod)){
+      weatherSource=`local (grid preview: ${sig(local)} vs production ${sig(prod)})`;
       return local;
     }
     if(prod){ weatherSource='production'; return prod; }
@@ -761,16 +778,141 @@ async function tryStatic(){
   STATIC.weather=await loadWeatherFile();
   if(STATIC.weather){ if(isStaging) console.log(`staging: weather from ${weatherSource}`); ingestWeather(STATIC.weather); }
 }
-function ingestWeather(j){
-  if(j.LATTICE>0) WLATTICE=j.LATTICE; if(j.STRIDE>0) WSTRIDE=j.STRIDE;   // lattice the file was built on
-  // today_index is written by the fetch script against the archive's own timezone, so prefer it:
-  // it does not depend on the viewer's clock the way a local-date lookup does. Fall back to the
-  // date lookup for files that predate the field, then to the past_days clamp.
+// today_index is written by the fetch script against the archive's own timezone, so prefer it: it
+// does not depend on the viewer's clock the way a local-date lookup does. Fall back to the date
+// lookup for files that predate the field, then to the past_days clamp.
+function todayIndex(time,written,pastDays){
   const today=localISO(new Date());
-  let ti=Number.isInteger(j.today_index)&&j.today_index>=0&&j.today_index<j.time.length?j.today_index:j.time.indexOf(today);
-  if(ti<0){ ti=today>j.time[j.time.length-1]?j.time.length-1:Math.min(j.past_days,j.time.length-1); }
-  j.anchors.forEach(a=>{ wcache.set(key(a.lat,a.lon),{w:{time:j.time,p:a.p.map(v=>v??0),tmax:a.tmax,tmin:a.tmin,et0:a.et0||[],snow:a.snow||[],rh:a.rh||null,today:ti,elev:a.elev}}); });
+  let ti=Number.isInteger(written)&&written>=0&&written<time.length?written:time.indexOf(today);
+  if(ti<0) ti=today>time[time.length-1]?time.length-1:Math.min(pastDays==null?time.length-1:pastDays,time.length-1);
+  return ti;
+}
+function ingestWeather(j){
+  (j.past&&j.forecast?ingestTwoGrid:ingestOneGrid)(j);
   weatherAsOf=new Date(j.generated);
+}
+/* Install one grid's anchors as plain series on their own time axis. Every wcache entry carries its
+   own time/today, so grids with different axes coexist without padding either of them. */
+function installSeries(anchors,time,ti){
+  anchors.forEach(a=>{ wcache.set(key(a.lat,a.lon),{w:{time,p:(a.p||[]).map(v=>v??0),tmax:a.tmax,tmin:a.tmin,et0:a.et0||[],snow:a.snow||[],rh:a.rh||null,today:ti,elev:a.elev}}); });
+}
+/* Single-grid archive — the format production still writes, and what staging borrows over CORS. */
+function ingestOneGrid(j){
+  if(j.LATTICE>0) WLATTICE=j.LATTICE;
+  if(j.STRIDE>0){ WBASE=j.STRIDE; WCOARSE=j.STRIDE; }
+  installSeries(j.anchors,j.time,todayIndex(j.time,j.today_index,j.past_days));
+}
+/* Two-grid archive. The dense past grid (0.05°) runs to today; the coarse forecast grid (0.2°) runs
+   to today+7. They are spliced here, once, into one series per dense anchor.
+
+   The splice is a bias correction, not a blend. A dense anchor and its 0.2° parent are not the same
+   place — different elevation, different exposure — so their values differ systematically, and
+   joining them raw steps every variable at today, which the flush model would read as a real event.
+   So measure how the two grids disagree over the days they BOTH cover, then carry that offset across
+   the forecast, tapering to zero over ~4 days as the measured offset stops meaning anything.
+   Temperature is additive (an elevation/inversion offset in °C), precipitation multiplicative (an
+   orographic factor). Blending the two series instead would smear away the dense detail the past grid
+   exists to provide, and would still leave a step — just a wider one.
+
+   The spliced series belongs to the dense anchor, elevation included, so adjustWeather's lapse-rate
+   correction downstream is unchanged and now works from a much nearer anchor for past days. That is
+   the point of the dense grid: the standard lapse rate assumes a well-mixed atmosphere, and PNW
+   autumn inversions routinely invert its sign. */
+const BIAS_TAPER=4, BIAS_WINDOW=7, BIAS_RATIO_LO=0.4, BIAS_RATIO_HI=2.5, BIAS_MIN_DAYS=3, BIAS_MIN_RAIN=2;
+/* The temperature clamp is physical, not a round number: a dense anchor and its 0.2° parent can sit
+   1,000 m apart in the Cascades, where 6.5 °C/km makes a 6–7 °C offset entirely real. Measured on the
+   live archive the offset regresses on the lapse prediction with slope 1.293 (n=2,683) — it is
+   elevation signal, and a flat ±6 was discarding it for 7.3% of anchors, all large elevation gaps,
+   leaving up to 2.6 °C of error in exactly the terrain that grows boletes. So allow what the
+   elevation difference can physically explain, with slack for inversions steeper than the standard
+   rate, and stay tight where no elevation difference can explain any offset at all. */
+const BIAS_TEMP_BASE=4, BIAS_TEMP_SLACK=1.5, BIAS_TEMP_MAX=20;
+const biasTempLimit=(de,ce)=>(Number.isFinite(de)&&Number.isFinite(ce))
+  ? Math.min(BIAS_TEMP_MAX, LAPSE*Math.abs(de-ce)*BIAS_TEMP_SLACK+BIAS_TEMP_BASE) : BIAS_TEMP_BASE;
+function ingestTwoGrid(j){
+  if(j.LATTICE>0) WLATTICE=j.LATTICE;
+  WBASE=j.past.stride>0?j.past.stride:2; WCOARSE=j.forecast.stride>0?j.forecast.stride:8;
+  if(WCOARSE<WBASE) WCOARSE=WBASE;
+  const B=j.bias||{}, taper=B.taper_days>0?B.taper_days:BIAS_TAPER, win=B.window_days>0?B.window_days:BIAS_WINDOW;
+  const P=j.past, F=j.forecast;
+  const pToday=todayIndex(P.time,P.today_index,null);
+  const fIdx=new Map(F.time.map((d,i)=>[d,i]));
+  const fToday=F.time.indexOf(P.time[pToday]);
+  // One shared axis for every anchor: the dense past through today, then the coarse forecast beyond.
+  const future=fToday>=0?F.time.slice(fToday+1):[];
+  const time=P.time.slice(0,pToday+1).concat(future);
+  const coarse=new Map(); F.anchors.forEach(a=>coarse.set(key(a.lat,a.lon),a));
+  // Install the coarse anchors first, uncorrected, on their own axis. These are what anchorHit's
+  // fallback lands on for a cell whose dense anchor has not been backfilled yet — without them a
+  // partly filled dense grid leaves holes, which is the blank-overlay failure all over again. Dense
+  // anchors are written after and overwrite any position the two grids share, so a completed backfill
+  // leaves nothing uncorrected. This is why coverage only ever loses resolution, never area.
+  installSeries(F.anchors,F.time,todayIndex(F.time,F.today_index,null));
+  // The script builds the coarse set as the parents of the dense anchors, so the parent always
+  // exists. The ring search is belt and braces: an anchor with no forecast at all would feed null
+  // tmax into analyze(), where at() turns it into 0 °C and fires the frost kill switch.
+  function coarseFor(lat,lon){
+    const p=snapLattice(lat,lon,WCOARSE), hit=coarse.get(key(p[0],p[1]));
+    if(hit) return hit;
+    const sp=WLATTICE*WCOARSE, r=x=>Math.round(x*1e4)/1e4; let best=null,bd=Infinity;
+    for(let di=-2;di<=2;di++) for(let dj=-2;dj<=2;dj++){
+      if(!di&&!dj) continue;
+      const c=coarse.get(key(r(p[0]+di*sp),r(p[1]+dj*sp)));
+      if(!c) continue;
+      const d=(c.lat-lat)*(c.lat-lat)+(c.lon-lon)*(c.lon-lon);
+      if(d<bd){bd=d;best=c;}
+    }
+    return best;
+  }
+  const lim=(v,lo,hi)=>Math.min(hi,Math.max(lo,v));
+  const at=(arr,i)=>Array.isArray(arr)&&arr[i]!=null?arr[i]:null;
+  let orphans=0, biased=0, sumT=0, sumR=0;
+  P.anchors.forEach(a=>{
+    const c=coarseFor(a.lat,a.lon);
+    if(!c) orphans++;
+    // overlap: the most recent `win` days the dense grid and the coarse grid both cover
+    const pairs=[];
+    for(let i=pToday;i>=0&&pairs.length<win;i--){ const fi=fIdx.get(P.time[i]); if(fi!=null) pairs.push([i,fi]); }
+    let sT=0,nT=0,sN=0,nN=0,dR=0,cR=0;
+    if(c) for(const pr of pairs){
+      const dx=at(a.tmax,pr[0]), cx=at(c.tmax,pr[1]); if(dx!=null&&cx!=null){ sT+=dx-cx; nT++; }
+      const dn=at(a.tmin,pr[0]), cn=at(c.tmin,pr[1]); if(dn!=null&&cn!=null){ sN+=dn-cn; nN++; }
+      const dp=at(a.p,pr[0]), cp=at(c.p,pr[1]); if(dp!=null&&cp!=null){ dR+=dp; cR+=cp; }
+    }
+    const enough=!!c&&pairs.length>=BIAS_MIN_DAYS;
+    const tl=c?biasTempLimit(a.elev,c.elev):BIAS_TEMP_BASE;
+    const bMax=enough&&nT?lim(sT/nT,-tl,tl):0;
+    const bMin=enough&&nN?lim(sN/nN,-tl,tl):0;
+    // A ratio needs enough rain on the coarse side to divide by, or two tenths of a millimetre in a
+    // dry fortnight produces a wild multiplier.
+    const bRain=enough&&cR>=BIAS_MIN_RAIN?lim(dR/cR,BIAS_RATIO_LO,BIAS_RATIO_HI):1;
+    if(enough){ biased++; sumT+=bMax; sumR+=bRain; }
+    const w={time,today:pToday,elev:a.elev};
+    for(const v of ['p','tmax','tmin','et0','snow','rh']){
+      const pa=a[v], ca=c?c[v]:null;
+      if(!Array.isArray(pa)&&!Array.isArray(ca)){ w[v]=v==='rh'?null:[]; continue; }
+      const out=[];
+      for(let i=0;i<=pToday;i++) out.push(at(pa,i));
+      for(let k=1;k<=future.length;k++){
+        let val=at(ca,fToday+k);
+        if(val!=null){
+          const wt=Math.max(0,1-(k-1)/taper);
+          if(v==='tmax') val+=wt*bMax;
+          else if(v==='tmin') val+=wt*bMin;
+          else if(v==='p') val*=1+wt*(bRain-1);
+        }
+        out.push(val);
+      }
+      w[v]=out;
+    }
+    w.p=w.p.map(v=>v==null?0:v);
+    wcache.set(key(a.lat,a.lon),{w});
+  });
+  const mean=(s)=>biased?s/biased:0;
+  console.log('weather: two grids — past '+P.anchors.length+' anchors @stride '+WBASE+', forecast '+F.anchors.length+' @stride '+WCOARSE
+    +'; '+time.length+' days ('+time[0]+' .. '+time[time.length-1]+'), today_index '+pToday
+    +'; bias measured on '+biased+' anchors (mean tmax '+mean(sumT).toFixed(2)+'°C, mean rain x'+mean(sumR).toFixed(2)+')'
+    +(orphans?', '+orphans+' with no forecast parent':''));
 }
 function weatherAgeNote(){ if(!weatherAsOf) return ''; const h=(Date.now()-weatherAsOf)/3600000; const when=weatherAsOf.toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'}); return h>36?` · weather file is ${Math.round(h/24)} days old (${when})`:` · weather as of ${when}`; }
 async function loadFromStatic(gen){

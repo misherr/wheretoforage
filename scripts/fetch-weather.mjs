@@ -1,32 +1,53 @@
-// Rolling weather archive for data/weather.json, built from the anchors implied by data/cells.json.
+// Two-grid rolling weather archive for data/weather.json, built from the anchors implied by data/cells.json.
 // Run on a schedule by .github/workflows/weather.yml. Node 20+, no dependencies.
 //
-// Why rolling: Open-Meteo bills each location as max(1, days/14 x variables/10). Refetching 34 days
-// costs 2.43 per anchor; refetching only the last few days costs 1.0. We keep the history locally and
-// merge a short fresh window into it each run, so the archive stays complete at ~2.4x lower cost.
+// Why two grids: rain and temperature that already fell are worth resolving precisely; an 8-day
+// forecast is a guess and does not deserve the same spend. So we run
+//
+//   past     stride 2 (0.05deg, ~6,700 anchors)  past_days=3  forecast_days=1   once daily
+//   forecast stride 8 (0.2deg,  ~500 anchors)    past_days=1  forecast_days=8   twice daily
+//
+// Open-Meteo bills each location as max(1, days/14 x variables/10). Both windows are far under 14
+// days, so both floor at 1.0 call per location and cost is purely anchor count. Because the variable
+// count is free at that floor, the dense grid carries every variable, not just precipitation — past
+// temperature matters as much as past rain, since the standard lapse rate assumes a well-mixed
+// atmosphere and PNW autumn inversions routinely invert its sign.
+//
+// Both grids sit on the same lattice and stride 8 is a multiple of stride 2, so every coarse anchor
+// is also a dense anchor and keeps whatever history it has accumulated.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /* ===================== lattice ===================== */
 // Anchors live on a fixed lattice of LATTICE-degree steps. A lattice point (i,j) is an *active*
-// anchor only when i % STRIDE === 0 && j % STRIDE === 0, and its coordinates are (i*LATTICE, j*LATTICE).
-// At STRIDE 8 that is every 0.2 degrees.
+// anchor of a grid only when i % stride === 0 && j % stride === 0, and its coordinates are
+// (i*LATTICE, j*LATTICE).
 //
-// The point of this scheme: halving STRIDE must preserve every existing anchor position, so we can
-// densify later without refetching history for the anchors we already have. That holds because an
-// anchor's coordinate depends only on its lattice index i, and activity is i % STRIDE === 0:
-//   STRIDE 8 -> 4: i % 8 === 0 implies i % 4 === 0, so every 0.2-degree anchor is still active at 0.1.
-//   STRIDE 4 -> 2: i % 4 === 0 implies i % 2 === 0, so every 0.1-degree anchor is still active at 0.05.
-// Verified for 8 -> 4 -> 2 by assertStrideNesting() below and by the unit test. It only holds while
-// the lattice origin stays 0 and each new stride divides the previous one, so halve - never rescale.
+// The point of this scheme: halving a stride must preserve every existing anchor position, so we can
+// densify without refetching history for the anchors we already have. That holds because an anchor's
+// coordinate depends only on its lattice index i, and activity is i % stride === 0:
+//   stride 8 -> 4: i % 8 === 0 implies i % 4 === 0, so every 0.2-degree anchor is still active at 0.1.
+//   stride 4 -> 2: i % 4 === 0 implies i % 2 === 0, so every 0.1-degree anchor is still active at 0.05.
+// Verified by assertStrideNesting() below and by the unit test. It only holds while the lattice origin
+// stays 0 and each new stride divides the previous one, so halve - never rescale.
 export const LATTICE = 0.025;
-export const STRIDE = 4;
+export const PAST_STRIDE = 2;       // dense past grid: 0.05deg, near HRRR's 3km native resolution
+export const FORECAST_STRIDE = 8;   // coarse forecast grid: 0.2deg, the original anchor set
 
 export const PAST_KEEP = 30;   // past days retained in the archive (model needs 26; 30 gives headroom)
-export const FC = 8;           // forecast days, counting today
+export const FC = 8;           // forecast days on the coarse grid, counting today
 export const PAST_FULL = 26;   // past window when an anchor has no history yet
-export const PAST_ROLL = 3;    // past window when an anchor already has history
+export const PAST_ROLL = 3;    // past window when a dense anchor already has history
+
+// Each grid's own fetch window and cadence. `cadenceHours` is how often the workflow runs that grid;
+// the resume guard derives its freshness window from it (see freshWindowMs), so the two grids can
+// never disagree about what "already refreshed" means the way one global 5h constant did.
+export const GRIDS = {
+  past:     { stride: PAST_STRIDE,     past: PAST_ROLL, fc: 1,  cadenceHours: 24, label: 'dense past' },
+  forecast: { stride: FORECAST_STRIDE, past: 1,         fc: FC, cadenceHours: 12, label: 'coarse forecast' },
+};
+export const GRID_ORDER = ['forecast', 'past'];   // priority: the user-facing forecast is cheap, never starve it
 
 const BATCH = 50;              // anchors per request
 const GAP = 8000;              // ms between batches (stay under the per-minute limit)
@@ -37,24 +58,54 @@ const TZ = 'America/Los_Angeles';
 const CELLS_FILE = process.env.CELLS_FILE || 'data/cells.json';
 const WEATHER_FILE = process.env.WEATHER_FILE || 'data/weather.json';
 
-export function latticeIndex(deg) { return Math.round(deg / LATTICE); }
-export function isActive(i, j, stride = STRIDE) { return i % stride === 0 && j % stride === 0; }
+// Which grids this invocation runs. The workflow passes GRIDS=forecast on the off-cycle run and
+// GRIDS=past,forecast on the daily one.
+const WANT = (process.env.GRIDS || 'past,forecast').split(',').map(s => s.trim()).filter(Boolean);
 
-// Nearest active anchor to a coordinate. Round straight to the active spacing (LATTICE*STRIDE) rather
-// than rounding to the lattice index and then to STRIDE: that double rounding can land on a neighbour
-// that is not the closest anchor (it disagreed for 5,844 of 48,032 cells), and index.html has to be
-// able to derive the identical anchor from the same coordinate or the join misses.
-export function anchorFor(lat, lon) {
-  const sp = LATTICE * STRIDE;
+/* ===================== call budget ===================== */
+// Open-Meteo's free tier is 10,000 calls/day and 300,000/month (exactly 30x, so there is no monthly
+// headroom to borrow against a busy day). Steady state here is ~7,650/day. The one-off stride-2
+// backfill is ~7,700 calls on top of that, which does not fit in a single day — so a run stops
+// cleanly at the ceiling and the next run resumes from the checkpoint rather than failing.
+export const DAILY_CEILING = Number(process.env.DAILY_CALL_CEILING || 9500);
+// Held back from the *backfill* phase only, so a long backfill can never eat the budget the next
+// forecast run needs. Rolling refreshes and the forecast grid itself are never withheld.
+const RESERVE = process.env.FORECAST_RESERVE == null ? null : Number(process.env.FORECAST_RESERVE);
+// Open-Meteo also throttles per hour. A 6,700-anchor dense run would otherwise fire every batch
+// inside ~20 minutes, so batches are paced against a sliding one-hour window as well as the ledger.
+const HOURLY_CEILING = Number(process.env.HOURLY_CALL_CEILING || 5000);
+// Batches between checkpoint writes. The archive is several megabytes and a dense run is ~134
+// batches, so writing after every one is a lot of I/O for little extra safety.
+const CHECKPOINT_EVERY = Number(process.env.CHECKPOINT_EVERY || 5);
+
+/* ===================== anchors ===================== */
+export function latticeIndex(deg) { return Math.round(deg / LATTICE); }
+export function isActive(i, j, stride) { return i % stride === 0 && j % stride === 0; }
+
+// Nearest active anchor of `stride` to a coordinate. Round straight to the active spacing
+// (LATTICE*stride) rather than rounding to the lattice index and then to the stride: that double
+// rounding can land on a neighbour that is not the closest anchor (it disagreed for 5,844 of 48,032
+// cells), and index.html has to derive the identical anchor from the same coordinate or the join
+// misses.
+export function anchorFor(lat, lon, stride = PAST_STRIDE) {
+  const sp = LATTICE * stride;
   return [round4(Math.round(lat / sp) * sp), round4(Math.round(lon / sp) * sp)];
 }
 export const anchorKey = (lat, lon) => lat.toFixed(4) + ',' + lon.toFixed(4);
 function round4(x) { return Math.round(x * 1e4) / 1e4; }
 
-// Every anchor active at STRIDE must still be active at STRIDE/2, STRIDE/4, ... down to 2.
-export function assertStrideNesting(stride = STRIDE, span = 400) {
+// The coarse anchor that serves a dense anchor's forecast. Deriving the coarse set as the *parents of
+// the dense anchors* rather than by snapping cells straight to 0.2deg is what guarantees every dense
+// anchor has a forecast to bias-correct against: snapping cells directly yields 498 anchors of which
+// 74 are not stride-2 points at all (the same double-rounding trap as above), leaving 10 dense
+// anchors orphaned. Parents-of-dense yields 493 and cannot orphan anything. index.html performs the
+// identical two-step, so the two sides cannot disagree.
+export const coarseParent = (lat, lon) => anchorFor(lat, lon, FORECAST_STRIDE);
+
+// Every anchor active at `stride` must still be active at stride/2, stride/4, ... down to 2.
+export function assertStrideNesting(stride = FORECAST_STRIDE, span = 400) {
   for (let s = stride; s >= 2; s = s / 2) {
-    if (!Number.isInteger(s)) throw new Error(`STRIDE ${stride} does not halve cleanly to an integer`);
+    if (!Number.isInteger(s)) throw new Error(`stride ${stride} does not halve cleanly to an integer`);
     for (let i = -span; i <= span; i++) {
       if (i % stride === 0 && i % s !== 0) throw new Error(`stride nesting broken: index ${i} active at ${stride} but not at ${s}`);
     }
@@ -63,8 +114,9 @@ export function assertStrideNesting(stride = STRIDE, span = 400) {
 }
 
 /* ===================== daily variables ===================== */
-// Billing charges variables/10, so ten variables cost the same as one. Fetching the extra four now
-// means we never have to refetch history when a future species model wants them.
+// Billing charges variables/10 and both grids floor at 1.0 call, so ten variables cost the same as
+// one. Fetching the extra four now means we never have to refetch history when a future species model
+// wants them.
 export const FIELDS = [
   { key: 'p', api: 'precipitation_sum', dp: 1, required: true },
   { key: 'tmax', api: 'temperature_2m_max', dp: 1, required: true },
@@ -93,8 +145,9 @@ export function dateRange(fromISO, toISO) {
 }
 
 /* ===================== archive shape ===================== */
-// An anchor is stored as parallel arrays aligned to one shared `time` axis. For merging we pivot to
-// date -> {field: value} and back, so overlapping dates overwrite cleanly and new dates append.
+// An anchor is stored as parallel arrays aligned to its grid's shared `time` axis. For merging we
+// pivot to date -> {field: value} and back, so overlapping dates overwrite cleanly and new dates
+// append.
 export function toDateMap(time, anchor) {
   const m = new Map();
   for (let k = 0; k < time.length; k++) {
@@ -130,15 +183,46 @@ export function trimSeries(map, axis) {
 // Open-Meteo weights a location by days/14 x variables/10, with a floor of one call.
 export function callCost(days, vars) { return Math.max(1, (days / 14) * (vars / 10)); }
 
+/* ===================== per-grid resume guard ===================== */
+// Each anchor stores `u`, the time its grid last refreshed it. A run skips anchors refreshed inside
+// that grid's freshness window, so a run that dies partway can be re-run immediately without paying
+// again for what it already got.
+//
+// The window is derived from the grid's own cadence rather than one hard-coded constant. The old
+// global 5h assumed four uniform 6-hourly runs; with the dense grid on 24h and the coarse grid on 12h
+// a single constant either skips a whole scheduled coarse run or fails to protect a resumed dense one.
+// FRESH_FRACTION of the cadence keeps the original relationship (5h of a 6h cadence is 0.83) while
+// letting each grid answer the question for itself.
+export const FRESH_FRACTION = Number(process.env.FRESH_FRACTION || 0.8);
+export function freshWindowMs(grid, fraction = FRESH_FRACTION) {
+  return GRIDS[grid].cadenceHours * 3600e3 * fraction;
+}
+// An off-cycle manual build shifts a grid's phase and the next scheduled run can land inside the
+// window and skip everything — harmless and self-correcting on the following run, but set
+// FORCE_REFRESH=1 to override when you actually mean to rebuild now.
+const FORCE_REFRESH = process.env.FORCE_REFRESH === '1';
+
 /* ===================== main ===================== */
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const rnd = (v, dp) => v == null ? null : (dp === 0 ? Math.round(v) : Math.round(v * 10 ** dp) / 10 ** dp);
 
 async function fetchJSON(url) {
   const r = await fetch(url, { signal: AbortSignal.timeout(REQ_TIMEOUT) });
-  if (!r.ok) { const e = new Error(`HTTP ${r.status} ${(await r.json().catch(() => ({}))).reason || ''}`); e.status = r.status; throw e; }
+  if (!r.ok) {
+    const reason = (await r.json().catch(() => ({}))).reason || '';
+    const e = new Error(`HTTP ${r.status} ${reason}`);
+    e.status = r.status; e.reason = reason;
+    throw e;
+  }
   return r.json();
 }
+
+// Open-Meteo answers 429 for three different things. A minutely limit clears inside the retry budget,
+// so retrying is right. An hourly or daily limit does not clear for the rest of the run — retrying it
+// burns eight attempts per batch and then marks perfectly good anchors as failed, which walks the run
+// into the >25% abort and loses everything it had. Treat those two as the API telling us the same
+// thing our own ledger would: stop, checkpoint, resume next run.
+export const isQuota429 = e => e && e.status === 429 && /(hourly|daily)/i.test(e.reason || e.message || '');
 function buildURL(pts, vars, past, fc) {
   return `https://api.open-meteo.com/v1/forecast?latitude=${pts.map(a => a[0].toFixed(4)).join(',')}` +
     `&longitude=${pts.map(a => a[1].toFixed(4)).join(',')}&daily=${vars.join(',')}` +
@@ -184,6 +268,7 @@ async function probeVariables(probePt) {
 
 async function main() {
   assertStrideNesting();
+  for (const g of WANT) if (!GRIDS[g]) { console.error(`unknown grid "${g}" — expected some of ${Object.keys(GRIDS).join(', ')}`); process.exit(1); }
 
   if (!fs.existsSync(CELLS_FILE)) {
     console.error(`${CELLS_FILE} not found — export it from the app first (info panel -> Export cells.json).`);
@@ -194,140 +279,210 @@ async function main() {
   catch (e) { console.error(`${CELLS_FILE} is not valid JSON:`, e.message); process.exit(1); }
   if (!cells.rows || !cells.rows.length) { console.error(`${CELLS_FILE} has no rows — re-export it after a complete load.`); process.exit(1); }
 
-  // active anchors implied by the cells
-  const anchors = new Map();
-  for (const r of cells.rows) { const a = anchorFor(r[0], r[1]); anchors.set(anchorKey(a[0], a[1]), a); }
-  const list = [...anchors.values()];
-  console.log(`${list.length} active anchors (LATTICE ${LATTICE}, STRIDE ${STRIDE} => ${round4(LATTICE * STRIDE)}deg spacing)`);
+  // ---- the two anchor sets ----
+  const wantAnchors = { past: new Map(), forecast: new Map() };
+  for (const r of cells.rows) { const a = anchorFor(r[0], r[1], PAST_STRIDE); wantAnchors.past.set(anchorKey(a[0], a[1]), a); }
+  for (const a of wantAnchors.past.values()) { const c = coarseParent(a[0], a[1]); wantAnchors.forecast.set(anchorKey(c[0], c[1]), c); }
+  console.log(`grids (LATTICE ${LATTICE}):`);
+  for (const g of GRID_ORDER) console.log(`  ${g.padEnd(8)} stride ${String(GRIDS[g].stride).padStart(2)} = ${round4(LATTICE * GRIDS[g].stride)}deg, ${wantAnchors[g].size} anchors, past_days=${GRIDS[g].past} forecast_days=${GRIDS[g].fc}, every ${GRIDS[g].cadenceHours}h`);
+  console.log(`running: ${WANT.join(', ')}`);
 
   const today = todayISO();
-  const axisWanted = dateRange(addDays(today, -PAST_KEEP), addDays(today, FC - 1));
+  const axisWanted = {
+    past: dateRange(addDays(today, -PAST_KEEP), today),
+    forecast: dateRange(addDays(today, -PAST_KEEP), addDays(today, FC - 1)),
+  };
 
   // ---- load the existing archive ----
-  let store = new Map();            // anchorKey -> {lat, lon, elev, series: Map<date,row>, u}
+  const store = { past: new Map(), forecast: new Map() };   // grid -> anchorKey -> {lat,lon,elev,u,series}
+  let budget = { day: today, spent: 0 };
   let rebuilt = false;
+
+  // A date whose every field is null is padding, not data — an anchor that joined the archive later
+  // than the others carries one. Treating it as coverage would keep the shared axis anchored to a day
+  // nobody can actually fill, so drop it and let the axis close up.
+  const loadAnchors = (grid, time, rows) => {
+    for (const a of rows) {
+      const series = toDateMap(time, a);
+      for (const [d, row] of series) if (FIELDS.every(f => row[f.key] == null)) series.delete(d);
+      store[grid].set(anchorKey(a.lat, a.lon), { lat: a.lat, lon: a.lon, elev: a.elev, u: a.u || null, series });
+    }
+  };
+
   if (fs.existsSync(WEATHER_FILE)) {
     try {
       const prev = JSON.parse(fs.readFileSync(WEATHER_FILE, 'utf8'));
-      // Densifying is the whole point of the lattice: when STRIDE is divided down, every stored anchor
-      // is still an active point (i % prevSTRIDE === 0 implies i % STRIDE === 0 when prevSTRIDE is a
-      // multiple of STRIDE), so its history stays valid and only the new points need a full fetch.
-      // Anything else — a different LATTICE, or a coarser/indivisible STRIDE — moves the anchors and
-      // the archive has to go.
-      const compatible = prev.LATTICE === LATTICE && Number.isInteger(prev.STRIDE) && prev.STRIDE % STRIDE === 0;
-      if (!compatible) {
-        console.log(`archive lattice ${prev.LATTICE}/${prev.STRIDE} is not a superset of ${LATTICE}/${STRIDE} — discarding and rebuilding in full`);
+      if (prev.LATTICE !== LATTICE) {
+        console.log(`archive lattice ${prev.LATTICE} != ${LATTICE} — discarding and rebuilding in full`);
         rebuilt = true;
-      } else if (Array.isArray(prev.anchors) && Array.isArray(prev.time)) {
-        if (prev.STRIDE !== STRIDE) console.log(`densifying: STRIDE ${prev.STRIDE} -> ${STRIDE} (${round4(LATTICE * prev.STRIDE)}deg -> ${round4(LATTICE * STRIDE)}deg); stored anchors keep their history`);
-        for (const a of prev.anchors) {
-          const series = toDateMap(prev.time, a);
-          // A date whose every field is null is padding, not data — an anchor that joined the archive
-          // later than the others carries one. Treating it as coverage would keep the shared axis
-          // anchored to a day nobody can actually fill, so drop it and let the axis close up.
-          for (const [d, row] of series) if (FIELDS.every(f => row[f.key] == null)) series.delete(d);
-          store.set(anchorKey(a.lat, a.lon), { lat: a.lat, lon: a.lon, elev: a.elev, u: a.u || null, series });
+      } else if (prev.format === 2 && prev.past && prev.forecast) {
+        // Same two-grid format. A stored stride is reusable when it is a multiple of ours: every
+        // stored anchor is then still an active point and keeps its history.
+        for (const g of GRID_ORDER) {
+          const s = prev[g];
+          if (!s || !Array.isArray(s.anchors) || !Array.isArray(s.time)) continue;
+          if (s.stride !== GRIDS[g].stride) console.log(`  ${g}: stride ${s.stride} -> ${GRIDS[g].stride}; anchors still active keep their history`);
+          const rows = s.anchors.filter(a => wantAnchors[g].has(anchorKey(a.lat, a.lon)));
+          loadAnchors(g, s.time, rows);
+          console.log(`  ${g}: adopted ${rows.length} of ${s.anchors.length} stored anchors, ${s.time.length} days (${s.time[0]} .. ${s.time[s.time.length - 1]})`);
         }
-        console.log(`archive: ${store.size} anchors, ${prev.time.length} days (${prev.time[0]} .. ${prev.time[prev.time.length - 1]})`);
+        if (prev.budget && prev.budget.day) budget = { day: prev.budget.day, spent: Number(prev.budget.spent) || 0 };
+      } else if (Array.isArray(prev.anchors) && Array.isArray(prev.time) && Number.isInteger(prev.STRIDE)) {
+        // Single-grid (format 1) archive. Its anchors are active in any grid whose stride divides the
+        // stored one, so the old stride-4 file seeds the dense past grid outright and its stride-8
+        // subset seeds the forecast grid. That is what makes this migration cost 4,983 backfills
+        // instead of 6,666.
+        console.log(`archive is single-grid (STRIDE ${prev.STRIDE}) — adopting each stored anchor into whichever grids it is active in`);
+        for (const g of GRID_ORDER) {
+          const rows = prev.anchors.filter(a => wantAnchors[g].has(anchorKey(a.lat, a.lon)));
+          loadAnchors(g, prev.time, rows);
+          console.log(`  ${g}: adopted ${rows.length} of ${prev.anchors.length} stored anchors`);
+        }
       }
     } catch (e) { console.log(`archive unreadable (${e.message}) — rebuilding in full`); rebuilt = true; }
   } else console.log('no archive yet — first full build');
 
-  // drop anchors that are no longer active
-  for (const k of [...store.keys()]) if (!anchors.has(k)) store.delete(k);
+  // drop anchors that are no longer active in their grid
+  for (const g of GRID_ORDER) for (const k of [...store[g].keys()]) if (!wantAnchors[g].has(k)) store[g].delete(k);
 
-  // resume: anything already refreshed in the last 5 hours stays as it is
-  const freshCut = Date.now() - 5 * 3600e3;
-  const isFresh = k => { const u = store.get(k)?.u; return u && Date.parse(u) > freshCut; };
+  // ---- daily call ledger ----
+  // Runs are separate processes, so the ledger has to live in the committed file. It resets when the
+  // archive's timezone day rolls over.
+  if (budget.day !== today) { if (budget.spent) console.log(`budget: new day (${budget.day} -> ${today}) — resetting spend from ${budget.spent.toFixed(0)}`); budget = { day: today, spent: 0 }; }
+  const reserve = RESERVE != null ? RESERVE : wantAnchors.forecast.size + 1;
+  console.log(`budget: ${budget.spent.toFixed(0)} of ${DAILY_CEILING} already spent today; backfill holds back ${reserve} for the next forecast run`);
 
-  const probe = await probeVariables(list[0]);
+  let stoppedOnBudget = false;
+  const hourWindow = [];     // [{t, cost}] for the sliding hourly pace
+  function hourlySpend() { const cut = Date.now() - 3600e3; while (hourWindow.length && hourWindow[0].t < cut) hourWindow.shift(); return hourWindow.reduce((a, x) => a + x.cost, 0); }
+  function spend(cost) { budget.spent += cost; hourWindow.push({ t: Date.now(), cost }); }
+  function affordable(cost, extraReserve = 0) { return budget.spent + cost <= DAILY_CEILING - extraReserve; }
+  async function pace(cost) {
+    while (hourWindow.length && hourlySpend() + cost > HOURLY_CEILING) {
+      const wait = Math.max(30e3, 3600e3 - (Date.now() - hourWindow[0].t) + 1000);
+      console.log(`pacing: ${hourlySpend().toFixed(0)}/${HOURLY_CEILING} calls in the last hour — waiting ${Math.round(wait / 1000)}s`);
+      await sleep(Math.min(wait, 300e3));
+    }
+  }
+
+  const probe = await probeVariables(wantAnchors.past.values().next().value);
   const vars = probe.ok;
   const activeFields = FIELDS.filter(f => vars.includes(f.api));
   if (!activeFields.some(f => f.key === 'p')) { console.error('precipitation_sum unavailable — refusing to write an archive without rain.'); process.exit(1); }
-
-  // ---- split the work by window ----
-  const full = [], roll = [];
-  for (const a of list) {
-    const k = anchorKey(a[0], a[1]);
-    if (isFresh(k)) continue;                                   // already done this run
-    (store.has(k) && store.get(k).series.size ? roll : full).push(a);
-  }
-  const resumed = list.length - full.length - roll.length;
-  if (resumed) console.log(`resuming: ${resumed} anchors already refreshed within 5h`);
-
-  // New anchors joining an existing archive fetch deep enough to reach its earliest day, so a
-  // densification does not cost the older anchors their extra history. Open-Meteo allows 92 past days.
-  let archiveStart = null;
-  for (const a of store.values()) for (const d of a.series.keys()) if (!archiveStart || d < archiveStart) archiveStart = d;
-  const depthNeeded = archiveStart ? Math.round((Date.parse(today + 'T12:00:00Z') - Date.parse(archiveStart + 'T12:00:00Z')) / 86400e3) : 0;
-  const pastForNew = Math.min(92, Math.max(PAST_FULL, depthNeeded));
-  if (pastForNew !== PAST_FULL) console.log(`new anchors fetch ${pastForNew} past days to match the archive back to ${archiveStart}`);
-  console.log(`fetch plan: ${full.length} full (${pastForNew}+${FC}d), ${roll.length} rolling (${PAST_ROLL}+${FC}d)`);
+  spend(probe.calls * callCost(2, vars.length));
 
   const runStamp = new Date().toISOString();
-  let failed = 0;
-  const counts = { full: 0, roll: 0, refetch: 0 };
+  let failed = 0, sinceWrite = 0;
+  const counts = {};   // "grid/phase" -> {anchors, cost, days}
 
-  function writeOut(partial) {
-    const { axis, anchors: rows } = materialize();
-    fs.mkdirSync(path.dirname(WEATHER_FILE), { recursive: true });
-    fs.writeFileSync(WEATHER_FILE, JSON.stringify({
-      generated: new Date().toISOString(),
-      LATTICE, STRIDE,
-      past_days: axis.length ? Math.max(0, axis.indexOf(today)) : PAST_KEEP,
-      forecast_days: axis.length ? axis.length - Math.max(0, axis.indexOf(today)) : FC,
-      today_index: axis.indexOf(today),
-      partial,
-      time: axis,
-      anchors: rows,
-    }));
-  }
-
-  // Build the shared time axis and the aligned per-anchor arrays. All anchors must sit on one axis.
-  // The axis starts at the *latest* first-date across anchors, not the earliest: a newly added anchor
-  // can only reach back past_days, so taking the union would mark every new anchor short of the older
-  // ones' deepest history, refetch them all pointlessly, and still have to pad with nulls. Starting
-  // where everyone has data costs at most a day or two of depth and keeps the series dense.
-  function materialize() {
+  /* ---- serialisation ---- */
+  // Build a grid's shared time axis and the aligned per-anchor arrays. All anchors of a grid must sit
+  // on one axis. The axis starts at the *latest* first-date across that grid's anchors, not the
+  // earliest: a newly added anchor can only reach back past_days, so taking the union would mark every
+  // new anchor short of the older ones' deepest history, refetch them all pointlessly, and still have
+  // to pad with nulls. Starting where everyone has data costs at most a day or two of depth and keeps
+  // the series dense.
+  function materialize(grid) {
     const present = new Set();
     let start = null;
-    for (const a of store.values()) {
+    for (const a of store[grid].values()) {
       let first = null;
       for (const d of a.series.keys()) { present.add(d); if (!first || d < first) first = d; }
       if (first && (!start || first > start)) start = first;
     }
-    const axis = axisWanted.filter(d => present.has(d) && (!start || d >= start));
+    const axis = axisWanted[grid].filter(d => present.has(d) && (!start || d >= start));
     const rows = [];
-    for (const a of store.values()) {
+    for (const a of store[grid].values()) {
       const s = trimSeries(a.series, axis);
       rows.push({ lat: a.lat, lon: a.lon, elev: a.elev, u: a.u, ...fromDateMap(s, axis, activeFields) });
     }
     return { axis, anchors: rows };
   }
 
-  async function fetchGroup(pts, past, label) {
+  // Checkpointing rewrites a multi-megabyte file, and on Windows a transient sharing violation on
+  // that write killed a 1,300-call run outright. So: serialise to a sibling temp file and rename over
+  // the target — rename replaces in one step, and a failed open can no longer truncate a good
+  // archive — retry a few times, and treat a failed *checkpoint* as a warning, since the run has more
+  // batches coming and the next checkpoint carries the same state. Only the final write is fatal.
+  let ckptFails = 0;
+  async function writeOut(partial, fatal = false) {
+    const out = {};
+    for (const g of GRID_ORDER) {
+      const { axis, anchors } = materialize(g);
+      out[g] = { stride: GRIDS[g].stride, time: axis, today_index: axis.indexOf(today), anchors };
+    }
+    const body = JSON.stringify({
+      generated: new Date().toISOString(),
+      format: 2,
+      LATTICE, PAST_STRIDE, FORECAST_STRIDE,
+      today,
+      bias: { taper_days: BIAS_TAPER, window_days: BIAS_WINDOW },
+      partial,
+      budget: { day: budget.day, spent: Math.round(budget.spent * 10) / 10, ceiling: DAILY_CEILING },
+      past: out.past,
+      forecast: out.forecast,
+    });
+    fs.mkdirSync(path.dirname(WEATHER_FILE), { recursive: true });
+    const tmp = WEATHER_FILE + '.tmp';
+    let lastErr = null;
+    for (let i = 0; i < 4; i++) {
+      try { fs.writeFileSync(tmp, body); fs.renameSync(tmp, WEATHER_FILE); return true; }
+      catch (e) {
+        lastErr = e;
+        try { fs.rmSync(tmp, { force: true }); } catch (_) {}
+        if (i < 3) await sleep(500 * (i + 1));
+      }
+    }
+    if (fatal) throw lastErr;
+    console.log(`checkpoint write failed (${lastErr.code || lastErr.message}) — carrying on, the next checkpoint will catch up`);
+    ckptFails++;
+    return false;
+  }
+
+  /* ---- fetching ---- */
+  async function fetchGroup(grid, pts, past, phase, extraReserve = 0) {
+    const G = GRIDS[grid];
+    const label = `${grid}/${phase}`;
+    const per = callCost(past + G.fc, vars.length);
+    counts[label] = counts[label] || { anchors: 0, cost: 0, days: past + G.fc };
     for (let i = 0; i < pts.length; i += BATCH) {
       const b = pts.slice(i, i + BATCH);
-      let j = null, lastErr = '';
+      const cost = b.length * per;
+      if (!affordable(cost, extraReserve)) {
+        stoppedOnBudget = true;
+        console.log(`budget ceiling reached (${budget.spent.toFixed(0)}/${DAILY_CEILING}${extraReserve ? `, ${extraReserve} reserved` : ''}) — stopping ${label} at ${i}/${pts.length}; the next run resumes here`);
+        await writeOut(true);
+        return false;
+      }
+      await pace(cost);
+      let j = null, lastErr = '', quota = null;
       for (let k = 0; k < ATTEMPTS; k++) {
-        try { j = await fetchJSON(buildURL(b, vars, past, FC)); break; }
+        try { j = await fetchJSON(buildURL(b, vars, past, G.fc)); break; }
         catch (err) {
+          if (isQuota429(err)) { quota = err.reason || err.message; break; }
           lastErr = err.cause?.code || err.status || err.name || err.message;
           await sleep(err.status === 429 ? 25000 : Math.min(30000, 4000 * (k + 1)));
           console.log(`retry ${k + 1}/${ATTEMPTS} (${label}): ${lastErr}`);
         }
       }
+      if (quota) {
+        stoppedOnBudget = true;
+        console.log(`Open-Meteo says: ${quota} — stopping ${label} at ${i}/${pts.length}; the next run resumes here`);
+        await writeOut(true);
+        return false;
+      }
+      spend(cost);   // a failed batch still counts against the quota
       if (!j) {
         failed += b.length;
         console.log(`batch failed permanently (${lastErr}) — ${failed} anchors missing so far`);
-        writeOut(true);
-        if (failed > list.length * 0.25) { console.error('Too many anchors failed; keeping the archive as it stands.'); process.exit(1); }
+        await writeOut(true);
+        if (failed > wantAnchors[grid].size * 0.25) { console.error('Too many anchors failed; keeping the archive as it stands.'); process.exit(1); }
         continue;
       }
       if (!Array.isArray(j)) j = [j];
       j.forEach((x, k) => {
         const [lat, lon] = b[k];
-        const key = anchorKey(lat, lon);
+        const kk = anchorKey(lat, lon);
         const d = x.daily;
         const freshMap = new Map();
         d.time.forEach((date, n) => {
@@ -335,57 +490,152 @@ async function main() {
           for (const f of activeFields) { const arr = d[f.api]; if (arr) row[f.key] = rnd(arr[n], f.dp); }
           freshMap.set(date, row);
         });
-        const prev = store.get(key);
+        const prev = store[grid].get(kk);
         const merged = prev ? mergeSeries(prev.series, freshMap) : freshMap;
-        store.set(key, { lat, lon, elev: x.elevation, u: runStamp, series: trimSeries(merged, axisWanted) });
+        store[grid].set(kk, { lat, lon, elev: x.elevation, u: runStamp, series: trimSeries(merged, axisWanted[grid]) });
       });
-      counts[label === 'full' ? 'full' : label === 'refetch' ? 'refetch' : 'roll'] += b.length;
-      console.log(`${label}: ${Math.min(i + BATCH, pts.length)}/${pts.length}`);
-      writeOut(true);
+      counts[label].anchors += b.length; counts[label].cost += cost;
+      console.log(`${label}: ${Math.min(i + BATCH, pts.length)}/${pts.length}  (spent ${budget.spent.toFixed(0)}/${DAILY_CEILING})`);
+      if (++sinceWrite >= CHECKPOINT_EVERY || i + BATCH >= pts.length) { sinceWrite = 0; await writeOut(true); }
       if (i + BATCH < pts.length) await sleep(GAP);
+    }
+    return true;
+  }
+
+  // New anchors joining an existing grid fetch deep enough to reach its earliest day, so adding them
+  // does not cost the older anchors their extra history. Open-Meteo allows 92 past days.
+  function pastForNew(grid) {
+    let start = null;
+    for (const a of store[grid].values()) for (const d of a.series.keys()) if (!start || d < start) start = d;
+    const depth = start ? Math.round((Date.parse(today + 'T12:00:00Z') - Date.parse(start + 'T12:00:00Z')) / 86400e3) : 0;
+    return { past: Math.min(92, Math.max(PAST_FULL, depth)), start };
+  }
+
+  /* ---- run each grid ---- */
+  const freshCut = {};
+  for (const g of GRID_ORDER) freshCut[g] = Date.now() - freshWindowMs(g);
+  const isFresh = (g, k) => { if (FORCE_REFRESH) return false; const u = store[g].get(k)?.u; return u && Date.parse(u) > freshCut[g]; };
+
+  for (const grid of GRID_ORDER) {
+    if (!WANT.includes(grid)) continue;
+    if (stoppedOnBudget) break;
+    const G = GRIDS[grid];
+    const roll = [], backfill = [];
+    let resumed = 0;
+    for (const a of wantAnchors[grid].values()) {
+      const k = anchorKey(a[0], a[1]);
+      if (isFresh(grid, k)) { resumed++; continue; }
+      (store[grid].has(k) && store[grid].get(k).series.size ? roll : backfill).push(a);
+    }
+    const pn = pastForNew(grid);
+    console.log(`\n[${grid}] ${G.label}: ${roll.length} rolling (${G.past}+${G.fc}d), ${backfill.length} backfill (${pn.past}+${G.fc}d)` +
+      `${resumed ? `, ${resumed} skipped as refreshed within ${(freshWindowMs(grid) / 3600e3).toFixed(1)}h` : ''}` +
+      `${pn.start && pn.past !== PAST_FULL ? ` — backfill reaches back to ${pn.start}` : ''}`);
+
+    // Rolling refreshes keep the live data current and are never withheld; the backfill is
+    // opportunistic and holds back the forecast reserve so it can spread over several runs.
+    if (roll.length && !await fetchGroup(grid, roll, G.past, 'roll')) break;
+    if (backfill.length && !await fetchGroup(grid, backfill, pn.past, 'backfill', grid === 'past' ? reserve : 0)) break;
+
+    // ragged check: every anchor must cover its grid's shared axis, else refetch it in full
+    const axis = materialize(grid).axis;
+    const ragged = [];
+    for (const [k, a] of store[grid]) if (axis.some(d => !a.series.has(d))) ragged.push(wantAnchors[grid].get(k) || [a.lat, a.lon]);
+    if (ragged.length) {
+      console.log(`[${grid}] ${ragged.length} anchors diverge from the shared time axis — refetching them in full`);
+      if (!await fetchGroup(grid, ragged, pn.past, 'refetch', reserve)) break;
+      const axis2 = materialize(grid).axis;
+      let still = 0;
+      for (const a of store[grid].values()) if (axis2.some(d => !a.series.has(d))) still++;
+      if (still) console.log(`[${grid}] warning: ${still} anchors still short after refetch — padded with nulls`);
     }
   }
 
-  if (full.length) await fetchGroup(full, pastForNew, 'full');
-  if (roll.length) await fetchGroup(roll, PAST_ROLL, 'roll');
+  if (!store.past.size && !store.forecast.size) { console.error('No anchors in the archive.'); process.exit(1); }
+  await writeOut(stoppedOnBudget || failed > 0, true);
+  if (ckptFails) console.log(`(${ckptFails} checkpoint writes were retried or skipped during the run)`);
 
-  // ---- ragged check: every anchor must cover the shared axis, else refetch it in full ----
-  let axis = materialize().axis;
-  const ragged = [];
-  for (const [k, a] of store) if (axis.some(d => !a.series.has(d))) ragged.push(anchors.get(k) || [a.lat, a.lon]);
-  if (ragged.length) {
-    console.log(`${ragged.length} anchors diverge from the shared time axis — refetching them in full`);
-    await fetchGroup(ragged, pastForNew, 'refetch');
-    axis = materialize().axis;
-    let stillRagged = 0;
-    for (const a of store.values()) if (axis.some(d => !a.series.has(d))) stillRagged++;
-    if (stillRagged) console.log(`warning: ${stillRagged} anchors still short after refetch — padded with nulls`);
+  /* ---- report ---- */
+  const done = { past: materialize('past'), forecast: materialize('forecast') };
+  console.log(`\nwrote ${WEATHER_FILE}`);
+  for (const g of GRID_ORDER) {
+    const d = done[g], have = d.anchors.length, want = wantAnchors[g].size;
+    console.log(`  ${g.padEnd(8)} ${have}/${want} anchors, ${d.axis.length} days (${d.axis[0] || '-'} .. ${d.axis[d.axis.length - 1] || '-'}), today_index ${d.axis.indexOf(today)}${have < want ? `  <- ${want - have} still to backfill` : ''}`);
   }
-
-  if (!store.size) { console.error('No anchors in the archive.'); process.exit(1); }
-  writeOut(false);
-
-  const out = materialize();
-  const nVars = vars.length;
-  const fullDays = PAST_FULL + FC, rollDays = PAST_ROLL + FC;
-  const costFull = counts.full * callCost(fullDays, nVars);
-  const costRefetch = counts.refetch * callCost(fullDays, nVars);
-  const costRoll = counts.roll * callCost(rollDays, nVars);
-  const costProbe = probe.calls * callCost(2, nVars);
-  const total = costFull + costRefetch + costRoll + costProbe;
-  const allFull = list.length * callCost(fullDays, nVars);
-
-  console.log(`\nwrote ${WEATHER_FILE} — ${out.anchors.length} anchors, ${out.axis.length} days ` +
-    `(${out.axis[0]} .. ${out.axis[out.axis.length - 1]}), today_index ${out.axis.indexOf(today)}` +
-    `${failed ? `, ${failed} anchors missing` : ''}${rebuilt ? ', archive rebuilt' : ''}`);
+  if (failed) console.log(`  ${failed} anchors failed this run`);
+  if (rebuilt) console.log('  archive rebuilt');
   console.log('--- cost ---');
-  console.log(`variables: ${nVars}${probe.dropped.length ? ` (dropped: ${probe.dropped.join(', ')})` : ''}`);
-  if (counts.full) console.log(`  full    ${String(counts.full).padStart(4)} anchors x ${fullDays}d = ${costFull.toFixed(1)} calls`);
-  if (counts.roll) console.log(`  rolling ${String(counts.roll).padStart(4)} anchors x ${rollDays}d = ${costRoll.toFixed(1)} calls`);
-  if (counts.refetch) console.log(`  refetch ${String(counts.refetch).padStart(4)} anchors x ${fullDays}d = ${costRefetch.toFixed(1)} calls`);
-  console.log(`  probe   ${String(probe.calls).padStart(4)} requests            = ${costProbe.toFixed(1)} calls`);
-  console.log(`  total   ${total.toFixed(1)} calls  (all-full would be ${allFull.toFixed(1)}, ${(allFull / total).toFixed(2)}x more)`);
-  console.log(`  per day at 4 runs: ~${(total * 4).toFixed(0)} of Open-Meteo's 10,000 free calls`);
+  console.log(`variables: ${vars.length}${probe.dropped.length ? ` (dropped: ${probe.dropped.join(', ')})` : ''}`);
+  let total = probe.calls * callCost(2, vars.length);
+  console.log(`  probe              ${String(probe.calls).padStart(5)} requests        = ${total.toFixed(1)} calls`);
+  for (const [k, c] of Object.entries(counts)) {
+    if (!c.anchors) continue;
+    total += c.cost;
+    console.log(`  ${k.padEnd(18)} ${String(c.anchors).padStart(5)} anchors x ${c.days}d = ${c.cost.toFixed(1)} calls`);
+  }
+  console.log(`  total    ${total.toFixed(1)} calls this run`);
+  console.log(`  today    ${budget.spent.toFixed(0)} of ${DAILY_CEILING} (our ceiling) / 10,000 (Open-Meteo daily)`);
+  const steady = wantAnchors.past.size + wantAnchors.forecast.size * 2 + 2;
+  console.log(`  steady state: ${wantAnchors.past.size} dense x1 + ${wantAnchors.forecast.size} coarse x2 + 2 probes = ${steady}/day, ${steady * 30}/month`);
+  if (stoppedOnBudget) console.log('\nstopped at the call ceiling — rerun, or wait for the next scheduled run, to continue the backfill');
+}
+
+/* ===================== bias correction (consumed by index.html) ===================== */
+// The seam. The dense grid ends at today; the coarse grid carries today+1..today+7. Joining them
+// naively makes every value jump at today, because the two grids resolve terrain differently — a
+// valley-bottom dense anchor and its 0.2deg parent are not the same place. Blending would smear the
+// dense detail we just paid for, so instead we transplant the coarse forecast onto the dense anchor:
+// measure how the two grids disagree over the days they *both* cover, then carry that offset forward,
+// tapering to zero as forecast uncertainty grows and the measured offset stops meaning anything.
+//
+// Temperature is additive (dense minus coarse — an elevation/inversion offset in degrees) and
+// precipitation multiplicative (dense over coarse — an orographic factor). Both are exported here so
+// the app and the tests use one implementation.
+export const BIAS_WINDOW = 7;   // overlap days used to measure the offset
+export const BIAS_TAPER = 4;    // forecast days over which the correction decays to zero
+export const BIAS_LIMITS = { temp: 6, ratioLo: 0.4, ratioHi: 2.5, minDays: 3, minRain: 2 };
+
+// The temperature clamp has to be physical, not a round number. A dense anchor and its 0.2deg parent
+// can sit 1,000 m apart in the Cascades, and 6.5 C/km makes a 6-7 C offset between them entirely
+// real. Measured on the live archive, the offset regresses on the lapse-rate prediction with slope
+// 1.293 (n=2,683) — it is elevation signal, and a flat +/-6 clamp was discarding it for 7.3% of
+// anchors, all of them large elevation gaps, leaving up to 2.6 C of error in the mountains where the
+// boletes are. So allow what the elevation difference can physically explain, with headroom for
+// inversions steeper than the standard rate, and keep a tight limit where there is no elevation
+// reason for any offset at all.
+export const LAPSE_C_PER_KM = 6.5;
+export const BIAS_TEMP_BASE = 4;    // allowed with no elevation difference at all
+export const BIAS_TEMP_SLACK = 1.5; // multiplier on the lapse prediction: inversions beat the standard rate
+export const BIAS_TEMP_MAX = 20;    // absolute ceiling, still well inside physical plausibility
+export function tempLimitFor(denseElev, coarseElev) {
+  if (!Number.isFinite(denseElev) || !Number.isFinite(coarseElev)) return BIAS_TEMP_BASE;
+  const dzKm = Math.abs(denseElev - coarseElev) / 1000;
+  return Math.min(BIAS_TEMP_MAX, LAPSE_C_PER_KM * dzKm * BIAS_TEMP_SLACK + BIAS_TEMP_BASE);
+}
+
+// Weight for forecast day k (1 = the first day past the seam).
+export function biasWeight(k, taper = BIAS_TAPER) { return Math.max(0, 1 - (k - 1) / taper); }
+
+// dense/coarse: {date -> row} style accessors over the overlap. Returns additive offsets per
+// temperature field and one multiplicative rain ratio.
+export function measureBias(overlap, lim = BIAS_LIMITS, tempLimit = lim.temp) {
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const out = { tmax: 0, tmin: 0, rain: 1, days: 0 };
+  const acc = { tmax: [0, 0], tmin: [0, 0] };
+  let dRain = 0, cRain = 0, n = 0;
+  for (const [d, c] of overlap) {
+    if (!d || !c) continue;
+    n++;
+    for (const f of ['tmax', 'tmin']) if (d[f] != null && c[f] != null) { acc[f][0] += d[f] - c[f]; acc[f][1]++; }
+    if (d.p != null && c.p != null) { dRain += d.p; cRain += c.p; }
+  }
+  out.days = n;
+  if (n < lim.minDays) return out;                       // too little overlap to say anything
+  for (const f of ['tmax', 'tmin']) if (acc[f][1]) out[f] = clamp(acc[f][0] / acc[f][1], -tempLimit, tempLimit);
+  // A ratio needs enough rain on the coarse side to divide by; a dry fortnight would otherwise produce
+  // a wild multiplier from two tenths of a millimetre.
+  if (cRain >= lim.minRain) out.rain = clamp(dRain / cRain, lim.ratioLo, lim.ratioHi);
+  return out;
 }
 
 const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

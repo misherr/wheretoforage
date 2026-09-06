@@ -1,10 +1,29 @@
 name: Update weather
+# Two grids on two cadences, one workflow. The mode comes from which cron fired, so there is a single
+# guard, a single checkout and a single commit step rather than two files that have to be kept in sync.
+#
+#   30 11 * * *      4:30 AM PDT   both grids   dense past (0.05deg) + coarse forecast (0.2deg)
+#   30 23 * * *      4:30 PM PDT   forecast     coarse forecast only
+#
+# Budget: 6,666 dense x1/day + 493 coarse x2/day + 2 probes = 7,654 of Open-Meteo's 10,000/day and
+# 229,620 of 300,000/month. The script keeps its own ledger in data/weather.json and stops cleanly at
+# DAILY_CALL_CEILING, so the one-off stride-2 backfill (~7,700 calls, more than a day's headroom)
+# spreads itself over about two days instead of blowing the cap or failing.
 on:
   schedule:
-    # every 6 hours: 4:30 AM, 10:30 AM, 4:30 PM, 10:30 PM Pacific Daylight Time
-    # 4 runs x ~2,000 weighted calls = ~8,000 of Open-Meteo's 10,000/day free allowance
-    - cron: '30 11,17,23,5 * * *'
+    - cron: '30 11 * * *'
+    - cron: '30 23 * * *'
   workflow_dispatch:
+    inputs:
+      grids:
+        description: 'Which grids to fetch'
+        type: choice
+        default: 'forecast'
+        options: ['forecast', 'past,forecast', 'past']
+      force:
+        description: 'Ignore the per-grid freshness window (refetch even if recently refreshed)'
+        type: boolean
+        default: false
 permissions:
   contents: write
 jobs:
@@ -27,9 +46,25 @@ jobs:
             exit 1
           fi
           echo "cells.json found: $(wc -c < data/cells.json) bytes"
+      - name: Pick grids
+        id: mode
+        run: |
+          if [ -n "${{ github.event.inputs.grids }}" ]; then
+            GRIDS="${{ github.event.inputs.grids }}"
+          elif [ "${{ github.event.schedule }}" = "30 11 * * *" ]; then
+            GRIDS="past,forecast"
+          else
+            GRIDS="forecast"
+          fi
+          echo "grids=$GRIDS" >> "$GITHUB_OUTPUT"
+          echo "Running grids: $GRIDS (schedule '${{ github.event.schedule }}')"
+      # The dense grid is ~134 batches paced under the hourly limit, so a full run is roughly 1.5h.
       - name: Fetch weather
         run: node scripts/fetch-weather.mjs
-        timeout-minutes: 25
+        timeout-minutes: 180
+        env:
+          GRIDS: ${{ steps.mode.outputs.grids }}
+          FORCE_REFRESH: ${{ github.event.inputs.force == 'true' && '1' || '0' }}
       - name: Commit
         run: |
           git config user.name "weather-bot"
@@ -39,5 +74,5 @@ jobs:
             echo "no change"
             exit 0
           fi
-          git commit -m "weather $(date -u +'%F %H:%M')"
+          git commit -m "weather ${{ steps.mode.outputs.grids }} $(date -u +'%F %H:%M')"
           git push
