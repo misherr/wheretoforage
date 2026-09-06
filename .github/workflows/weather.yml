@@ -9,6 +9,11 @@ permissions:
   contents: write
 jobs:
   update:
+    # Only production fetches weather. The staging mirror (misherr/wheretoforage-dev) is a full copy of
+    # this tree, so without this guard it runs the same schedule and doubles the Open-Meteo spend —
+    # it did exactly that once, 465 calls, and committed the result to its own branch, which also put a
+    # commit on preview/dev that dev did not have. Staging reads production's archive over CORS instead.
+    if: github.repository == 'misherr/wheretoforage'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

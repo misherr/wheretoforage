@@ -160,6 +160,22 @@ its job is guarded by `if: github.repository == 'misherr/wheretoforage-dev'`.
 from deploying itself with the staging domain. Production stays on branch-based
 Pages (`build_type: legacy`, `main:/`) with its own committed `CNAME`.
 
+### Both workflows are repository-guarded, in opposite directions
+
+The staging repo is a *full copy* of this tree, so every workflow in
+`.github/workflows/` exists on both sides and each one needs to know where it
+belongs:
+
+| workflow | runs only on | why |
+| --- | --- | --- |
+| `weather.yml` | `misherr/wheretoforage` | staging running it too doubles the Open-Meteo spend |
+| `staging-pages.yml` | `misherr/wheretoforage-dev` | production deploying it would take its own domain over |
+
+`weather.yml` was unguarded at first and the staging mirror duly ran the
+schedule — 465 calls, and it committed the result to its own `dev`, which put a
+commit on `preview/dev` that `dev` did not have and broke the fast-forward push.
+Any workflow added here needs a guard on one side or the other.
+
 ### Where staging gets weather
 
 Staging has no weather job — a second schedule would double the Open-Meteo
