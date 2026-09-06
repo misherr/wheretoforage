@@ -730,7 +730,11 @@ async function tryStatic(){
 }
 function ingestWeather(j){
   if(j.LATTICE>0) WLATTICE=j.LATTICE; if(j.STRIDE>0) WSTRIDE=j.STRIDE;   // lattice the file was built on
-  const today=localISO(new Date()); let ti=j.time.indexOf(today);
+  // today_index is written by the fetch script against the archive's own timezone, so prefer it:
+  // it does not depend on the viewer's clock the way a local-date lookup does. Fall back to the
+  // date lookup for files that predate the field, then to the past_days clamp.
+  const today=localISO(new Date());
+  let ti=Number.isInteger(j.today_index)&&j.today_index>=0&&j.today_index<j.time.length?j.today_index:j.time.indexOf(today);
   if(ti<0){ ti=today>j.time[j.time.length-1]?j.time.length-1:Math.min(j.past_days,j.time.length-1); }
   j.anchors.forEach(a=>{ wcache.set(key(a.lat,a.lon),{w:{time:j.time,p:a.p.map(v=>v??0),tmax:a.tmax,tmin:a.tmin,et0:a.et0||[],snow:a.snow||[],rh:a.rh||null,today:ti,elev:a.elev}}); });
   weatherAsOf=new Date(j.generated);
