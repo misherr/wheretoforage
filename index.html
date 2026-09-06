@@ -111,7 +111,7 @@ body.sheet-open #tap-hint{opacity:0}
 .note{font-size:12.5px;color:var(--pore-dim);margin:6px 0 0}
 
 .fc{display:flex;gap:4px;align-items:flex-end;height:74px;margin-top:6px}
-.fc div{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:3px;font-size:10px;color:var(--pore-dim)}
+.fc div{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:3px;font-size:10px;color:var(--pore-dim);cursor:pointer}
 .fc div b{width:100%;border-radius:4px 4px 2px 2px;min-height:2px}
 .fc div.today span{color:var(--cap-light);font-weight:700}
 
@@ -579,6 +579,8 @@ function dayISO(t){ const d=new Date(); d.setDate(d.getDate()+t); return localIS
 function setDay(t){ T=clamp(t,0,7); $('slider').value=T; const iso=dayISO(T); $('day-lbl').textContent=fmtDay(iso); $('day-tag').textContent=T===0?'Today':T===1?'Tomorrow':`+${T} days`; $('ticks').querySelectorAll('span').forEach((el,i)=>el.classList.toggle('on',i===T)); renderAll(); }
 function stopPlay(){ playing=false; clearInterval(playTimer); $('play').innerHTML='<svg viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg>'; }
 function togglePlay(){ if(playing){stopPlay();return;} playing=true; $('play').innerHTML='<svg viewBox="0 0 24 24"><rect x="5" y="4" width="5" height="16" rx="1"/><rect x="14" y="4" width="5" height="16" rx="1"/></svg>'; if(T>=7) setDay(0); playTimer=setInterval(()=>{ if(T>=7){ stopPlay(); return; } setDay(T+1); },1100); }
+function bestDayIndex(e){ if(!e.A||!e.A.fut||!e.A.fut.length) return 0; const i=e.A.fut.indexOf(e.A.best); return i>=0?i:0; }
+function quickPlayTo(bestT,cb){ stopPlay(); setDay(0); if(bestT<=0){ cb&&cb(); return; } let t=0; const step=()=>{ t++; setDay(t); if(t>=bestT) cb&&cb(); else setTimeout(step,130); }; setTimeout(step,130); }
 $('ticks').innerHTML=[0,1,2,3,4,5,6,7].map(t=>`<span>${t===0?'Now':shortDay(dayISO(t))}</span>`).join('');
 $('slider').oninput=e=>{ stopPlay(); setDay(+e.target.value); };
 $('play').onclick=togglePlay;
@@ -759,21 +761,22 @@ $('grab').onclick=()=>sheet.classList.toggle('tall');
 let ty=null; sheet.addEventListener('touchstart',e=>{ty=e.touches[0].clientY},{passive:true}); sheet.addEventListener('touchend',e=>{ if(ty==null)return; const dy=e.changedTouches[0].clientY-ty; if(dy>70&&$('sheet-body').scrollTop<=0) { if(sheet.classList.contains('tall')) sheet.classList.remove('tall'); else closeSheet(); } else if(dy<-70) sheet.classList.add('tall'); ty=null; },{passive:true});
 
 function bar(k,v,note){ return `<div class="k">${k}</div><div class="bg"><b style="width:${Math.round(v*100)}%"></b></div><div class="v">${Math.round(v*100)}</div>`; }
-function showPoint(e){
-  const A=e.A, hab=e.hab, s=A?Math.round(A.now.score):0; const col=colorOf(s)||'#6b7a6a';
+function showPoint(e,t){
+  t=t||0;
+  const A=e.A, hab=e.hab; const now=(t===0||!e.w)?A.now:analyze(e.w,e.w.today+t,hab); const s=A?Math.round(now.score):0; const col=colorOf(s)||'#6b7a6a';
   const title=`${hab.zone}`;
   const tr=e.terr? (e.terr.aspect==null?' · flat':` · ${compass(e.terr.aspect)}-facing, ${Math.round(e.terr.slope)}° slope`):'';
   const what=e.exact?'Exact point':(e.size&&e.size<DLAT?`${(e.size*69).toFixed(1)} mi cell`:'1 sq mi cell');
-  const sub=`${what} · ${ft(e.elev).toLocaleString()} ft${tr}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi away':''}`;
+  const sub=`${what} · ${ft(e.elev).toLocaleString()} ft${tr}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi away':''}${t>0&&A.fut[t]?' · '+fmtDay(A.fut[t].date):''}`;
   openSheet(title,sub,false);
-  let h=`<div class="verdict"><div class="num" style="color:${col}">${s}%<small>${labelOf(s)}</small></div><p>${verdict(A)}</p></div>`;
+  let h=`<div class="verdict"><div class="num" style="color:${col}">${s}%<small>${labelOf(s)}</small></div><p>${t===0?verdict(A):`Forecast for ${fmtDay(A.fut[t].date)}.`}</p></div>`;
   if(A&&A.fut&&A.fut.length){
     const mx=Math.max(20,...A.fut.map(x=>x.score));
-    h+=`<div class="sec">Next 7 days</div><div class="fc">`+A.fut.map((x,i)=>`<div class="${i===0?'today':''}"><span>${Math.round(x.score)}</span><b style="height:${Math.max(3,Math.round(x.score/mx*46))}px;background:${colorOf(x.score)||'#3a4a3b'}"></b><span>${i===0?'Now':shortDay(x.date)}</span></div>`).join('')+`</div>`;
+    h+=`<div class="sec">Next 7 days</div><div class="fc">`+A.fut.map((x,i)=>`<div class="${i===t?'today':''}"><span>${Math.round(x.score)}</span><b style="height:${Math.max(3,Math.round(x.score/mx*46))}px;background:${colorOf(x.score)||'#3a4a3b'}"></b><span>${i===0?'Now':shortDay(x.date)}</span></div>`).join('')+`</div>`;
     if(A.fRain>0.5) h+=`<p class="note">${inch(A.fRain)}" of rain forecast over the next week${A.fRain>=20?' — a real trigger':A.fRain>=8?' — helps hold moisture':' — not enough to trigger a new flush'}.</p>`;
   }
-  if(A&&A.now.F!==undefined){
-    const n=A.now;
+  if(now&&now.F!==undefined){
+    const n=now;
     h+=`<div class="sec">Why</div><div class="bars">`+bar('Trigger rain',n.F)+bar('Soil moisture',n.M)+bar('Temperatures',n.X)+bar('Humidity',n.Hu)+bar('Habitat & season',hab.score)+`</div>`;
     const bits=[];
     if(n.ev) bits.push(`Best trigger: ${inch(n.ev.mm)}" around ${fmtDay(n.ev.date)} (${n.ev.age} d ago; flushes peak 7–15 d after)`); else bits.push('No rain event ≥0.4" in the 3–24 day trigger window');
@@ -794,6 +797,7 @@ function showPoint(e){
   h+=`<div class="actions">${e.exact?'':`<button class="pill cap" id="btn-exact">Exact point forecast</button>`}<a class="pill" href="https://maps.apple.com/?ll=${e.lat},${e.lon}&q=Bolete%20spot" target="_blank" rel="noopener">Open in Maps</a><a class="pill" href="https://www.google.com/maps/@${e.lat},${e.lon},14z/data=!3m1!1e3" target="_blank" rel="noopener">Satellite</a></div>`;
   $('sheet-body').innerHTML=h;
   const bx=$('btn-exact'); if(bx){ const tp=e.tap||[e.lat,e.lon]; bx.onclick=()=>exactPoint(tp[0],tp[1]); }
+  $('sheet-body').querySelectorAll('.fc>div').forEach((el,i)=>el.onclick=()=>showPoint(e,i));
   map.panTo([e.lat,e.lon],{animate:true});
 }
 
@@ -807,7 +811,7 @@ function showTop(){
   rising.slice(0,3).forEach(e=>{ const a=snapAnchor(e.lat,e.lon,ANCHOR); const wa=wcache.get(key(a[0],a[1])); const w=wa&&wa.w?wa.w:null;
     console.log(`[rising] ${e.lat}, ${e.lon}`,{fut:e.A.fut,habScore:e.hab.score,seasonNote:e.hab.seasonNote,'w.p':w&&w.p,'w.today':w&&w.today}); });
   openSheet('Where to go today',loading?'Still loading — best areas are scored first':'Best square miles across the state',true);
-  const row=(e,useBest)=>{const s=Math.round(useBest?e.A.best.score:e.A.now.score);const peak=useBest?' on '+fmtDay(e.A.best.date):(e.A.best.score>e.A.now.score+5?' · peaks '+fmtDay(e.A.best.date):'');return `<div class="spot" data-k="${key(e.lat,e.lon)}"><div class="sc" style="background:${colorOf(s)||'#556a55'}">${s}</div><div class="m"><b>${e.hab.zone}</b><span>${ft(e.elev).toLocaleString()} ft${e.terr&&e.terr.aspect!=null?' · '+compass(e.terr.aspect)+' face':''} · ${e.lat.toFixed(2)}, ${e.lon.toFixed(2)}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi':''}${peak}</span></div></div>`;};
+  const row=(e,useBest)=>{const s=Math.round(useBest?e.A.best.score:e.A.now.score);const peak=useBest?' on '+fmtDay(e.A.best.date):(e.A.best.score>e.A.now.score+5?' · peaks '+fmtDay(e.A.best.date):'');return `<div class="spot" data-k="${key(e.lat,e.lon)}"${useBest?' data-rising="1"':''}><div class="sc" style="background:${colorOf(s)||'#556a55'}">${s}</div><div class="m"><b>${e.hab.zone}</b><span>${ft(e.elev).toLocaleString()} ft${e.terr&&e.terr.aspect!=null?' · '+compass(e.terr.aspect)+' face':''} · ${e.lat.toFixed(2)}, ${e.lon.toFixed(2)}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi':''}${peak}</span></div></div>`;};
   let h='';
   if(!all.length) h+=`<div class="empty">Nothing at medium or better anywhere scored so far. ${rising.length?'But conditions are building — see below.':'Play the timeline to see if rain is coming.'}</div>`;
   else h+=`<div class="sec">Highest chance now</div>`+all.map(e=>row(e)).join('');
@@ -815,7 +819,7 @@ function showTop(){
   if(rising.length) h+=`<div class="sec">Coming up this week</div>`+rising.map(e=>row(e,true)).join('');
   h+=`<p class="note">Each entry is one square mile; entries are kept at least 10 mi apart so you see distinct areas. Tap one to zoom there.</p>`;
   $('sheet-body').innerHTML=h;
-  $('sheet-body').querySelectorAll('.spot').forEach(el=>el.onclick=()=>{ const e=byK.get(el.dataset.k); map.setView([e.lat,e.lon],11); showPoint(e); });
+  $('sheet-body').querySelectorAll('.spot').forEach(el=>el.onclick=()=>{ const e=byK.get(el.dataset.k); map.setView([e.lat,e.lon],11); if(marker) marker.remove(); marker=L.circleMarker([e.lat,e.lon],{radius:7,color:'#fff',weight:2,fillColor:'#b8742c',fillOpacity:1}).addTo(map); if(el.dataset.rising) quickPlayTo(bestDayIndex(e),()=>showPoint(e)); else showPoint(e); });
 }
 
 function showModel(){
