@@ -726,11 +726,14 @@ const STATIC={cells:null,weather:null,tried:false}; let weatherAsOf=null, weathe
    the Open-Meteo spend — so it borrows production's file, which GitHub Pages serves with
    Access-Control-Allow-Origin: *. Its own committed data/weather.json is whatever dev last merged and
    is usually stale, so production is preferred and the local copy is the fallback when the cross-origin
-   fetch fails. Never active on production: the prod hosts are excluded explicitly, and the rule is
-   further limited to github.io, so localhost keeps using its local file for development. */
+   fetch fails. Never active on production: the prod hosts are excluded explicitly and checked first,
+   so adding a subdomain here can never switch production onto a borrowed file. Staging is the custom
+   domain plus any github.io host (the misherr.github.io/wheretoforage-dev/ URL still works); localhost
+   matches neither and keeps using its own local file for development. */
 const PROD_HOSTS=['wheretoforage.com','www.wheretoforage.com'];
+const STAGING_HOSTS=['dev.wheretoforage.com'];
 const PROD_WEATHER_URL='https://wheretoforage.com/data/weather.json';
-const isStaging=!PROD_HOSTS.includes(location.hostname)&&location.hostname.endsWith('github.io');
+const isStaging=!PROD_HOSTS.includes(location.hostname)&&(STAGING_HOSTS.includes(location.hostname)||location.hostname.endsWith('github.io'));
 async function loadWeatherFile(){
   if(isStaging){
     try{
