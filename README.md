@@ -42,7 +42,7 @@ The status line will say so — "vegetation type missing for N% of forested cell
 ## If the weather job fails
 - **`data/cells.json` missing** — export it from the app (step 2) and upload it.
 - **Connect timeouts / `UND_ERR_CONNECT_TIMEOUT`** — a flaky runner network. The script retries each batch 8 times, checkpoints its progress to `data/weather.json`, and a rerun resumes where it stopped. Just run the workflow again.
-- **"budget ceiling reached"** — not a failure. The run stopped at the daily allowance and wrote its checkpoint; the next scheduled run continues.
+- **"budget ceiling reached"** — not a failure. The run stopped at the daily allowance and wrote its checkpoint; the next scheduled run continues. The allowance is tracked per environment (`ci:<owner/repo>` vs `local`), so building an archive on your own machine no longer throttles the runner.
 - **"N skipped as refreshed within Xh"** — also not a failure. Each grid skips anchors it refreshed inside its own freshness window (19.2h for the dense grid, 9.6h for the coarse one) so a rerun does not pay twice. If you deliberately want a rebuild now, run the workflow with **force** ticked.
 - **Red X on the commit step** — Settings → Actions → General → Workflow permissions → Read and write.
 - The job aborts and keeps the previous weather file if more than 25% of a grid's anchors fail, so a bad run never replaces good data with a half-empty file.

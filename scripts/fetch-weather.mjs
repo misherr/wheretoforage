@@ -68,6 +68,39 @@ const WANT = (process.env.GRIDS || 'past,forecast').split(',').map(s => s.trim()
 // backfill is ~7,700 calls on top of that, which does not fit in a single day — so a run stops
 // cleanly at the ceiling and the next run resumes from the checkpoint rather than failing.
 export const DAILY_CEILING = Number(process.env.DAILY_CALL_CEILING || 9500);
+// Open-Meteo's free tier is rate-limited by IP, so a GitHub runner and a laptop draw on completely
+// separate quotas. The ledger therefore has to be keyed by where the run happened, or the two
+// environments corrupt each other's counts: a local rebuild that spent 1,601 calls left the next
+// scheduled run believing it had only 7,899 of its ceiling left, on an IP that had spent nothing.
+//
+// It still lives inside data/weather.json rather than a sidecar, and that is deliberate: GitHub
+// runners are ephemeral, so the committed artifact is the only state two scheduled runs share. A
+// gitignored file would be cleaner locally and useless in CI, which is where the ledger actually
+// does its job.
+//
+// Known conservatism, left alone on purpose: GitHub-hosted runners get a fresh IP per job, so two CI
+// runs are not really sharing a quota either. Carrying the count between them spends less than the
+// cap allows rather than more, which is the safe direction, and the whole budget model in CLAUDE.md
+// is written around one shared daily figure. Do not "fix" that without re-costing the schedule.
+export function envKey(env = process.env) {
+  if (env.WEATHER_BUDGET_KEY) return env.WEATHER_BUDGET_KEY;          // explicit override
+  if (env.GITHUB_ACTIONS === 'true') return 'ci:' + (env.GITHUB_REPOSITORY || 'unknown');
+  return 'local';
+}
+// Pick this run's slot out of a stored ledger, and say what happened. A legacy single-object budget
+// is discarded rather than adopted: it carries no record of which environment spent it, and guessing
+// wrong is exactly the bug being fixed here. Discarding can only under-count, never over-count.
+export function readLedger(prev, key, today) {
+  const all = (prev && prev.budgets && typeof prev.budgets === 'object') ? { ...prev.budgets } : {};
+  let note = null;
+  if (!prev || !prev.budgets) {
+    if (prev && prev.budget && prev.budget.day) note = `legacy single-environment ledger (${prev.budget.day}, ${Math.round(Number(prev.budget.spent) || 0)} calls) discarded — it cannot be attributed to an environment`;
+  }
+  const mine = all[key];
+  const slot = (mine && mine.day === today) ? { day: today, spent: Number(mine.spent) || 0 } : { day: today, spent: 0 };
+  if (mine && mine.day !== today) note = note || `new day for ${key} (${mine.day} -> ${today}) — resetting spend from ${Math.round(Number(mine.spent) || 0)}`;
+  return { all, slot, note };
+}
 // Held back from the *backfill* phase only, so a long backfill can never eat the budget the next
 // forecast run needs. Rolling refreshes and the forecast grid itself are never withheld.
 const RESERVE = process.env.FORECAST_RESERVE == null ? null : Number(process.env.FORECAST_RESERVE);
@@ -295,7 +328,10 @@ async function main() {
 
   // ---- load the existing archive ----
   const store = { past: new Map(), forecast: new Map() };   // grid -> anchorKey -> {lat,lon,elev,u,series}
+  const BKEY = envKey();
   let budget = { day: today, spent: 0 };
+  let budgets = {};              // every environment's slot, so writing ours never erases theirs
+  let budgetNote = null;
   let rebuilt = false;
 
   // A date whose every field is null is padding, not data — an anchor that joined the archive later
@@ -326,7 +362,8 @@ async function main() {
           loadAnchors(g, s.time, rows);
           console.log(`  ${g}: adopted ${rows.length} of ${s.anchors.length} stored anchors, ${s.time.length} days (${s.time[0]} .. ${s.time[s.time.length - 1]})`);
         }
-        if (prev.budget && prev.budget.day) budget = { day: prev.budget.day, spent: Number(prev.budget.spent) || 0 };
+        const led = readLedger(prev, BKEY, today);
+        budgets = led.all; budget = led.slot; budgetNote = led.note;
       } else if (Array.isArray(prev.anchors) && Array.isArray(prev.time) && Number.isInteger(prev.STRIDE)) {
         // Single-grid (format 1) archive. Its anchors are active in any grid whose stride divides the
         // stored one, so the old stride-4 file seeds the dense past grid outright and its stride-8
@@ -348,9 +385,11 @@ async function main() {
   // ---- daily call ledger ----
   // Runs are separate processes, so the ledger has to live in the committed file. It resets when the
   // archive's timezone day rolls over.
-  if (budget.day !== today) { if (budget.spent) console.log(`budget: new day (${budget.day} -> ${today}) — resetting spend from ${budget.spent.toFixed(0)}`); budget = { day: today, spent: 0 }; }
+  if (budgetNote) console.log('budget: ' + budgetNote);
   const reserve = RESERVE != null ? RESERVE : wantAnchors.forecast.size + 1;
-  console.log(`budget: ${budget.spent.toFixed(0)} of ${DAILY_CEILING} already spent today; backfill holds back ${reserve} for the next forecast run`);
+  const others = Object.keys(budgets).filter(k => k !== BKEY);
+  console.log(`budget [${BKEY}]: ${budget.spent.toFixed(0)} of ${DAILY_CEILING} already spent today; backfill holds back ${reserve} for the next forecast run` +
+    (others.length ? `  (other environments tracked separately: ${others.join(', ')})` : ''));
 
   let stoppedOnBudget = false;
   const hourWindow = [];     // [{t, cost}] for the sliding hourly pace
@@ -418,7 +457,10 @@ async function main() {
       today,
       bias: { taper_days: BIAS_TAPER, window_days: BIAS_WINDOW },
       partial,
-      budget: { day: budget.day, spent: Math.round(budget.spent * 10) / 10, ceiling: DAILY_CEILING },
+      // Keyed by environment. Other environments' slots are carried through untouched — a local run
+      // must never rewrite CI's count, which is the whole point of the split.
+      budgets: { ...budgets, [BKEY]: { day: budget.day, spent: Math.round(budget.spent * 10) / 10 } },
+      budget_ceiling: DAILY_CEILING,
       past: out.past,
       forecast: out.forecast,
     });

@@ -18,6 +18,7 @@ import {
   isActive, anchorFor, anchorKey, coarseParent, assertStrideNesting,
   addDays, dateRange, toDateMap, fromDateMap, mergeSeries, trimSeries, callCost,
   FRESH_FRACTION, freshWindowMs, BIAS_TAPER, BIAS_WINDOW, BIAS_LIMITS, biasWeight, measureBias,
+  envKey, readLedger,
   tempLimitFor, BIAS_TEMP_BASE, BIAS_TEMP_MAX,
 } from './fetch-weather.mjs';
 
@@ -449,4 +450,82 @@ test('bias: the temperature clamp is physical — it admits a real elevation off
     'an 8 °C offset between anchors at the same elevation must be clamped hard');
   assert.equal(measureBias(overlap, BIAS_LIMITS, tempLimitFor(426, 1571)).tmax, 8,
     'the same 8 °C offset across a 1,145 m gap is physical and must survive');
+});
+
+/* ===================== the call ledger is per environment ===================== */
+
+test('ledger: the key separates CI from local, and one repo from another', () => {
+  assert.equal(envKey({}), 'local');
+  assert.equal(envKey({ GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: 'misherr/wheretoforage' }), 'ci:misherr/wheretoforage');
+  // production and staging are different repos and therefore different runners and quotas
+  assert.notEqual(
+    envKey({ GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: 'misherr/wheretoforage' }),
+    envKey({ GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: 'misherr/wheretoforage-dev' }));
+  // an explicit override wins, so two laptops can be told apart if they ever both build
+  assert.equal(envKey({ WEATHER_BUDGET_KEY: 'laptop-2', GITHUB_ACTIONS: 'true' }), 'laptop-2');
+  assert.notEqual(envKey({ WEATHER_BUDGET_KEY: 'laptop-2' }), envKey({}));
+});
+
+test('ledger: a local run cannot throttle CI — the exact bug this replaced', () => {
+  // What happened: a local rebuild spent 1,601 calls, the count went into the committed archive, and
+  // the next scheduled run started believing it had only 7,899 of its ceiling left — on a runner IP
+  // that had spent nothing at all.
+  const today = '2026-09-07';
+  const stored = { budgets: { local: { day: today, spent: 1601.2 } } };
+  const ci = readLedger(stored, 'ci:misherr/wheretoforage', today);
+  assert.equal(ci.slot.spent, 0, 'CI must not inherit a local run\u2019s spend');
+  assert.equal(ci.all.local.spent, 1601.2, 'and it must not lose the local slot either');
+
+  // and the reverse: CI spending must not throttle a local rebuild
+  const stored2 = { budgets: { 'ci:misherr/wheretoforage': { day: today, spent: 7654 } } };
+  assert.equal(readLedger(stored2, 'local', today).slot.spent, 0);
+});
+
+test('ledger: a run resumes its own count within the day, and resets across days', () => {
+  const key = 'ci:misherr/wheretoforage';
+  const same = readLedger({ budgets: { [key]: { day: '2026-09-07', spent: 4200 } } }, key, '2026-09-07');
+  assert.equal(same.slot.spent, 4200, 'a second run the same day must resume the count');
+  assert.equal(same.note, null);
+
+  const rolled = readLedger({ budgets: { [key]: { day: '2026-09-06', spent: 9400 } } }, key, '2026-09-07');
+  assert.equal(rolled.slot.spent, 0, 'the count must reset when the archive timezone day rolls over');
+  assert.match(rolled.note, /new day/);
+});
+
+test('ledger: writing one environment preserves every other slot', () => {
+  const today = '2026-09-07';
+  const stored = { budgets: { local: { day: today, spent: 1601.2 }, 'ci:other/repo': { day: '2026-09-01', spent: 42 } } };
+  const { all, slot } = readLedger(stored, 'ci:misherr/wheretoforage', today);
+  // this is what writeOut serialises
+  const written = { ...all, 'ci:misherr/wheretoforage': { day: today, spent: slot.spent + 500 } };
+  assert.equal(written.local.spent, 1601.2, 'the local slot was rewritten by a CI run');
+  assert.equal(written['ci:other/repo'].spent, 42, 'an unrelated slot was rewritten');
+  assert.equal(written['ci:misherr/wheretoforage'].spent, 500);
+  assert.equal(Object.keys(written).length, 3);
+});
+
+test('ledger: a legacy single-environment budget is discarded, not misattributed', () => {
+  // The old format recorded no environment. Adopting it would reintroduce exactly the cross-quota
+  // contamination being fixed, and guessing which environment spent it is not possible. Discarding
+  // can only cause a run to spend less than its cap allows, never more.
+  const today = '2026-09-07';
+  const legacy = { budget: { day: today, spent: 1601.2, ceiling: 9500 } };
+  const r = readLedger(legacy, 'ci:misherr/wheretoforage', today);
+  assert.equal(r.slot.spent, 0, 'a legacy count must not be adopted by whichever environment reads it next');
+  assert.deepEqual(r.all, {}, 'and must not be carried forward under a made-up key');
+  assert.match(r.note, /legacy/, 'the discard has to be announced, not silent');
+});
+
+test('ledger: missing or malformed ledgers degrade to a clean slate', () => {
+  const today = '2026-09-07';
+  for (const prev of [null, undefined, {}, { budgets: null }, { budgets: 'nonsense' }, { budgets: {} }]) {
+    const r = readLedger(prev, 'local', today);
+    assert.equal(r.slot.spent, 0);
+    assert.equal(r.slot.day, today);
+    assert.deepEqual(typeof r.all, 'object');
+  }
+  // a slot with a junk spend must not produce NaN, which would defeat every affordability check
+  const junk = readLedger({ budgets: { local: { day: today, spent: 'lots' } } }, 'local', today);
+  assert.equal(junk.slot.spent, 0);
+  assert.ok(Number.isFinite(junk.slot.spent));
 });

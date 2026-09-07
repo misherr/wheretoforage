@@ -254,9 +254,31 @@ backfill is **~7,700 calls on top of that** — more than a day's headroom. It
 must spread across runs rather than fail.
 
 - `DAILY_CALL_CEILING` (default 9,500) is a ledger, not a limit on one run.
-  It lives in `data/weather.json` as `budget: {day, spent, ceiling}` because
-  runs are separate processes, and resets when the archive's timezone day rolls
-  over.
+  It lives in `data/weather.json` and resets when the archive's timezone day
+  rolls over.
+- **The ledger is keyed by execution environment**, as
+  `budgets: {"<key>": {day, spent}}`. Open-Meteo's free tier is rate-limited by
+  IP, so a GitHub runner and a laptop draw on entirely separate quotas, and one
+  shared counter meant they corrupted each other: a local rebuild that spent
+  1,601 calls left the next scheduled run believing it had 7,899 of its ceiling
+  left, on an IP that had spent nothing. `envKey()` returns
+  `ci:<owner/repo>` under `GITHUB_ACTIONS`, otherwise `local`;
+  `WEATHER_BUDGET_KEY` overrides it if two machines ever need telling apart.
+  A run rewrites only its own slot and carries every other slot through
+  untouched.
+- **It stays inside the committed artifact on purpose.** GitHub runners are
+  ephemeral, so the archive is the only state two scheduled runs share. A
+  gitignored sidecar would be tidier locally and useless in CI, which is where
+  the ledger actually does its job.
+- **A legacy single-object `budget` is discarded, not adopted.** It records no
+  environment, so attributing it to whichever run reads it next would
+  reintroduce the same contamination. Discarding can only make a run spend less
+  than its cap allows, never more, and the discard is logged rather than silent.
+- **Known conservatism, deliberately left alone:** GitHub-hosted runners get a
+  fresh IP per job, so two CI runs are not really sharing a quota either.
+  Carrying the count between them errs toward underspending, and the whole
+  budget model above is written around one shared daily figure. Do not "fix"
+  that without re-costing the schedule.
 - A run that would cross the ceiling **stops cleanly**, writes its checkpoint
   and exits 0. The next run resumes from where it stopped — that is what the
   per-grid `u` stamps are for.
@@ -637,6 +659,7 @@ Useful environment variables, all optional:
 | `FORECAST_RESERVE` | coarse anchors + 1 | held back from the backfill phase |
 | `HOURLY_CALL_CEILING` | `5000` | sliding-window pace limit |
 | `CHECKPOINT_EVERY` | `5` | batches between checkpoint writes |
+| `WEATHER_BUDGET_KEY` | `ci:<repo>` or `local` | which ledger slot this run spends from |
 | `FRESH_FRACTION` | `0.8` | fraction of each grid's cadence that counts as fresh |
 | `FORCE_REFRESH` | unset | `1` ignores the freshness window entirely |
 
