@@ -22,9 +22,13 @@ Screen."
       gets deployed (GitHub Pages).
 - **`data/cells.json`** — baked per-cell elevation, slope, aspect, and
   LANDFIRE 2024 vegetation (tree fraction, canopy %, stand height,
-  host-quality score, top vegetation types). Generated once via the app's own
-  export button in live mode. **Do not regenerate or overwrite** — the
-  checked-in copy is the real data the user produced.
+  host-quality score, top vegetation types). Generated via the app's own export
+  button in live mode. **Do not regenerate or overwrite** — the checked-in copy
+  is the real data the user produced. The one sanctioned exception is a
+  vegetation-only re-bake; see "Re-baking cells.json for vegetation only".
+- **`data/evt-names.json`** — LANDFIRE EVT code → class name, 1,069 entries,
+  checked in because the service no longer publishes the mapping anywhere. See
+  "LANDFIRE EVT: the mapping is checked in, and why" before touching it.
 - **`scripts/fetch-weather.mjs`** — Node script, no dependencies. Maintains
   `data/weather.json` as a **rolling two-grid archive** (see "The two grids").
   Anchors that already have history refetch only their grid's short window,
@@ -39,6 +43,12 @@ Screen."
   score). Keeps per-request timeout, retry-on-thrown-fetch-error,
   checkpoint/resume, and the >25% failure abort, and adds a daily call ledger
   (see "Call budget").
+- **`scripts/evt-names.test.mjs`** — `node --test scripts/evt-names.test.mjs`.
+  Guards the checked-in EVT table: not truncated, the three live-verified codes
+  still resolve, every type name `cells.json` uses is producible from it, no
+  forested cell is missing a type, and unknown never outranks known-mediocre.
+  Lifts `HOST_RULES`/`hostOf` out of `index.html` rather than copying them, so
+  it cannot drift from the tuned constants it checks.
 - **`scripts/fetch-weather.test.mjs`** — `node --test scripts/fetch-weather.test.mjs`.
   Covers the merge (a rolling fetch merged into an archive must equal a single
   full fetch, including at the window boundary), trimming, ragged-series
@@ -405,6 +415,145 @@ single-grid file goes through `ingestOneGrid()` unchanged, with `WBASE` and
 `WCOARSE` both set to its one stride so `anchorHit`'s fallback loop runs once.
 Deleting that path is only safe once production is on the two-grid format
 *and* no borrowed single-grid file can reach a viewer.
+## LANDFIRE EVT: the mapping is checked in, and why
+
+`getSamples` returns a **numeric EVT code** and nothing else. Every vegetation
+name in the model — and therefore every host-quality score — comes from mapping
+that code to a class name.
+
+That mapping used to arrive at runtime from the service's legend, where each
+item carried `values:["7039"]`. **It doesn't any more.** The legend now repeats
+the class name in that field instead:
+
+```
+values: ["North Pacific Maritime Mesic-Wet Douglas-fir-Western Hemlock Forest"]
+```
+
+`parseInt` is `NaN` on all 831 entries, so the map came out empty, the
+`if(m.size>50)` gate failed, and `evtNames` stayed `null`. The service also
+reports `hasRasterAttributeTable:false` and its `rasterAttributeTable` endpoint
+returns `{}`, so there is **no live source for the mapping at all**.
+
+So `data/evt-names.json` (1,069 codes, 57 KB) is checked in, built from
+LANDFIRE's published EVT CSV. **Do not reconstruct codes from legend order
+instead** — the ordering is undocumented, and this service has already changed
+the shape of that response once.
+
+### How that one-line failure cost a whole bake
+
+`vegFor()` gates sampling on `evtNames`:
+
+```js
+evtNames ? sampleLayer('evt',pts) : Promise.resolve(pts.map(()=>null))
+```
+
+With `evtNames` null, EVT was never *requested*. `sampleLayer('evt')` was
+healthy the whole time — this is the opposite of the accepted-but-null trap.
+48,032 cells were baked with `host:-1` and no types, `names[]` in `cells.json`
+came out empty, and nothing failed loudly. Three things had to line up to hide
+it, and all three are now fixed:
+
+1. **The gate turned a name lookup into a data outage.** A missing legend should
+   cost you type *names*, not the type sampling itself.
+2. **A missing host scored as perfect** — see below.
+3. **Nothing said so.** Both `vegNote` branches wrote the same string, the tap
+   sheet silently dropped the host clause and the Types row, and in
+   `PUBLIC_MODE` `loadFromStatic()` returns before `loadEvtNames()` is ever
+   reached, so `vegNote` was permanently `''` in the deployed app.
+
+### The legend is still consulted — as an override only
+
+`loadEvtNames()` loads the static table first, then tries the legend and
+**merges on top** if it ever returns numeric codes again. That second fetch is
+wrapped so that neither a throw nor an empty parse can clear `evtNames`. A test
+proves it: with the legend fetch rejecting outright, the table still holds 1,069
+entries and sampling still runs.
+
+### Validating a replacement table
+
+If the table is ever rebuilt, verify before trusting it — the codes are not
+guaranteed stable across LANDFIRE releases:
+
+- **Three known codes**, sampled live from `LF2024_EVT_CONUS` at Washington
+  points: `7036` → North Pacific Seasonal Sitka Spruce Forest (outer coast),
+  `7039` → North Pacific Maritime Mesic-Wet Douglas-fir-Western Hemlock Forest
+  (west Cascades), `9826` → Southern Vancouverian Lowland Ruderal Grassland.
+  Geographic plausibility is the point: a shifted table puts Gulf Coast types in
+  the Cascades.
+- **Legend coverage**: 829 of the service's 831 legend labels appear in the
+  checked-in table. The two that don't are a Texas and a Great Plains type,
+  neither of which occurs in Washington.
+- **A statewide sample**: 501 cells spread across the state, every code mapped,
+  and every resulting name also present in the service's own legend.
+
+`node --test scripts/evt-names.test.mjs` pins the three codes, checks the table
+is not truncated, checks every name `cells.json` references is producible from
+it, and asserts no forested cell is missing a type.
+
+## Re-baking cells.json for vegetation only
+
+`data/cells.json` is normally not to be regenerated. Filling in EVT is the
+exception, and it is **surgical**: elevation, slope and aspect are carried over
+from the existing file untouched (they never depended on EVT), and only the `vg`
+block is recomputed.
+
+The bake resamples all three LANDFIRE layers, not just EVT, because
+`vegSummary()` averages canopy and height over the samples it judges to be tree,
+and takes the host average over samples where `isTree` — an EVC property. The
+baked aggregates alone cannot reproduce that.
+
+Resampling EVC/EVH also buys the only real check on the sample geometry: the
+recomputed `treeFrac`/`canopy`/`height` must reproduce the baked values exactly.
+They did, for **all 48,032 cells, zero differences** — which is what proves the
+script's quarter-point geometry (`±DLAT/4`, `±DLON/4`, in the app's order)
+matches `vegFor()`. If that check ever shows differences, the geometry is wrong
+and the host scores built on it are wrong too; do not ship the result.
+
+The full run is ~193 batches of 250 cells (1,000 sample points per request per
+layer) and takes about **70 seconds**.
+
+## Missing host is penalised, not rewarded
+
+`vegMult()` used to multiply by **1.0** when `v.host` was null. Combined with
+the EVT failure that meant every one of 39,981 forested cells was scored as
+though its host trees were ideal — a logged Douglas-fir plantation ranked
+identically to a Sitka spruce stand, and the model's entire species
+discrimination was inert while still producing confident numbers.
+
+`HOST_UNKNOWN = 0.4` replaces it. It sits below Douglas-fir (0.45) deliberately:
+**unknown must never outrank known-mediocre.** It is a penalty for absent data,
+not an estimate of anything, and the tap sheet says so in as many words.
+
+### What the fix did to the scores
+
+Measured over all 48,032 cells at the same date, comparing the shipped state
+(no EVT, missing host = 1.0) with the re-bake:
+
+| | before | after |
+| --- | --- | --- |
+| mean habitat score | 0.300 | **0.226** |
+| median | 0.155 | **0.064** |
+| 90th percentile | 0.821 | **0.701** |
+| cells scoring 0.7+ | 7,466 | **4,814** |
+| "medium+" on the status line | 307 sq mi | **217 sq mi** |
+
+35,071 forested cells fell, 4,910 were unchanged (their host really is 1.0), and
+**none rose** — the old default was the maximum, so nothing could. The median
+cell lost 40% of its score; the shape is a squeeze of the middle, not a uniform
+scaling. The 8,051 cells with no tree cover are untouched at zero.
+
+The distribution of the host factor itself is the useful summary — this is the
+discrimination that was previously absent entirely:
+
+| host | cells | | host | cells |
+| --- | --- | --- | --- | --- |
+| 0.0 | 1,333 | | 0.6 | 3,902 |
+| 0.1 | 2,799 | | 0.7 | 3,448 |
+| 0.2 | 3,613 | | 0.8 | 7,275 |
+| 0.3 | 3,375 | | 0.9 | 2,077 |
+| 0.4 | 3,062 | | 1.0 | 5,166 |
+| 0.5 | 3,931 | | | |
+
 ## Scoring model (hand-tuned — do not refactor or "clean up" without asking)
 
 `score = habitat × trigger rain × soil moisture × temperature window × humidity`,
@@ -420,6 +569,11 @@ with kill switches for frost, snow, and heat.
   (or ~30°C max / -3°C min triggers in `analyze()`), and fresh snow
   are kill switches that zero or heavily discount the score.
 - **Humidity**: 3-day mean relative humidity; ≥70% ideal, <40% penalized.
+- **Host quality** (`HOST_RULES` / `hostOf` / `HOST_UNKNOWN`): the named
+  LANDFIRE vegetation type sets a multiplier from 0 (not forest) to 1.0 (Sitka
+  spruce, true fir, mountain hemlock). **A missing type scores `HOST_UNKNOWN`
+  = 0.4, not 1.0** — below Douglas-fir at 0.45, because unknown must never
+  outrank known-mediocre. See "Missing host is penalised, not rewarded".
 - **Habitat** (`function habitat`): four regions, each with
   its own season window and an elevation band that drifts downslope through
   fall:

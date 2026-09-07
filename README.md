@@ -1,6 +1,6 @@
 # King bolete Washington — deployment
 
-The app is one file (`index.html`). For public use it reads two static files and never calls an API from the phone.
+The app is one file (`index.html`). For public use it reads three static files and never calls an API from the phone: `data/cells.json` (terrain + vegetation per cell), `data/weather.json` (the weather archive) and `data/evt-names.json` (LANDFIRE vegetation code → name, checked in because the USGS service stopped publishing it).
 
 ## One-time setup
 1. Run the app locally with `PUBLIC_MODE=false` (top of the script) and wait for a complete load — status line shows no "pending" or "missing" counts.
@@ -31,6 +31,13 @@ While it fills, the map still covers the whole state: a cell whose 0.05° anchor
 - `data/weather.json` is larger than it was (the dense grid is 6,666 anchors × 31 days), but it is served gzipped and fetched once per load.
 
 If the weather file is more than 36 hours old the status line says so; the app still works from it.
+
+## If vegetation types go missing
+The status line will say so — "vegetation type missing for N% of forested cells in data/cells.json". Those cells are being scored at a flat 40/100 host quality, which is a deliberate penalty for absent data, not a measurement. The tap sheet says the same thing per cell. Causes, in order of likelihood:
+
+- **`data/evt-names.json` missing or truncated** — the app says which. Run `node --test scripts/evt-names.test.mjs`.
+- **`cells.json` was baked while EVT was broken** — re-bake vegetation only; see CLAUDE.md.
+- **The LANDFIRE service changed shape again** — it has once before, silently. The checked-in table means this no longer takes vegetation down with it.
 
 ## If the weather job fails
 - **`data/cells.json` missing** — export it from the app (step 2) and upload it.

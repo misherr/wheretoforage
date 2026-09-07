@@ -448,13 +448,44 @@ const loadTile=(z,x,y)=>loadTileData(`https://s3.amazonaws.com/elevation-tiles-p
 /* ---- vegetation from LANDFIRE 2024 (USGS): type, canopy cover %, stand height (30 m) ---- */
 const LF='https://lfps.usgs.gov/arcgis/rest/services/Landfire_LF2024/';
 const LFL={evt:'LF2024_EVT_CONUS',evc:'LF2024_EVC_CONUS',evh:'LF2024_EVH_CONUS'};
-let vegBroken=false, vegFails=0, evtNames=null, vegNote='';
+let vegBroken=false, vegFails=0, evtNames=null, vegNote='', evtSource='';
 const vcache=new Map(); // cell key -> veg summary
+/* EVT codes -> class names.
+
+   getSamples returns a numeric EVT code; every name in the model comes from mapping that code. The
+   service used to hand us the mapping in its legend, where each item carried values:["7039"]. It now
+   repeats the class name there instead — values:["North Pacific Maritime Mesic-Wet Douglas-fir-
+   Western Hemlock Forest"] — so parseInt is NaN on all 831 entries, the map came out empty, and the
+   >50 gate left evtNames null. That in turn made vegFor skip EVT sampling altogether, which is how
+   48,032 cells were baked with no vegetation type at all. The service also reports
+   hasRasterAttributeTable:false and its rasterAttributeTable endpoint returns {}, so there is no live
+   source for the mapping any more.
+
+   So the table is checked in at data/evt-names.json, from LANDFIRE's own published EVT CSV. Do not
+   reconstruct codes from legend order instead: the ordering is not documented, and this service has
+   already changed the shape of that response once.
+
+   The legend is still consulted, but only as an override for when it starts returning codes again,
+   and it can only ever ADD to what the static table gave us — a failure or an empty parse there must
+   never clear evtNames, or we are back to silently skipping EVT. */
 async function loadEvtNames(){
-  try{ const r=await fetch(LF+LFL.evt+'/ImageServer/legend?renderingRule='+encodeURIComponent('{"rasterFunction":"LF2024_EVT_CONUS"}')+'&f=json'); const j=await r.json(); const m=new Map();
+  try{
+    const r=await fetch('data/evt-names.json',{cache:'no-cache'});
+    if(r.ok){ const j=await r.json(); const src=j&&j.names?j.names:j; const m=new Map();
+      for(const k in src){ const n=parseInt(k); if(!isNaN(n)) m.set(n,src[k]); }
+      if(m.size>50){ evtNames=m; evtSource='data/evt-names.json ('+m.size+' types)'; }
+      else vegNote='data/evt-names.json has only '+m.size+' vegetation types — expected hundreds; host quality is off';
+    } else vegNote='data/evt-names.json missing (HTTP '+r.status+') — host quality is off, cover and height only';
+  }catch(err){ vegNote='data/evt-names.json unreadable ('+(err&&err.message||'error')+') — host quality is off, cover and height only'; }
+  // Optional live override, strictly additive. Wrapped so nothing here can disable sampling.
+  try{
+    const r=await fetch(LF+LFL.evt+'/ImageServer/legend?renderingRule='+encodeURIComponent('{"rasterFunction":"LF2024_EVT_CONUS"}')+'&f=json'); const j=await r.json(); const m=new Map();
     (j.layers||[]).forEach(l=>(l.legend||[]).forEach(it=>{ if(it.values&&it.values.length) it.values.forEach(v=>{const n=parseInt(v); if(!isNaN(n)) m.set(n,it.label);}); else if(it.label){ const mm=/^\s*(\d{4})\b/.exec(it.label); if(mm) m.set(+mm[1],it.label.replace(/^\s*\d{4}\W*/,'')); } }));
-    if(m.size>50) evtNames=m; else vegNote='vegetation names unavailable — using cover and height only';
-  }catch(err){ vegNote='vegetation names unavailable — using cover and height only'; }
+    if(m.size>50){ const merged=new Map(evtNames||[]); for(const [k,v] of m) merged.set(k,v);
+      evtNames=merged; evtSource='legend + static ('+merged.size+' types)'; if(!vegNote) vegNote=''; }
+    else console.info('EVT legend returned no numeric codes ('+m.size+') — using the checked-in table');
+  }catch(err){ console.info('EVT legend override unavailable ('+(err&&err.message||'error')+') — using the checked-in table'); }
+  if(evtNames) console.log('EVT names:',evtSource);
 }
 // host quality of a LANDFIRE vegetation type for king boletes, by name
 const HOST_RULES=[
@@ -484,7 +515,13 @@ async function sampleLayer(layer,pts){
 }
 function fCanopy(c){ return c<10?0.15:c<25?0.15+0.85*(c-10)/15:c<=75?1:0.85; }
 function fHeight(h){ return h<3?0.05:h<8?0.05+0.45*(h-3)/5:h<15?0.5+0.5*(h-8)/7:1; }
-function vegMult(v){ return v.treeFrac===0?0:clamp(v.treeFrac*fCanopy(v.canopy)*fHeight(v.height)*(v.host==null?1:Math.max(v.host,0.02)),0,1); }
+/* Host quality when the vegetation type is unknown. This used to be 1.0, i.e. a cell with no EVT was
+   scored as though its host trees were ideal — so while EVT was broken, a logged Douglas-fir
+   plantation ranked identically to a Sitka spruce stand, and every forested cell in the state was
+   optimistic. 0.4 sits below Douglas-fir (0.45) and dry pine (0.4 is the same, deliberately): unknown
+   must never outrank known-mediocre. It is a penalty for absent data, not an estimate of anything. */
+const HOST_UNKNOWN=0.4;
+function vegMult(v){ return v.treeFrac===0?0:clamp(v.treeFrac*fCanopy(v.canopy)*fHeight(v.height)*(v.host==null?HOST_UNKNOWN:Math.max(v.host,0.02)),0,1); }
 function vegSummary(evt,evc,evh){
   let n=0,tree=0,canopy=0,ht=0,host=0,hn=0; const names={};
   for(let k=0;k<evc.length;k++){ n++; const c=evc[k], h=evh[k], t=evt[k];
@@ -924,16 +961,26 @@ async function loadFromStatic(gen){
   const totalA=seenA.size;
   if(need.size){ if(PUBLIC_MODE){ if(need.size>totalA*0.2) apiBlocked=weatherAsOf?'data/weather.json does not cover most cells — ask the site owner to re-run the weather update':'data/weather.json is missing — ask the site owner to run the weather update'; } else { progress(`Fetching weather for ${need.size} anchors (no weather file found)…`,0.2); await getWeather([...need.values()],(t)=>{ if(t&&/limit|pausing/i.test(t)) progress(t,null); }); } }
   if(gen!==loadGen) return;
-  let i=0;
+  let i=0, vegged=0, noType=0;
   for(const r of j.rows){
     const [lat,lon,elev,slope,aspect,vg]=r; ecache.set(key(lat,lon),elev);
     const terr={slope,aspect:aspect<0?null:aspect};
     const w=anchorHit(lat,lon).w;
     const e=makeEntry(lat,lon,DLAT,elev,terr,w); e.lonsize=DLON;
-    if(vg){ const top=(vg[4]||[]).map(([ni,sh])=>({name:names[ni],share:sh,host:hostOf(names[ni])})); const v={treeFrac:vg[0],canopy:vg[1],height:vg[2],host:vg[3]<0?null:vg[3],top}; v.mult=vegMult(v); e.veg=v; vcache.set(key(lat,lon),v); applyVeg(e); }
+    if(vg){ const top=(vg[4]||[]).map(([ni,sh])=>({name:names[ni],share:sh,host:hostOf(names[ni])})); const v={treeFrac:vg[0],canopy:vg[1],height:vg[2],host:vg[3]<0?null:vg[3],top}; v.mult=vegMult(v); e.veg=v; vcache.set(key(lat,lon),v); applyVeg(e);
+      if(v.treeFrac>0){ vegged++; if(v.host==null||!v.top.length) noType++; } }
     cells.set(cellKey(lat,lon),e);
     if(++i%4000===0){ progress(`Loading baked cells… ${i.toLocaleString()}`,0.2+0.8*i/j.rows.length); renderAll(); await sleep(0); }
   }
+  /* In PUBLIC_MODE loadEvtNames() is never reached — this function returns before it — so vegNote was
+     always empty in the deployed app and a bake with no vegetation type looked identical to a good
+     one. The baked file is the reachable signal: say plainly how many forested cells have no type,
+     since every one of them is being scored on the HOST_UNKNOWN penalty rather than on its trees. */
+  if(vegged&&noType>vegged*0.02){
+    const pct=Math.round(100*noType/vegged);
+    vegNote=`vegetation type missing for ${pct}% of forested cells in data/cells.json — those are scored at a flat ${Math.round(HOST_UNKNOWN*100)}/100 host quality; re-bake with EVT working`;
+    console.warn('cells.json:',noType,'of',vegged,'forested cells have no EVT type');
+  } else if(vegged) console.log('cells.json: vegetation type present for',(vegged-noType).toLocaleString(),'of',vegged.toLocaleString(),'forested cells');
 }
 function download(name,text){ const b=new Blob([text],{type:'application/json'}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(u); a.remove();},2000); }
 function exportCells(){
@@ -1132,7 +1179,23 @@ function showPoint(e,t){
     h+=`<p class="note">${bits.join('<br>')}</p>`;
   }
   let vegH='';
-  if(e.veg){ const v=e.veg; vegH=`<dt>Forest (LANDFIRE 2024)</dt><dd>${Math.round(v.treeFrac*100)}% tree-covered · canopy ${Math.round(v.canopy)}% · stand height ${Math.round(v.height*3.28)} ft${v.host!=null?' · host quality '+Math.round(v.host*100)+'/100':''}</dd>`+(v.top.length?`<dt>Types</dt><dd>${v.top.map(t=>`${Math.round(t.share*100)}% ${t.name}${t.host?' <span style="color:var(--pore-dim)">('+t.host.lab+')</span>':''}`).join('<br>')}</dd>`:''); }
+  if(e.veg){ const v=e.veg;
+    // An absent vegetation type has to say so. Silently dropping the host-quality clause and the Types
+    // row made a data failure look like ordinary missing detail — which is exactly how EVT stayed
+    // broken across a full bake of 48,032 cells without anyone noticing.
+    // Two different gaps, and they must not be described as the same thing. No types at all means
+    // LANDFIRE EVT did not resolve. Types but no host figure means the type is known but no sample
+    // qualified to score it — which is normal on cells with no tree cover. Either way the cell is
+    // being scored on the HOST_UNKNOWN penalty, so neither may pass silently.
+    const noType=!v.top||!v.top.length, noHost=v.host==null;
+    const dim=t=>`<span style="color:var(--pore-dim)">${t}</span>`;
+    const hostBit=v.host!=null
+      ? ' · host quality '+Math.round(v.host*100)+'/100'
+      : ' · '+dim('host quality unavailable — scored at '+Math.round(HOST_UNKNOWN*100)+'/100');
+    vegH=`<dt>Forest (LANDFIRE 2024)</dt><dd>${Math.round(v.treeFrac*100)}% tree-covered · canopy ${Math.round(v.canopy)}% · stand height ${Math.round(v.height*3.28)} ft${hostBit}</dd>`
+      +(noType
+        ? `<dt>Types</dt><dd>${dim('Vegetation type unavailable — LANDFIRE EVT did not resolve here, so this cell is scored at '+Math.round(HOST_UNKNOWN*100)+'/100 host quality: a penalty for missing data, not a measurement. Cover and height above are real.')}</dd>`
+        : `<dt>Types</dt><dd>${v.top.map(t=>`${Math.round(t.share*100)}% ${t.name}${t.host?' '+dim('('+t.host.lab+')'):''}`).join('<br>')}${noHost?'<br>'+dim('No sample qualified for a host-quality score here.'):''}</dd>`); }
   else if(!vegBroken&&hab.score>0.08) vegH=`<dt>Forest</dt><dd style="color:var(--pore-dim)">Vegetation check pending</dd>`;
   h+=`<div class="sec">Ecology</div><dl>${vegH}<dt>Hosts</dt><dd>${hab.hosts}</dd><dt>Season</dt><dd>${hab.seasonNote}</dd>${hab.elevNote?`<dt>Elevation</dt><dd>${hab.elevNote}</dd>`:''}</dl>`;
   if(e.w){
