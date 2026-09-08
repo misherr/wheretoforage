@@ -235,6 +235,36 @@ export function freshWindowMs(grid, fraction = FRESH_FRACTION) {
 // FORCE_REFRESH=1 to override when you actually mean to rebuild now.
 const FORCE_REFRESH = process.env.FORCE_REFRESH === '1';
 
+// Freshness alone is NOT enough to skip an anchor.
+//
+// The guard used to ask only "was this refreshed recently?", which quietly assumes recently-refreshed
+// means up to date. That holds inside a timezone day and breaks across one: an anchor fetched at
+// 22:00 Pacific is 11h old at 09:00 next morning — well inside the dense grid's 19.2h window — and is
+// a whole day behind. It was skipped, so it never got the new day; meanwhile any anchor that *was*
+// stale got rolled and pulled the shared axis forward to today; and the ragged check then found
+// thousands of anchors short of that axis and refetched every one of them IN FULL at 1.6 calls
+// instead of the 1.0 a rolling fetch costs. Measured on the run that exposed it: 4,983 anchors,
+// ~7,973 calls of full refetch on top of the roll, ceiling hit, run stopped at 4,250/4,983.
+//
+// So an anchor may be skipped only when it is BOTH fresh AND already carries the last day this grid
+// is fetching toward. The target is a fixed date, not the store's current axis: the axis end is
+// *created* by this run's fetches, so testing against it is circular — before fetching, nothing has
+// today, everything looks covered, and the bug reproduces exactly.
+//
+// The invariant this buys: a run either brings every anchor up to today, or changes nothing. There is
+// no longer a state where some anchors advance and the rest are left behind to go ragged.
+export function coversThrough(entry, endDate) {
+  return !!(entry && entry.series && entry.series.has(endDate));
+}
+export function isFreshAt(entry, freshCut) {
+  const u = entry && entry.u;
+  return !!u && Date.parse(u) > freshCut;
+}
+export function canSkip(entry, endDate, freshCut, force = false) {
+  if (force) return false;
+  return isFreshAt(entry, freshCut) && coversThrough(entry, endDate);
+}
+
 /* ===================== main ===================== */
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const rnd = (v, dp) => v == null ? null : (dp === 0 ? Math.round(v) : Math.round(v * 10 ** dp) / 10 ** dp);
@@ -421,7 +451,11 @@ async function main() {
   // new anchor short of the older ones' deepest history, refetch them all pointlessly, and still have
   // to pad with nulls. Starting where everyone has data costs at most a day or two of depth and keeps
   // the series dense.
-  function materialize(grid) {
+  // The axis start is the LATEST first-date across anchors, not the earliest — one deep anchor must
+  // not drag it back past what the rest can fill. The end is deliberately still a union: it is the
+  // guard's job (canSkip) to make sure nothing is left short of it, not the axis's job to shrink to
+  // the laggard. Shrinking instead would throw away today for every anchor that does have it.
+  function axisFor(grid) {
     const present = new Set();
     let start = null;
     for (const a of store[grid].values()) {
@@ -429,7 +463,10 @@ async function main() {
       for (const d of a.series.keys()) { present.add(d); if (!first || d < first) first = d; }
       if (first && (!start || first > start)) start = first;
     }
-    const axis = axisWanted[grid].filter(d => present.has(d) && (!start || d >= start));
+    return axisWanted[grid].filter(d => present.has(d) && (!start || d >= start));
+  }
+  function materialize(grid) {
+    const axis = axisFor(grid);
     const rows = [];
     for (const a of store[grid].values()) {
       const s = trimSeries(a.series, axis);
@@ -556,22 +593,27 @@ async function main() {
   /* ---- run each grid ---- */
   const freshCut = {};
   for (const g of GRID_ORDER) freshCut[g] = Date.now() - freshWindowMs(g);
-  const isFresh = (g, k) => { if (FORCE_REFRESH) return false; const u = store[g].get(k)?.u; return u && Date.parse(u) > freshCut[g]; };
 
   for (const grid of GRID_ORDER) {
     if (!WANT.includes(grid)) continue;
     if (stoppedOnBudget) break;
     const G = GRIDS[grid];
     const roll = [], backfill = [];
-    let resumed = 0;
+    let resumed = 0, behind = 0;
+    // The last day this grid fetches toward: today for the dense past grid (forecast_days=1), today+7
+    // for the coarse forecast grid. An anchor short of it is behind no matter how recently it ran.
+    const gridEnd = axisWanted[grid][axisWanted[grid].length - 1];
     for (const a of wantAnchors[grid].values()) {
       const k = anchorKey(a[0], a[1]);
-      if (isFresh(grid, k)) { resumed++; continue; }
-      (store[grid].has(k) && store[grid].get(k).series.size ? roll : backfill).push(a);
+      const e = store[grid].get(k);
+      if (canSkip(e, gridEnd, freshCut[grid], FORCE_REFRESH)) { resumed++; continue; }
+      if (isFreshAt(e, freshCut[grid]) && !FORCE_REFRESH) behind++;
+      (e && e.series.size ? roll : backfill).push(a);
     }
     const pn = pastForNew(grid);
     console.log(`\n[${grid}] ${G.label}: ${roll.length} rolling (${G.past}+${G.fc}d), ${backfill.length} backfill (${pn.past}+${G.fc}d)` +
-      `${resumed ? `, ${resumed} skipped as refreshed within ${(freshWindowMs(grid) / 3600e3).toFixed(1)}h` : ''}` +
+      `${resumed ? `, ${resumed} skipped as refreshed within ${(freshWindowMs(grid) / 3600e3).toFixed(1)}h and already covering ${gridEnd}` : ''}` +
+      `${behind ? `, ${behind} fresh but short of ${gridEnd} — rolled rather than left to go ragged` : ''}` +
       `${pn.start && pn.past !== PAST_FULL ? ` — backfill reaches back to ${pn.start}` : ''}`);
 
     // Rolling refreshes keep the live data current and are never withheld; the backfill is

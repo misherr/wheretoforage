@@ -324,6 +324,61 @@ scheduled run never does.
 change". Not a failure, and self-correcting on the following run — but set
 `FORCE_REFRESH=1` when you actually mean to rebuild now.
 
+#### Freshness alone is not enough to skip — it fed the ragged check
+
+The guard used to ask only "was this refreshed recently?". That quietly assumes
+recently-refreshed means up to date, which holds inside a timezone day and
+**breaks across one**: an anchor fetched at 22:00 Pacific is 11h old at 09:00
+next morning — well inside 19.2h — and is a whole day behind.
+
+An off-cycle dispatch put the schedule into exactly that state and the two
+mechanisms fed each other:
+
+1. 4,983 anchors were fresh-but-a-day-behind, so the guard skipped them and they
+   never got the new day.
+2. 1,683 genuinely stale anchors *were* rolled, and pulled the shared axis
+   forward to the new day.
+3. The ragged check then found those 4,983 short of the axis and refetched every
+   one **in full**, at 1.6 calls instead of the 1.0 a rolling fetch costs.
+
+~7,973 calls of full refetch on top of the roll; ceiling hit; the run stopped at
+4,250/4,983. Reproduced at that scale: **9,656 calls versus 6,666**. Measured
+live on a 115-anchor subset: 150.2 calls before, 116.0 after, with the
+`57 anchors diverge from the shared time axis` line gone entirely.
+
+**The fix is in the guard, not the ragged check.** The ragged check was right —
+those anchors had a real hole. Relaxing it to tolerate a short lag would
+serialise a null tail, and `analyze()` reads a null `tmax` through `at()`'s
+`?? 0` as **0 °C and fires the frost kill switch**, turning a billing bug into
+thousands of cells falsely reporting the season over. Truncating the axis to the
+earliest last-date instead would throw today away for every anchor that has it.
+
+`canSkip(entry, endDate, freshCut, force)` now requires **both** conditions: the
+anchor is fresh **and** it already carries `endDate`, the last day that grid is
+fetching toward (`today` for the dense grid at `forecast_days=1`, `today+7` for
+the coarse grid at `forecast_days=8`).
+
+**The target must be that fixed date, never the store's current axis.** The axis
+end is *created* by this run's fetches, so testing against it is circular:
+before fetching, nothing has today, everything looks covered, every fresh anchor
+is skipped, the stale ones then pull the axis forward, and the bug reproduces
+exactly. This was the first implementation and it did not work.
+
+The invariant this buys is stronger than what came before: **a run either brings
+every anchor up to today, or changes nothing.** There is no longer a state where
+some anchors advance and the rest are left behind to go ragged. It also means an
+off-cycle run on a *new* day now rolls the whole grid rather than doing nothing —
+that is the archive advancing a day, which is the job, not waste.
+
+Note the asymmetry this leaves in `axisFor()`, and leave it alone: the axis
+**start** is the latest first-date (so one deep anchor cannot drag it back past
+what the rest can fill), while the **end** is still a union. Making the end
+shrink to the laggard would discard today for everyone; keeping nothing behind
+the end is the guard's job now.
+
+Six `guard:` tests cover this, including a replay of the incident at its real
+scale. Reverting `canSkip` to freshness-only fails three of them.
+
 ### Halving a stride again
 
 `PAST_STRIDE 2` is the floor under the free tier. **A further halving to 1

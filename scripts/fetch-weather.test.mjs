@@ -18,7 +18,7 @@ import {
   isActive, anchorFor, anchorKey, coarseParent, assertStrideNesting,
   addDays, dateRange, toDateMap, fromDateMap, mergeSeries, trimSeries, callCost,
   FRESH_FRACTION, freshWindowMs, BIAS_TAPER, BIAS_WINDOW, BIAS_LIMITS, biasWeight, measureBias,
-  envKey, readLedger,
+  envKey, readLedger, canSkip, coversThrough, isFreshAt,
   tempLimitFor, BIAS_TEMP_BASE, BIAS_TEMP_MAX,
 } from './fetch-weather.mjs';
 
@@ -528,4 +528,124 @@ test('ledger: missing or malformed ledgers degrade to a clean slate', () => {
   const junk = readLedger({ budgets: { local: { day: today, spent: 'lots' } } }, 'local', today);
   assert.equal(junk.slot.spent, 0);
   assert.ok(Number.isFinite(junk.slot.spent));
+});
+
+/* ===================== the resume guard must not create ragged anchors ===================== */
+// Off-cycle manual dispatch is routine when testing, and it is what exposed this: run 1 at 21:34
+// Pacific brought 4,983 anchors to Sep 6; run 2 at 09:36 the next morning found them 11.6h old —
+// inside the dense grid's 19.2h window — and skipped them. Meanwhile 1,683 genuinely stale anchors
+// were rolled and pulled the shared axis forward to Sep 7, so the ragged check found the skipped
+// ones short of it and refetched every one IN FULL. 4,983 x 1.6 calls on top of the roll, ceiling
+// hit, run stopped at 4,250/4,983.
+//
+// The fix is in the guard, not the ragged check: the ragged check was right that those anchors had a
+// real hole. Relaxing it would serialise a null tail, and analyze() reads a null tmax through at()'s
+// `?? 0` as 0 C and fires the frost kill switch — turning a billing bug into thousands of cells
+// falsely reporting the season over.
+
+const seriesThrough = (from, to) => new Set(dateRange(from, to));
+const stamp = hoursAgo => new Date(Date.now() - hoursAgo * 3600e3).toISOString();
+
+test('guard: an anchor that is fresh but a day behind is never skipped', () => {
+  const cut = Date.now() - 19.2 * 3600e3;                       // dense grid window
+  const end = '2026-09-07';
+  const freshButBehind = { u: stamp(11.6), series: seriesThrough('2026-08-12', '2026-09-06') };
+  const freshAndCurrent = { u: stamp(11.6), series: seriesThrough('2026-08-12', end) };
+  const staleAndCurrent = { u: stamp(30), series: seriesThrough('2026-08-12', end) };
+
+  assert.equal(canSkip(freshButBehind, end, cut), false,
+    'a fresh anchor missing the target day must be refreshed — skipping it is what made it ragged');
+  assert.equal(canSkip(freshAndCurrent, end, cut), true,
+    'a fresh anchor already covering the target day must still be skipped, or the resume guard is useless');
+  assert.equal(canSkip(staleAndCurrent, end, cut), false,
+    'a stale anchor must be refreshed even when it covers the target day, so the cadence advances');
+  assert.equal(canSkip(freshAndCurrent, end, cut, true), false, 'FORCE_REFRESH overrides everything');
+  assert.equal(canSkip(undefined, end, cut), false, 'an anchor with no entry at all cannot be skipped');
+  assert.equal(canSkip({ series: seriesThrough('2026-08-12', end) }, end, cut), false,
+    'an anchor with no refresh stamp cannot be skipped');
+});
+
+test('guard: replaying the off-cycle dispatch produces no ragged anchors and no full refetches', () => {
+  // The incident, at the scale it actually happened.
+  const TODAY = '2026-09-07', YESTERDAY = '2026-09-06';
+  const cut = Date.now() - 19.2 * 3600e3;
+  const vars = 8;
+  const ROLL = callCost(PAST_ROLL + 1, vars);        // dense grid: past_days=3 & forecast_days=1
+  const FULL = callCost(27 + 1, vars);               // what a ragged refetch pays instead
+  assert.equal(ROLL, 1, 'a rolling dense fetch should cost exactly one call');
+  assert.ok(FULL > 1.5, 'a full refetch should be materially more expensive than a roll');
+
+  const store = new Map();
+  const add = (n, prefix, end, ageH) => {
+    for (let i = 0; i < n; i++) store.set(prefix + i, { u: stamp(ageH), series: seriesThrough('2026-08-12', end) });
+  };
+  add(1683, 'stale', YESTERDAY, 20.6);               // outside the window -> rolled
+  add(4983, 'fresh', YESTERDAY, 11.6);               // inside the window  -> was skipped, and went ragged
+
+  // the work split, as main() does it
+  let rolled = 0, skipped = 0;
+  for (const [, e] of store) {
+    if (canSkip(e, TODAY, cut)) { skipped++; continue; }
+    rolled++;
+    e.series.add(TODAY);                             // a rolling fetch covers today-3 .. today
+  }
+
+  // the axis after the fetch phase, and the ragged check against it
+  const present = new Set();
+  for (const e of store.values()) for (const d of e.series) present.add(d);
+  const axisEnd = [...present].sort().at(-1);
+  const ragged = [...store.values()].filter(e => !e.series.has(axisEnd)).length;
+
+  assert.equal(axisEnd, TODAY, 'the shared axis should advance to today');
+  assert.equal(skipped, 0, 'nothing should have been skipped: every anchor was a day behind');
+  assert.equal(rolled, 6666, 'every anchor should have been rolled');
+  assert.equal(ragged, 0,
+    `${ragged} anchors are short of the shared axis — the guard has started creating ragged anchors again`);
+  assert.equal(rolled * ROLL + ragged * FULL, 6666,
+    'the run should cost one call per anchor; more than that means full refetches crept back in');
+});
+
+test('guard: a completed run re-run immediately still costs nothing', () => {
+  // The property the freshness window exists for. It has to survive the fix above.
+  const TODAY = '2026-09-07';
+  const cut = Date.now() - 19.2 * 3600e3;
+  const store = [];
+  for (let i = 0; i < 500; i++) store.push({ u: stamp(1 / 6), series: seriesThrough('2026-08-12', TODAY) });
+  assert.equal(store.filter(e => !canSkip(e, TODAY, cut)).length, 0,
+    'an immediate re-run of a completed run must fetch nothing');
+});
+
+test('guard: a run that died partway refetches only what it missed', () => {
+  const TODAY = '2026-09-07';
+  const cut = Date.now() - 19.2 * 3600e3;
+  const store = [];
+  for (let i = 0; i < 300; i++) store.push({ u: stamp(0.1), series: seriesThrough('2026-08-12', TODAY) });          // done
+  for (let i = 0; i < 700; i++) store.push({ u: stamp(26), series: seriesThrough('2026-08-12', '2026-09-06') });    // never reached
+  assert.equal(store.filter(e => !canSkip(e, TODAY, cut)).length, 700,
+    'a resumed run should fetch exactly the anchors it had not reached');
+});
+
+test('guard: the forecast grid measures against its own end date, not the dense grid one', () => {
+  // The coarse grid fetches forecast_days=8, so its target is today+7. An anchor rolled yesterday
+  // reaches only today+6 and is behind, exactly as in the dense grid case.
+  const cut = Date.now() - 9.6 * 3600e3;                       // forecast grid window
+  const end = addDays('2026-09-07', FC - 1);
+  assert.equal(end, '2026-09-14');
+  const rolledYesterday = { u: stamp(5), series: seriesThrough('2026-08-12', '2026-09-13') };
+  const rolledToday = { u: stamp(5), series: seriesThrough('2026-08-12', end) };
+  assert.equal(canSkip(rolledYesterday, end, cut), false, 'a forecast anchor one day short of today+7 is behind');
+  assert.equal(canSkip(rolledToday, end, cut), true, 'a forecast anchor reaching today+7 is current');
+});
+
+test('guard: coversThrough and isFreshAt are independent, and both are required', () => {
+  const end = '2026-09-07';
+  const cut = Date.now() - 19.2 * 3600e3;
+  assert.equal(coversThrough({ series: seriesThrough('2026-08-12', end) }, end), true);
+  assert.equal(coversThrough({ series: seriesThrough('2026-08-12', '2026-09-06') }, end), false);
+  assert.equal(coversThrough(null, end), false);
+  assert.equal(coversThrough({}, end), false);
+  assert.equal(isFreshAt({ u: stamp(1 / 60) }, cut), true);
+  assert.equal(isFreshAt({ u: stamp(40) }, cut), false);
+  assert.equal(isFreshAt({}, cut), false);
+  assert.equal(isFreshAt({ u: 'not a date' }, cut), false);
 });
