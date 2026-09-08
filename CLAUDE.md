@@ -7,11 +7,25 @@ Screen."
 
 ## Files
 
-- **`index.html`** — the entire app. Leaflet map, canvas-rendered overlay of
+- **`src/model/`** — the ecological model, extracted from `index.html` so that
+  changing the science does not mean reading the whole application: `util.mjs`
+  (numeric curves, unit conversions, score bands), `habitat.mjs` (region,
+  season, elevation band), `weather-score.mjs` (`analyze`, `fullAnalysis`,
+  `adjustWeather`, `verdict`), `phenology.mjs` (the fruiting-stage mix),
+  `vegetation.mjs` (LANDFIRE host quality) and `cell.mjs` (the composition
+  root: `makeEntry`/`applyVeg`). Pure functions, no DOM, no fetch, no Leaflet,
+  deterministic. **Read `src/model/CLAUDE.md` before changing anything in
+  there** — it carries the rules for the directory, and
+  `tests/model/purity.test.mjs` enforces them.
+- **`index.html`** — the app around the model. Leaflet map, canvas-rendered overlay of
   ~23,000 one-square-mile cells, a layers menu (chance / habitat quality /
   trailing 7-day rain / soil moisture, multi-select), a play-through timeline
   for the 7-day forecast, a tap-a-cell breakdown sheet, a "Top spots" panel,
   and a "How it works" info panel.
+  - The inline script is `<script type="module">` and imports from
+    `./src/model/`. That makes a local server **mandatory** — see "Local
+    development"; `file://` fails CORS on every import and the page renders
+    blank with a console error that does not obviously say so.
   - `const PUBLIC_MODE` near the top of the script switches the whole
     app between two modes:
     - `false` — live API mode: fetches Open-Meteo weather and LANDFIRE
@@ -43,6 +57,11 @@ Screen."
   score). Keeps per-request timeout, retry-on-thrown-fetch-error,
   checkpoint/resume, and the >25% failure abort, and adds a daily call ledger
   (see "Call budget").
+- **`scripts/serve.mjs`** — dependency-free static server for local
+  development, `node scripts/serve.mjs [port]`. Exists because the app can no
+  longer be opened over `file://`, and because it guarantees the `.mjs` MIME
+  type: served as anything but `text/javascript` the browser refuses the module
+  with an error that looks nothing like its cause.
 - **`scripts/evt-names.test.mjs`** — `node --test scripts/evt-names.test.mjs`.
   Guards the checked-in EVT table: not truncated, the three live-verified codes
   still resolve, every type name `cells.json` uses is producible from it, no
@@ -51,7 +70,9 @@ Screen."
   it cannot drift from the tuned constants it checks.
 - **`tests/model/`** — regression fixtures for the ecological model, run by `npm test`.
   See "Model regression suite" below before changing anything in there; the two halves
-  have opposite rules about when they may be updated.
+  have opposite rules about when they may be updated. `purity.test.mjs` additionally
+  enforces the rules in `src/model/CLAUDE.md` — no DOM, no fetch, no map, no clock,
+  no imports outside the directory.
 - **`package.json`** — no dependencies and no build step; it exists only to wire up
   `npm test`, `npm run test:model`, `npm run test:data` and `npm run snapshots:update`.
 - **`scripts/fetch-weather.test.mjs`** — `node --test scripts/fetch-weather.test.mjs`.
@@ -691,13 +712,21 @@ cells.json, connect timeouts, workflow permissions).
 
 ## Local development
 
-No build step — serve the repo root as static files. Node 24 is installed
-(`C:\Program Files\nodejs`); the `python` on PATH is the Windows Store stub and
-does not run:
+No build step, but **a server is now mandatory** — it is not just convenient.
+`index.html` is a module script that imports `./src/model/*.mjs`, and ES module
+imports are fetched, so over `file://` every one of them fails CORS. The symptom
+is a blank page with `Access to script ... has been blocked by CORS policy` in
+the console, which reads like a network problem rather than like "you opened the
+file directly". Node 24 is installed (`C:\Program Files\nodejs`); the `python`
+on PATH is the Windows Store stub and does not run.
 
 ```bash
-npx serve -l 8080
+node scripts/serve.mjs 8080
 ```
+
+`npx serve -l 8080` works too. The bundled server is there so a machine with Node
+and no network still has one, and because it pins the `.mjs` MIME type — served
+as anything else, the browser refuses the module.
 
 Then open http://localhost:8080. `localhost` is neither a production nor a
 staging host, so it always reads its own `data/weather.json`.
@@ -915,6 +944,13 @@ real — prefer them to "it loaded fine".
   the proof, not the header.)
 ## Traps worth not rediscovering
 
+- **The console verification snippets need the names exposed deliberately.** The
+  inline script is a module, so its scope is not the global scope and
+  `anchorHit`, `cells`, `wcache`, `STATIC`, `snapLattice`, `key`, `WBASE`,
+  `WCOARSE` and `WLATTICE` are re-exported onto `window` at the end of it for
+  exactly that reason. `WBASE`/`WCOARSE`/`WLATTICE` are bound as live getters,
+  not copied — they are reassigned when the archive loads. If a snippet below
+  starts reporting `undefined`, check that list before concluding the join broke.
 - **`today_index` beats the viewer's clock.** `todayIndex()` prefers the value
   written in the archive's own timezone and only falls back to a local-date
   lookup, then the `past_days` clamp. Don't "simplify" it back to

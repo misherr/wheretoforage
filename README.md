@@ -3,6 +3,7 @@
 The app is one file (`index.html`). For public use it reads three static files and never calls an API from the phone: `data/cells.json` (terrain + vegetation per cell), `data/weather.json` (the weather archive) and `data/evt-names.json` (LANDFIRE vegetation code → name, checked in because the USGS service stopped publishing it).
 
 ## One-time setup
+0. Serve the repo root — **the app cannot be opened as a file any more.** `index.html` imports the model from `src/model/*.mjs`, and ES module imports are fetched, so `file://` fails CORS and the page comes up blank. Use `node scripts/serve.mjs 8080` (no dependencies) or `npx serve -l 8080`, then open http://localhost:8080.
 1. Run the app locally with `PUBLIC_MODE=false` (top of the script) and wait for a complete load — status line shows no "pending" or "missing" counts.
 2. Open the info panel (ⓘ) → **Export cells.json**. Save it as `data/cells.json`. This is the baked elevation, slope/aspect and LANDFIRE vegetation for every square-mile cell; it never needs refreshing unless you change the habitat model.
 3. Copy `scripts/`, `.github/`, `data/` and `index.html` into the repo. Commit and push.

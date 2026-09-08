@@ -15,22 +15,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
+/* hostOf, HOST_RULES and HOST_UNKNOWN are imported from the model itself, never copied in here. A
+   second copy of the tuned scoring constants would keep passing after the real ones changed, which
+   is the failure this file exists to catch. Until the model was extracted into src/model/ these were
+   scraped out of index.html by regex to get the same guarantee; the import replaces that. */
+import { hostOf, HOST_RULES, HOST_UNKNOWN } from '../src/model/vegetation.mjs';
+
 const TABLE = new URL('../data/evt-names.json', import.meta.url);
-const APP = new URL('../index.html', import.meta.url);
 
 const load = () => { const j = JSON.parse(fs.readFileSync(TABLE, 'utf8')); return j.names || j; };
-
-/* HOST_RULES and hostOf are lifted out of index.html rather than copied, so this test cannot drift
-   away from the tuned scoring constants it is checking. If the extraction stops matching, that is a
-   failure worth seeing — not a reason to paste the rules in here as a second source of truth. */
-function appHostOf() {
-  const src = fs.readFileSync(APP, 'utf8');
-  const rules = /const HOST_RULES=\[[\s\S]*?\n\];/.exec(src);
-  const fn = /^function hostOf\(name\)\{.*$/m.exec(src);
-  assert.ok(rules, 'could not find HOST_RULES in index.html — extraction needs updating');
-  assert.ok(fn, 'could not find hostOf() in index.html — extraction needs updating');
-  return new Function(`${rules[0]}\n${fn[0]}\nreturn hostOf;`)();
-}
 
 test('table: well-formed, and big enough to be the real thing', () => {
   const raw = JSON.parse(fs.readFileSync(TABLE, 'utf8'));
@@ -55,7 +48,7 @@ test('table: the three codes verified against the live service still resolve', (
 });
 
 test('chain: code -> name -> host score behaves for the types that actually matter in Washington', () => {
-  const m = load(), hostOf = appHostOf();
+  const m = load();
   const host = code => hostOf(m[String(code)]);
 
   // 7036 is the coastal Sitka spruce type — the best king bolete habitat in the state
@@ -67,16 +60,29 @@ test('chain: code -> name -> host score behaves for the types that actually matt
   assert.equal(host(9826).sc, 0, 'ruderal grassland is not forest');
 });
 
+test('rules: every host rule still matches a real vegetation type', () => {
+  // A rule that matches nothing is a rule that silently stopped applying — a renamed LANDFIRE class,
+  // or a regex edited past the names it was written for. Nothing else here would notice: hostOf()
+  // would fall through to a lower-scoring rule and every cell of that type would quietly lose host
+  // quality. Reachability is what is checked, not just matching, because an earlier broad rule can
+  // shadow a later specific one and leave it dead while it still 'matches' names on its own.
+  const names = Object.values(load());
+  HOST_RULES.forEach(([re, sc, label], i) => {
+    const reached = names.filter(n => HOST_RULES.findIndex(([r]) => r.test(n)) === i).length;
+    assert.ok(reached > 0,
+      `host rule ${i} (${label}, ${sc}) is unreachable — ${re} is either shadowed by an earlier ` +
+      `rule or no longer matches any LANDFIRE type name`);
+  });
+});
+
 test('chain: unknown never outranks known-mediocre', () => {
   // The whole point of HOST_UNKNOWN. Before it existed, a missing type multiplied by 1.0, so an
   // unmapped cell beat every real forest type in the state including Sitka spruce.
-  const src = fs.readFileSync(APP, 'utf8');
-  const mm = /const HOST_UNKNOWN=([\d.]+);/.exec(src);
-  assert.ok(mm, 'HOST_UNKNOWN not found in index.html');
-  const unknown = parseFloat(mm[1]);
+  const unknown = HOST_UNKNOWN;
+  assert.equal(typeof unknown, 'number', 'HOST_UNKNOWN must be a number');
   assert.ok(unknown < 1, 'a missing vegetation type must never score as ideal habitat');
 
-  const m = load(), hostOf = appHostOf();
+  const m = load();
   const best = hostOf(m['7036']).sc;
   assert.ok(unknown < best, 'unknown must rank below the best real host type');
   // and below a genuinely mediocre but *known* type, which is the failure mode being prevented

@@ -186,183 +186,33 @@ a.lnk{color:var(--cap-light);text-decoration:none;font-weight:600}
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<script>
+<!-- The ecological model lives in src/model/ — see src/model/CLAUDE.md. Everything below is the
+     application around it: map rendering, data loading, the tap sheet and UI state.
+     ES modules are fetched, so this page needs a server; opening index.html over file:// fails CORS. -->
+<script type="module">
+import { clamp, trap, ft, f, inch, fmtDay, bandOf, labelOf } from './src/model/util.mjs';
+import { habitat, everHabitat } from './src/model/habitat.mjs';
+import { LAPSE, adjustWeather, analyze, fullAnalysis, verdict } from './src/model/weather-score.mjs';
+import { STAGE_KEYS, STAGE_LABELS, stageBreakdown, stageOf } from './src/model/phenology.mjs';
+import { hostOf, HOST_UNKNOWN, vegMult, vegSummary } from './src/model/vegetation.mjs';
+import { makeEntry, applyVeg } from './src/model/cell.mjs';
 /* ===================== CONFIG ===================== */
 const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
 const DLAT=0.0145, DLON=0.0214, BLK=4; // 1 sq mi cells at 47.5°N, grouped in 4x4 blocks
 const BLAT=DLAT*BLK, BLON=DLON*BLK;
-const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400, LAPSE=0.0065; // local refine below 1 mi when zoomed way in
+const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400; // local refine below 1 mi when zoomed way in
 const PAST_DAYS = 26, FC_DAYS = 8, ANCHOR = 0.2; // 26 days covers the 3–24 day trigger window; anchors every ~14 mi keep the load under Open-Meteo's free quota
 const WA = [[-123.32,49.0],[-117.03,49.0],[-117.04,46.0],[-116.92,45.99],[-118.98,45.99],[-119.5,45.92],[-120.4,45.7],[-121.2,45.7],[-121.9,45.68],[-122.4,45.57],[-122.8,45.63],[-123.1,46.17],[-123.6,46.25],[-124.1,46.28],[-124.15,46.9],[-124.25,47.3],[-124.45,47.8],[-124.75,48.4],[-123.6,48.2],[-123.1,48.18],[-122.75,48.15],[-122.9,48.45],[-123.2,48.6],[-123.32,48.8]];
-const CREST = [[45.5,-121.6],[46.2,-121.5],[46.9,-121.5],[47.4,-121.4],[47.9,-121.1],[48.5,-120.85],[49.0,-120.9]];
-const BANDS = [[25,'Medium','#e2c452'],[45,'Good','#e58a2b'],[65,'High','#d6432c'],[80,'Very high','#8a1a30']];
 
 /* ===================== HELPERS ===================== */
 const $=id=>document.getElementById(id);
-const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
-const lerp=(a,b,t)=>a+(b-a)*t;
-function interp(tbl,x){ if(x<=tbl[0][0])return tbl[0][1]; for(let i=1;i<tbl.length;i++){ if(x<=tbl[i][0]){const [x0,y0]=tbl[i-1],[x1,y1]=tbl[i];return lerp(y0,y1,(x-x0)/(x1-x0));}} return tbl[tbl.length-1][1]; }
-function trap(x,a,b,c,d){ if(x<=a||x>=d)return 0; if(x<b)return (x-a)/(b-a); if(x<=c)return 1; return (d-x)/(d-c); }
-const bell=(x,c,sd)=>Math.exp(-0.5*((x-c)/sd)**2);
 function inWA(lat,lon){ let ins=false; for(let i=0,j=WA.length-1;i<WA.length;j=i++){ const [xi,yi]=WA[i],[xj,yj]=WA[j]; if((yi>lat)!==(yj>lat) && lon<(xj-xi)*(lat-yi)/(yj-yi)+xi) ins=!ins;} return ins; }
-const crestLon=lat=>interp(CREST,lat);
 function doyOf(d){ const s=new Date(d.getFullYear(),0,0); return Math.floor((d-s)/86400000); }
 function localISO(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
-const fmtDay=iso=>{const d=new Date(iso+'T12:00:00');return d.toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'});};
 const shortDay=iso=>new Date(iso+'T12:00:00').toLocaleDateString(undefined,{weekday:'narrow'});
-const ft=m=>Math.round(m*3.28084);
-const f=c=>Math.round(c*9/5+32);
-const inch=mm=>(mm/25.4).toFixed(2);
-function bandOf(s){ let b=null; for(const x of BANDS) if(s>=x[0]) b=x; return b; }
 function colorOf(s){ const b=bandOf(s); return b?b[2]:null; }
-function labelOf(s){ const b=bandOf(s); return b?b[1]:'Low'; }
 function dist(a,b){ const R=6371,dl=(b[0]-a[0])*Math.PI/180,dn=(b[1]-a[1])*Math.PI/180; const x=Math.sin(dl/2)**2+Math.cos(a[0]*Math.PI/180)*Math.cos(b[0]*Math.PI/180)*Math.sin(dn/2)**2; return 2*R*Math.asin(Math.sqrt(x))*0.621371; }
 
-/* ===================== HABITAT MODEL ===================== */
-function habitat(lat,lon,elev,doy){
-  const H={score:0,zone:'',hosts:'',elevNote:'',season:0,seasonNote:''};
-  if(elev==null||isNaN(elev)){H.zone='No terrain data';H.seasonNote='Elevation could not be read here';return H;}
-  if(elev<3){H.zone='Water';return H;}
-  const east = lon > crestLon(lat);
-  const basin = lat>45.9&&lat<47.9&&lon>-120.6&&lon<-117.8&&elev<800;
-  if(elev>2100){H.zone='Alpine / subalpine parkland';H.hosts='Above productive forest; sparse whitebark pine, subalpine fir krummholz';H.score=0.05;H.season=0.3;H.seasonNote='Too high and cold for reliable flushes';return H;}
-  if(east && (elev<500 || basin)){H.zone='Shrub-steppe / farmland';H.hosts='No ectomycorrhizal conifer hosts';H.season=0;H.seasonNote='Not king bolete country';return H;}
-  if(!east && elev<400 && (lon<-123.8 || (lat>48.0&&lon<-123.2))){
-    H.zone='Coastal Sitka spruce belt';H.hosts='Sitka spruce, shore pine, western hemlock — dune forests, spruce fringe, campground edges';
-    const s=trap(doy,255,278,330,355); H.season=s; H.seasonNote=s>=.9?'Coastal peak (Oct–Nov)':s>0?'Coastal season shoulder':'Coastal season is Oct–Nov';
-    H.score=(elev<150?1:lerp(1,.55,(elev-150)/250))*Math.max(s,.08); H.elevNote='Best low, within a few miles of salt water'; return H;
-  }
-  if(!east && elev<350){
-    H.zone='Puget / Chehalis lowland';H.hosts='Mostly Douglas-fir (weak host). Look for planted Sitka spruce, pines and true firs in parks, campuses, shelterbelts';
-    const s=trap(doy,272,290,330,342); H.season=s; H.seasonNote=s>0?'Lowland season (Oct–Nov)':'Lowland flushes run Oct–Nov';
-    H.score=0.3*Math.max(s,.08); H.elevNote='Spotty; habitat matters more than weather here'; return H;
-  }
-  if(!east){
-    H.zone= (lon<-123.0&&lat>47.3)?'Olympic montane forest':'West Cascades montane forest';
-    H.hosts='Pacific silver fir, noble fir, grand fir, western/mountain hemlock, western white pine; Engelmann spruce near the crest. Openings, road cuts, campgrounds under true fir are classic';
-    const s=trap(doy,220,237,288,306); const c=interp([[220,1450],[258,1150],[288,800],[319,450]],doy);
-    const e=0.3+0.7*bell(elev,c,350)*(elev>1800?0.6:1); H.season=s; H.score=Math.max(s,.06)*e;
-    H.seasonNote=s>=.9?'Fall montane peak (late Aug–mid Oct)':s>0?'Fall season shoulder':'Fall season Aug–Oct';
-    H.elevNote=`Sweet spot today ≈ ${ft(c-350)}–${ft(c+350)} ft, drifting downslope as fall goes on`; return H;
-  }
-  // east side
-  const hi=elev>=750;
-  H.zone= lat<46.8&&lon>-118.6?'Blue Mountains':(lat>47.5&&lon>-119.2?'Okanogan / Selkirk highlands':'East Cascades');
-  H.hosts= hi?'Grand fir, subalpine fir, Engelmann spruce, lodgepole & western white pine, Douglas-fir, larch mixes. Spring kings (B. rex-veris) under true fir/pine near snowmelt; fall B. edulis under spruce/fir':'Ponderosa pine / Douglas-fir transition — spring kings possible, fall spotty';
-  const fs=trap(doy,236,250,293,306); const fc=interp([[236,1500],[262,1300],[290,1000],[306,750]],doy);
-  const fe=0.3+0.7*bell(elev,fc,350);
-  const ss=trap(doy,128,140,176,192); const scn=interp([[128,800],[160,1250],[192,1650]],doy);
-  const se=0.3+0.7*bell(elev,scn,300);
-  const fall=fs*fe, spring=ss*se;
-  H.season=Math.max(fs,ss);
-  H.score=(hi?1:0.35)*Math.max(fall,spring,.06);
-  if(ss>0&&spring>=fall){H.seasonNote=ss>=.9?'Spring king peak (late May–June)':'Spring king shoulder';H.elevNote=`Spring kings follow the snowline; ≈ ${ft(scn-300)}–${ft(scn+300)} ft now`;}
-  else {H.seasonNote=fs>=.9?'Fall east-side peak (Sept–mid Oct)':fs>0?'Fall season shoulder':'Fall season Sept–Oct; spring kings May–June';H.elevNote=`Sweet spot today ≈ ${ft(fc-350)}–${ft(fc+350)} ft`;}
-  return H;
-}
-
-/* does this spot ever hold king boletes? (season-independent gate, so the cell set is stable year-round) */
-function everHabitat(lat,lon,elev){ return Math.max(habitat(lat,lon,elev,DOY).score,habitat(lat,lon,elev,160).score,habitat(lat,lon,elev,275).score,habitat(lat,lon,elev,300).score); }
-/* ===================== WEATHER SCORE MODEL ===================== */
-function kernel(a){ if(a<3)return 0; if(a<9)return (a-3)/6; if(a<=15)return 1; if(a<24)return (24-a)/9; return 0; }
-function tmaxSuit(t){ if(t<=2)return 0; if(t<10)return (t-2)/8; if(t<=22)return 1; if(t<30)return (30-t)/8; return 0; }
-function tminSuit(t){ if(t<=-2)return 0; if(t<3)return (t+2)/5; if(t<=13)return 1; if(t<19)return (19-t)/6; return 0; }
-function analyze(w,i,hab){
-  const {p,tmax,tmin,et0,snow,rh}=w; const n=p.length;
-  const at=(arr,k)=>arr[clamp(k,0,n-1)]??0;
-  // flush trigger: best rain event 3–24 days before i
-  let F=0,ev=null;
-  for(let d=Math.max(2,i-24);d<=i-3;d++){ const P3=at(p,d)+at(p,d-1)+at(p,d-2); const m=clamp((P3-10)/30,0,1); const v=m*kernel(i-d); if(v>F){F=v;ev={age:i-d,mm:P3,date:w.time[d]};} }
-  // most recent meaningful rain (any age)
-  let last=null; for(let d=i;d>=Math.max(2,i-30);d--){ const P3=at(p,d)+at(p,d-1)+at(p,d-2); if(P3>=10){last={age:i-d,mm:P3,date:w.time[d]};break;} }
-  // soil bucket
-  let S=20; for(let d=Math.max(0,i-30);d<=i;d++){ S=clamp(S+at(p,d)-0.7*(et0[d]??3),0,80); } const M=clamp(S/40,0,1);
-  let dry=0; for(let d=i;d>=0&&at(p,d)<1;d--)dry++;
-  // temperature (last 5 days)
-  let X=0,c=0; for(let d=i-4;d<=i;d++){ if(d<0)continue; X+=tmaxSuit(at(tmax,d))*tminSuit(at(tmin,d)); c++; } X=c?X/c:0.5;
-  let K=1,kill=null; let mn=99,sn=0,mx=-99;
-  for(let d=i-6;d<=i;d++){ if(d<0)continue; mn=Math.min(mn,at(tmin,d)); sn+=snow[d]??0; }
-  for(let d=i-2;d<=i;d++){ if(d<0)continue; mx=Math.max(mx,at(tmax,d)); }
-  if(sn>=3){K=0.05;kill='snow';} else if(mn<=-3){K=0.15;kill='frost';} else if(mx>=30){K=0.5;kill='heat';}
-  let rhm=null,rc=0,rs=0; for(let d=i-2;d<=i;d++){ if(d<0)continue; if(rh&&rh[d]!=null){rs+=rh[d];rc++;} } if(rc){rhm=rs/rc;}
-  const Hu= rhm==null?0.75:0.2+0.8*clamp((rhm-40)/30,0,1);
-  let tm1=0,tm2=0,c1=0,c2=0; for(let d=i-3;d<=i;d++){if(d>=0){tm1+=(at(tmax,d)+at(tmin,d))/2;c1++;}} for(let d=i-9;d<=i-4;d++){if(d>=0){tm2+=(at(tmax,d)+at(tmin,d))/2;c2++;}}
-  const drop=(c1&&c2)?(tm2/c2-tm1/c1):0; const C= drop>=2?0.1:0;
-  const score=clamp(100*hab.score*Math.pow(F,0.6)*Math.pow(M,0.4)*X*Math.sqrt(Hu)*K*(1+C),0,100);
-  return {score,F,M,X,Hu,K,C,kill,ev,last,dry,bucket:S,rh:rhm,mn,mx,drop};
-}
-function fullAnalysis(w,hab){
-  const i=w.today; const now=analyze(w,i,hab);
-  const fut=[]; for(let t=0;t<=7&&i+t<w.time.length;t++){ const r=analyze(w,i+t,hab); let r7=0; for(let d=i+t-6;d<=i+t;d++) if(d>=0) r7+=w.p[d]||0; fut.push({date:w.time[i+t],score:r.score,rain:w.p[i+t],rain7:r7,M:r.M,F:r.F}); }
-  let best=fut[0]; for(const x of fut) if(x.score>best.score+0.5) best=x;
-  const fRain=fut.slice(1).reduce((a,x)=>a+(x.rain||0),0);
-  return {now,fut,best,fRain,hab};
-}
-function verdict(A){
-  const {now,fut,best,fRain,hab}=A; const s=Math.round(now.score); const bs=Math.round(best.score);
-  const lab=labelOf(s).toLowerCase();
-  if(hab.score===0) return `Not king bolete habitat — ${hab.zone.toLowerCase()}.`;
-  if(hab.season<0.15) return `Out of season here. ${hab.seasonNote}.`;
-  if(now.kill==='snow') return `Snow on the ground. Fall flush is over at this elevation.`;
-  if(now.kill==='frost') return `Hard frost in the last week (${f(now.mn)}°F). The fall flush is over here — look lower or on the coast.`;
-  const evTxt=now.ev?`${inch(now.ev.mm)}" of rain ${now.ev.age} days ago`:null;
-  if(s>=65) return `<b>Prime right now.</b> ${evTxt?evTxt+' is producing':'Steady moisture is producing'}; temps ${f(now.mn)}–${f(now.mx)}°F. Go.`;
-  if(bs>=s+10 && bs>=30){
-    const lastTxt=now.last&&now.last.age<=6?`It rained ${inch(now.last.mm)}" ${now.last.age===0?'today':now.last.age+' days ago'}.`:(fRain>8?`${inch(fRain)}" of rain is forecast.`:'');
-    return `${lastTxt} Chances are <b>${lab}</b> today (${s}) but should climb to <b>${labelOf(bs).toLowerCase()}</b> (${bs}) around ${fmtDay(best.date)} as the flush comes up.`;
-  }
-  if(now.ev&&now.ev.age>15&&s<45) return `<b>Past prime.</b> The flush from ${inch(now.ev.mm)}" on ${fmtDay(now.ev.date)} is ${now.ev.age} days old and fading — you may find older, buggy caps. Needs new rain.`;
-  if(now.F===0&&now.dry>=10) return `<b>Dry.</b> No trigger rain (≥1") in the last ${now.dry} days and soil moisture is ${Math.round(now.M*100)}%. Not worth the drive.`;
-  if(now.F===0) return `No flush trigger yet — the last real soak was too recent or too light. Watch the forecast; a 1" storm followed by 7–12 cool days is what you want.`;
-  if(now.kill==='heat') return `Rain history is fine but highs near ${f(now.mx)}°F are shutting fruiting down. Wait for the cool-down.`;
-  if(now.X<0.4) return `Moisture is there, but temperatures (${f(now.mn)}–${f(now.mx)}°F) are outside the fruiting window. Marginal.`;
-  return `<b>${labelOf(s)}</b> chance. ${evTxt?evTxt+', soil moisture '+Math.round(now.M*100)+'%.':''} ${bs>s?`Slightly better around ${fmtDay(best.date)}.`:'Trend is flat to declining.'}`;
-}
-function stageMix(age){
-  return {
-    emerging: trap(age,-1,0,3,5),
-    buttons:  trap(age,3,5,7,9),
-    prime:    trap(age,7,9,15,19),
-    past:     trap(age,15,19,22,26),
-    rotten:   trap(age,22,26,32,40)
-  };
-}
-const STAGE_KEYS=['emerging','buttons','prime','past','rotten'];
-const STAGE_LABELS={emerging:'Emerging',buttons:'Buttons',prime:'Prime',past:'Past prime',rotten:'Rotten'};
-function stageBreakdown(p,i){
-  const mix={emerging:0,buttons:0,prime:0,past:0,rotten:0}; let tot=0; const events=[];
-  for(let d=2; d<=i; d++){
-    const P3=(p[d]||0)+(p[d-1]||0)+(p[d-2]||0);
-    if(P3<10) continue;
-    const P3n=(p[d+1]||0)+(p[d]||0)+(p[d-1]||0);
-    if(d<i && P3n>P3) continue;
-    const mass=clamp((P3-10)/30,0,1); if(mass<=0) continue;
-    const age=i-d, m=stageMix(age);
-    let s=0; for(const k of STAGE_KEYS) s+=m[k];
-    if(s>0.001){ for(const k of STAGE_KEYS) mix[k]+=mass*m[k]; tot+=mass*s; events.push({age,mm:P3,mass}); }
-    d+=2;
-  }
-  if(tot<=0.001) return null;
-  const pct={}; for(const k of STAGE_KEYS) pct[k]=mix[k]/tot;
-  let top=STAGE_KEYS[0]; for(const k of STAGE_KEYS) if(pct[k]>pct[top]) top=k;
-  return {pct,top,standing:tot,events};
-}
-function stageOf(w,i,hab){
-  if(hab.score===0||hab.season<0.15) return null;
-  const kill=analyze(w,i,hab).kill;
-  if(kill==='frost'||kill==='snow') return null;
-  const b=stageBreakdown(w.p,i);
-  if(!b) return null;
-  const pct=b.pct;
-  const notes={
-    emerging:Math.round(pct.emerging*100)+'% of what is out there is still underground, just emerging',
-    buttons:Math.round(pct.buttons*100)+'% of what is out there is in the button stage',
-    prime:Math.round(pct.prime*100)+'% of what is out there is at peak',
-    past:Math.round(pct.past*100)+'% of what is out there is past prime',
-    rotten:Math.round(pct.rotten*100)+'% of what is out there has rotted'
-  };
-  return {...b, key:b.top, label:STAGE_LABELS[b.top], note:notes[b.top]};
-}
 /* real neighbouring cells, bucketed by elevation — thresholds derived from the sample, not from assumed cell size */
 function elevationBands(lat,lon,dayIdx){
   const R=3.5, dLat=4/69, dLon=4/(69*Math.cos(lat*Math.PI/180));
@@ -487,21 +337,6 @@ async function loadEvtNames(){
   }catch(err){ console.info('EVT legend override unavailable ('+(err&&err.message||'error')+') — using the checked-in table'); }
   if(evtNames) console.log('EVT names:',evtSource);
 }
-// host quality of a LANDFIRE vegetation type for king boletes, by name
-const HOST_RULES=[
-  [/sitka spruce|coastal.*spruce/i,1.0,'Sitka spruce (coastal king country)'],
-  [/silver fir|mountain hemlock|subalpine|spruce-fir|engelmann|noble fir|red fir/i,1.0,'true fir / mountain hemlock / spruce'],
-  [/grand fir|white fir|mixed conifer|western white pine|lodgepole|mesic.*conifer/i,0.8,'mixed conifer'],
-  [/western hemlock|douglas-fir.*hemlock|hemlock.*douglas-fir/i,0.6,'Douglas-fir – western hemlock'],
-  [/ponderosa|larch|dry.*douglas-fir|douglas-fir.*dry|douglas-fir woodland/i,0.4,'dry pine / Douglas-fir'],
-  [/douglas-fir/i,0.45,'Douglas-fir'],
-  [/harvest|regenerat|plantation|managed tree/i,0.25,'recently logged / young plantation'],
-  [/krummholz|parkland|woodland/i,0.3,'open subalpine woodland'],
-  [/hardwood|oak|aspen|alder|cottonwood|maple|riparian|deciduous|broadleaf/i,0.1,'hardwood / riparian'],
-  [/shrub|grass|meadow|steppe|prairie|sparse|barren|snow|ice|water|develop|urban|agricultur|crop|pasture|orchard|vineyard|marsh|wetland|bog|fen|quarr|mine|road|burn|rock|talus|scree|dune|beach|salt|alpine/i,0,'not forest'],
-  [/forest|conifer|pine|fir|spruce|hemlock|cedar/i,0.5,'conifer forest']
-];
-function hostOf(name){ if(!name) return null; for(const [re,sc,lab] of HOST_RULES) if(re.test(name)) return {sc,lab}; return {sc:0.3,lab:'other vegetation'}; }
 async function sampleLayer(layer,pts){
   const out=new Array(pts.length).fill(null); let chunk=1000; let i=0;
   while(i<pts.length){ const b=pts.slice(i,i+chunk);
@@ -513,43 +348,17 @@ async function sampleLayer(layer,pts){
   }
   return out;
 }
-function fCanopy(c){ return c<10?0.15:c<25?0.15+0.85*(c-10)/15:c<=75?1:0.85; }
-function fHeight(h){ return h<3?0.05:h<8?0.05+0.45*(h-3)/5:h<15?0.5+0.5*(h-8)/7:1; }
-/* Host quality when the vegetation type is unknown. This used to be 1.0, i.e. a cell with no EVT was
-   scored as though its host trees were ideal — so while EVT was broken, a logged Douglas-fir
-   plantation ranked identically to a Sitka spruce stand, and every forested cell in the state was
-   optimistic. 0.4 sits below Douglas-fir (0.45) and dry pine (0.4 is the same, deliberately): unknown
-   must never outrank known-mediocre. It is a penalty for absent data, not an estimate of anything. */
-const HOST_UNKNOWN=0.4;
-function vegMult(v){ return v.treeFrac===0?0:clamp(v.treeFrac*fCanopy(v.canopy)*fHeight(v.height)*(v.host==null?HOST_UNKNOWN:Math.max(v.host,0.02)),0,1); }
-function vegSummary(evt,evc,evh){
-  let n=0,tree=0,canopy=0,ht=0,host=0,hn=0; const names={};
-  for(let k=0;k<evc.length;k++){ n++; const c=evc[k], h=evh[k], t=evt[k];
-    const isTree=c!=null&&c>=101&&c<=199; if(isTree){ tree++; canopy+=c-100; ht+=(h!=null&&h>=101&&h<=199)?h-100:(h!=null&&h>=1&&h<=100?h:10); }
-    const name=evtNames&&t!=null?evtNames.get(t):null; if(name){ names[name]=(names[name]||0)+1; const hs=hostOf(name); if(isTree||hs.sc===0){ host+=hs.sc; hn++; } } }
-  if(!n) return null;
-  const treeFrac=tree/n, cv=tree?canopy/tree:0, hh=tree?ht/tree:0, hs=hn?host/hn:null;
-  const top=Object.entries(names).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([k,v])=>({name:k,share:v/n,host:hostOf(k)}));
-  const v={treeFrac,canopy:cv,height:hh,host:hs,top}; v.mult=vegMult(v); return v;
-}
 /* sample all three layers for a list of cells; 4 points per cell (quarter points) or 1 for sub-mile cells */
 async function vegFor(entries,perCell){
-  if(PUBLIC_MODE){ for(const e of entries){ const c=cells.get(cellKey(e.lat,e.lon)); if(c&&c.veg){ e.veg=c.veg; applyVeg(e); } } return; }
+  if(PUBLIC_MODE){ for(const e of entries){ const c=cells.get(cellKey(e.lat,e.lon)); if(c&&c.veg){ e.veg=c.veg; applyVeg(e,DOY); } } return; }
   if(vegBroken||!entries.length) return;
-  if(perCell===4){ const rest=[]; for(const e of entries){ const v=vcache.get(key(e.lat,e.lon)); if(v){ e.veg=v; applyVeg(e); } else rest.push(e); } entries=rest; if(!entries.length) return; }
+  if(perCell===4){ const rest=[]; for(const e of entries){ const v=vcache.get(key(e.lat,e.lon)); if(v){ e.veg=v; applyVeg(e,DOY); } else rest.push(e); } entries=rest; if(!entries.length) return; }
   const pts=[]; entries.forEach(e=>{ const dl=(e.size||DLAT)/4, dn=(e.lonsize||e.size||DLON)/4; if(perCell===1) pts.push([e.lat,e.lon]); else pts.push([e.lat+dl,e.lon-dn],[e.lat+dl,e.lon+dn],[e.lat-dl,e.lon-dn],[e.lat-dl,e.lon+dn]); });
   try{
     const [evt,evc,evh]=await Promise.all([evtNames?sampleLayer('evt',pts):Promise.resolve(pts.map(()=>null)),sampleLayer('evc',pts),sampleLayer('evh',pts)]);
     vegFails=0; const k=perCell===1?1:4;
-    entries.forEach((e,i)=>{ const v=vegSummary(evt.slice(i*k,i*k+k),evc.slice(i*k,i*k+k),evh.slice(i*k,i*k+k)); if(!v) return; e.veg=v; if(k===4) vcache.set(key(e.lat,e.lon),v); applyVeg(e); });
+    entries.forEach((e,i)=>{ const v=vegSummary(evt.slice(i*k,i*k+k),evc.slice(i*k,i*k+k),evh.slice(i*k,i*k+k),evtNames); if(!v) return; e.veg=v; if(k===4) vcache.set(key(e.lat,e.lon),v); applyVeg(e,DOY); });
   }catch(err){ console.warn('LANDFIRE sampling failed',err); if(++vegFails>=3){ vegBroken=true; vegNote='LANDFIRE vegetation service unreachable — habitat is terrain-only'; } }
-}
-function applyVeg(e){
-  const base=habitat(e.lat,e.lon,e.elev,DOY); const v=e.veg; base.score*=v.mult;
-  if(v.mult===0){ base.zone+=' — no forest'; base.seasonNote=v.treeFrac===0?'LANDFIRE maps no tree cover here':'Vegetation unsuitable'; }
-  else if(v.height<8){ base.elevNote=(base.elevNote?base.elevNote+' · ':'')+'Young regenerating stand ('+Math.round(v.height)+' m) — low odds until it matures'; }
-  else if(v.host!=null&&v.host<0.5){ base.elevNote=(base.elevNote?base.elevNote+' · ':'')+'Weak host forest type here — look for pockets of true fir, spruce or pine'; }
-  e.hab=base; if(e.w) e.A=fullAnalysis(e.w,base); else if(base.score<=0.08) e.A={now:{score:0},fut:[],best:{score:0},fRain:0,hab:base};
 }
 async function getElevAPI(pts,onProgress){ // fallback only — Open-Meteo meters every coordinate
   const need=pts.filter(p=>!ecache.has(key(p[0],p[1])));
@@ -612,23 +421,6 @@ function terrainAt(getE,lat,lon,d,dl){
   return {slope,aspect};
 }
 const compass=a=>a==null?'flat':['N','NE','E','SE','S','SW','W','NW'][Math.round(a/45)%8];
-/* adjust anchor weather to a specific elevation + aspect */
-function adjustWeather(w,elev,terr){
-  const dz=elev-(w.elev??elev); const dT=-LAPSE*dz;
-  const sw=terr?clamp(terr.slope/15,0,1):0; const north=terr&&terr.aspect!=null?Math.cos(terr.aspect*Math.PI/180):0; // +1 north, -1 south
-  const tAsp= -1.0*north*sw;              // south faces run warmer, north cooler (°C)
-  const etMul= 1-0.18*north*sw;           // north slopes lose less water, south more
-  return {time:w.time,today:w.today,p:w.p,snow:w.snow,rh:w.rh,elev:elev,
-    tmax:w.tmax.map(t=>t==null?t:t+dT+tAsp*1.4), tmin:w.tmin.map(t=>t==null?t:t+dT+tAsp*0.6),
-    et0:w.et0.map(v=>(v??3)*etMul), meta:{dz,dT,tAsp,etMul,anchorElev:w.elev}};
-}
-function makeEntry(lat,lon,size,elev,terr,w){
-  const hab=habitat(lat,lon,elev,DOY);
-  const e={lat,lon,size,elev,terr,hab,veg:null,w:null,A:null,failed:false};
-  if(hab.score<=0.08&&everHabitat(lat,lon,elev)<=0.08){ e.A={now:{score:0},fut:[],best:{score:0},fRain:0,hab}; return e; }
-  if(!w){ e.failed=true; return e; }
-  e.w=adjustWeather(w,elev,terr); e.A=hab.score<=0.08?{now:{score:0},fut:[],best:{score:0},fRain:0,hab}:fullAnalysis(e.w,hab); return e;
-}
 const snapAnchor=(lat,lon,sp)=>[Math.floor(lat/sp)*sp+sp/2,Math.floor(lon/sp)*sp+sp/2];
 /* Baked weather (data/weather.json) sits on a fixed lattice: the active anchors of a grid are the
    multiples of LATTICE*stride. The archive carries two grids — a dense past grid and a coarse
@@ -676,8 +468,8 @@ async function buildCells(pts,size,anchorSp,onProgress){
   const needSet=new Map();
   pts.forEach((p,i)=>{ if(habs[i].score>0.08&&!anchorHit(p[0],p[1]).w){ const a=anchorSp?snapAnchor(p[0],p[1],anchorSp):p; needSet.set(key(a[0],a[1]),a); } });
   if(needSet.size){ lastFailed=0; await getWeather([...needSet.values()],onProgress); }
-  const entries=pts.map((p,i)=>{ const terr=terrainAt(getE,p[0],p[1],size); const e=makeEntry(p[0],p[1],size,el[i],terr,anchorHit(p[0],p[1]).w); e.lonsize=size; return e; });
-  await vegFor(entries.filter(e=>everHabitat(e.lat,e.lon,e.elev)>0.08),1);
+  const entries=pts.map((p,i)=>{ const terr=terrainAt(getE,p[0],p[1],size); const e=makeEntry(p[0],p[1],size,el[i],terr,anchorHit(p[0],p[1]).w,DOY); e.lonsize=size; return e; });
+  await vegFor(entries.filter(e=>everHabitat(e.lat,e.lon,e.elev,DOY)>0.08),1);
   return entries;
 }
 /* one exact point: 5 elevation samples for slope/aspect + weather for that point */
@@ -690,7 +482,7 @@ async function pointEntry(lat,lon,onProgress){
   let w=null;
   if(PUBLIC_MODE||weatherAsOf){ w=anchorHit(lat,lon).w; }
   else if(hab.score>0.08){ lastFailed=0; [w]=await getWeather([[lat,lon]],onProgress); }
-  const e=makeEntry(lat,lon,DLAT/3,el[0],terr,w); e.lonsize=DLON/3;
+  const e=makeEntry(lat,lon,DLAT/3,el[0],terr,w,DOY); e.lonsize=DLON/3;
   await vegFor([e],4);
   return e;
 }
@@ -966,8 +758,8 @@ async function loadFromStatic(gen){
     const [lat,lon,elev,slope,aspect,vg]=r; ecache.set(key(lat,lon),elev);
     const terr={slope,aspect:aspect<0?null:aspect};
     const w=anchorHit(lat,lon).w;
-    const e=makeEntry(lat,lon,DLAT,elev,terr,w); e.lonsize=DLON;
-    if(vg){ const top=(vg[4]||[]).map(([ni,sh])=>({name:names[ni],share:sh,host:hostOf(names[ni])})); const v={treeFrac:vg[0],canopy:vg[1],height:vg[2],host:vg[3]<0?null:vg[3],top}; v.mult=vegMult(v); e.veg=v; vcache.set(key(lat,lon),v); applyVeg(e);
+    const e=makeEntry(lat,lon,DLAT,elev,terr,w,DOY); e.lonsize=DLON;
+    if(vg){ const top=(vg[4]||[]).map(([ni,sh])=>({name:names[ni],share:sh,host:hostOf(names[ni])})); const v={treeFrac:vg[0],canopy:vg[1],height:vg[2],host:vg[3]<0?null:vg[3],top}; v.mult=vegMult(v); e.veg=v; vcache.set(key(lat,lon),v); applyVeg(e,DOY);
       if(v.treeFrac>0){ vegged++; if(v.host==null||!v.top.length) noType++; } }
     cells.set(cellKey(lat,lon),e);
     if(++i%4000===0){ progress(`Loading baked cells… ${i.toLocaleString()}`,0.2+0.8*i/j.rows.length); renderAll(); await sleep(0); }
@@ -1017,7 +809,7 @@ async function loadState(){
     const samp=[]; centres.forEach(c=>{ samp.push([c.lat,c.lon],[c.lat+DLAT,c.lon+DLON],[c.lat-DLAT,c.lon-DLON],[c.lat+DLAT,c.lon-DLON],[c.lat-DLAT,c.lon+DLON]); });
     const el=await getElev(samp,(t,f)=>progress('Reading terrain tiles across Washington…',0.02+0.12*f));
     if(gen!==loadGen) return;
-    const blocks=[]; centres.forEach((c,i)=>{ let best=null,bs=-1; for(let k=0;k<5;k++){ const sc=everHabitat(samp[i*5+k][0],samp[i*5+k][1],el[i*5+k]); if(sc>bs){ bs=sc; best=habitat(samp[i*5+k][0],samp[i*5+k][1],el[i*5+k],DOY); } } if(bs>0.08) blocks.push({...c,elev:el[i*5],hab:best,pri:bs}); });
+    const blocks=[]; centres.forEach((c,i)=>{ let best=null,bs=-1; for(let k=0;k<5;k++){ const sc=everHabitat(samp[i*5+k][0],samp[i*5+k][1],el[i*5+k],DOY); if(sc>bs){ bs=sc; best=habitat(samp[i*5+k][0],samp[i*5+k][1],el[i*5+k],DOY); } } if(bs>0.08) blocks.push({...c,elev:el[i*5],hab:best,pri:bs}); });
     // stage 2: group blocks under 14-mi weather anchors, order by habitat strength; viewport jumps the queue
     const byA=new Map(); blocks.forEach(b=>{ const a=snapAnchor(b.lat,b.lon,ANCHOR); const k=key(a[0],a[1]); if(!byA.has(k)) byA.set(k,{a,blocks:[],pri:0}); const g=byA.get(k); g.blocks.push(b); g.pri+=b.pri; });
     anchorGroups=[...byA.values()]; queue=anchorGroups.slice().sort((x,y)=>y.pri-x.pri); totalAnchors=queue.length; doneAnchors=0; lastFailed=0;
@@ -1066,8 +858,8 @@ async function scoreBlocks(blocks,w){
     const el=await getElev(pts); const getE=(la,lo)=>ecache.get(key(la,lo));
     const habs=pts.map((p,i)=>habitat(p[0],p[1],el[i],DOY));
     const made=[];
-    pts.forEach((p,i)=>{ if(everHabitat(p[0],p[1],el[i])<=0.08) return;
-      const terr=terrainAt(getE,p[0],p[1],DLAT,DLON); const e=makeEntry(p[0],p[1],DLAT,el[i],terr,w); e.lonsize=DLON; cells.set(cellKey(p[0],p[1]),e); made.push(e); });
+    pts.forEach((p,i)=>{ if(everHabitat(p[0],p[1],el[i],DOY)<=0.08) return;
+      const terr=terrainAt(getE,p[0],p[1],DLAT,DLON); const e=makeEntry(p[0],p[1],DLAT,el[i],terr,w,DOY); e.lonsize=DLON; cells.set(cellKey(p[0],p[1]),e); made.push(e); });
     if(made.length) vegQueue.push(made);
   }catch(err){ console.warn('block scoring failed',err); }
 }
@@ -1271,6 +1063,14 @@ $('btn-base').onclick=()=>{ bases[baseOrder[baseIdx]].remove(); baseIdx=(baseIdx
 $('btn-loc').onclick=()=>{ if(!navigator.geolocation){setStatus('Location not available');return;} setStatus('Finding you…'); navigator.geolocation.getCurrentPosition(pos=>{ userLoc=[pos.coords.latitude,pos.coords.longitude]; L.circleMarker(userLoc,{radius:6,color:'#fff',weight:2,fillColor:'#4a90d9',fillOpacity:1}).addTo(map); map.setView(userLoc,9); setStatus('Centered on your location'); },()=>setStatus('Location permission denied'),{enableHighAccuracy:false,timeout:10000}); };
 
 loadState();
+/* Module scope is not the global scope. The verification snippets in CLAUDE.md — the ones under
+   "Verification that has actually caught bugs", which are run by hand in the browser console — refer
+   to these by name, so expose them deliberately rather than letting the move quietly break them. */
+Object.assign(window,{anchorHit,snapLattice,key,cells,wcache,STATIC,habitat,analyze,fullAnalysis,vegMult});
+// WBASE/WCOARSE/WLATTICE are reassigned when the archive loads, so bind them live rather than
+// copying whatever they happened to hold at startup.
+Object.defineProperties(window,{WBASE:{get:()=>WBASE},WCOARSE:{get:()=>WCOARSE},WLATTICE:{get:()=>WLATTICE}});
+
 </script>
 </body>
 </html>
