@@ -125,22 +125,27 @@ test('classes: distances render in the units the rest of the app uses', () => {
 
 /* ===================== geometry ===================== */
 
-const mkDist = (cells) => {
-  const d = new Map();
-  for (const [lat, lon] of cells) {
+/* stampWay works on {cells, nearest}: cells maps a cell index to its centre, nearest accumulates
+   the closest way per category as {d, wid, arc}. */
+const mkState = (centres) => {
+  const cells = new Map();
+  for (const [lat, lon] of centres) {
     const [i, j] = cellIndex(lat, lon);
-    d.set(i + ':' + j, { c: [lat, lon], i, j, road: -1, trail: -1, rough: -1 });
+    cells.set(i + ':' + j, [lat, lon]);
   }
-  return d;
+  return { cells, nearest: new Map() };
 };
+const only = st => [...st.nearest.values()][0] || {};
 
-test('geometry: a way through a cell records a short distance to that cell', () => {
+test('geometry: a way through a cell records its distance, identity and position along it', () => {
   const [lat, lon] = cellCenter(3300, -5700);
-  const d = mkDist([[lat, lon]]);
-  A.stampWay(d, [[lat, lon - 0.02], [lat, lon + 0.02]], 'road');   // straight through the centre
-  const cell = [...d.values()][0];
-  assert.ok(cell.road >= 0 && cell.road < 60, `expected a near-zero distance, got ${cell.road}`);
-  assert.equal(cell.trail, -1, 'other categories must stay untouched');
+  const st = mkState([[lat, lon]]);
+  A.stampWay(st, [[lat, lon - 0.02], [lat, lon + 0.02]], 'road', 'w1');
+  const rec = only(st);
+  assert.ok(rec.road && rec.road.d < 60, 'expected a near-zero distance, got ' + (rec.road && rec.road.d));
+  assert.equal(rec.road.wid, 'w1', 'the way that was nearest must be recorded, not just how far it was');
+  assert.ok(rec.road.arc > 0, 'and how far along it, which is what a walk figure needs');
+  assert.equal(rec.trail, undefined, 'other categories must stay untouched');
 });
 
 test('geometry: densification stops a long segment skipping past a cell', () => {
@@ -148,27 +153,36 @@ test('geometry: densification stops a long segment skipping past a cell', () => 
      the vertices would miss it entirely, and the cell would read as unknown while a highway runs
      down the middle of it. */
   const [lat, lon] = cellCenter(3300, -5700);
-  const d = mkDist([[lat, lon]]);
-  A.stampWay(d, [[lat, lon - 0.5], [lat, lon + 0.5]], 'road');
-  const cell = [...d.values()][0];
-  assert.ok(cell.road >= 0 && cell.road < 60, `long segment was not sampled through the cell (got ${cell.road})`);
+  const st = mkState([[lat, lon]]);
+  A.stampWay(st, [[lat, lon - 0.5], [lat, lon + 0.5]], 'road', 'w1');
+  const rec = only(st);
+  assert.ok(rec.road && rec.road.d < 60, 'long segment was not sampled through the cell');
 });
 
 test('geometry: a way beyond the cap leaves the cell unknown', () => {
   const [lat, lon] = cellCenter(3300, -5700);
-  const d = mkDist([[lat, lon]]);
-  A.stampWay(d, [[lat + 0.5, lon], [lat + 0.5, lon + 0.01]], 'road');   // ~55 km north
-  assert.equal([...d.values()][0].road, -1, 'nothing within the cap must stay -1, not a large number');
+  const st = mkState([[lat, lon]]);
+  A.stampWay(st, [[lat + 0.5, lon], [lat + 0.5, lon + 0.01]], 'road', 'w1');
+  assert.equal(st.nearest.size, 0, 'nothing within the cap must leave no record at all');
 });
 
-test('geometry: the nearest way wins when several are stamped', () => {
+test('geometry: the nearest way wins, and its identity comes with it', () => {
   const [lat, lon] = cellCenter(3300, -5700);
-  const d = mkDist([[lat, lon]]);
-  A.stampWay(d, [[lat + 0.01, lon], [lat + 0.01, lon + 0.001]], 'trail');
-  const far = [...d.values()][0].trail;
-  A.stampWay(d, [[lat + 0.001, lon], [lat + 0.001, lon + 0.001]], 'trail');
-  const near = [...d.values()][0].trail;
-  assert.ok(near < far, 'a closer way must replace a further one');
+  const st = mkState([[lat, lon]]);
+  A.stampWay(st, [[lat + 0.01, lon], [lat + 0.01, lon + 0.001]], 'trail', 'far');
+  const far = only(st).trail.d;
+  A.stampWay(st, [[lat + 0.001, lon], [lat + 0.001, lon + 0.001]], 'trail', 'near');
+  const rec = only(st);
+  assert.ok(rec.trail.d < far, 'a closer way must replace a further one');
+  assert.equal(rec.trail.wid, 'near', 'and the recorded identity must follow the distance');
+});
+
+test('geometry: nearestOnWay reports both distance and position along the line', () => {
+  const line = [[47.5, -121.5], [47.5, -121.4]];
+  const mid = A.nearestOnWay(line, 47.5, -121.45);
+  assert.ok(mid.d < 5, 'a point on the line should be ~0 m away');
+  const end = A.nearestOnWay(line, 47.5, -121.5);
+  assert.ok(mid.arc > end.arc, 'a point halfway along must have a larger arc than the start');
 });
 
 /* ===================== tiling ===================== */
@@ -199,14 +213,21 @@ test('tiles: a region bake only queries that region', () => {
 function fakeDeps(counts = {}) {
   counts.osm = 0; counts.arc = 0;
   return {
-    /* One trail through the northern half of the area and one drivable road along its southern edge,
-       so the result is checkable by hand rather than by whatever the fixture happens to produce. */
+    /* A named trail across the northern half, a drivable road along the southern edge that the trail
+       ends on (so a trailhead is inferred), and an unnamed track. Checkable by hand rather than by
+       whatever the fixture happens to produce. */
     overpass: async (s, w, n, e, cb) => {
       counts.osm++;
       const mid = (s + n) / 2;
-      cb({ type: 'way', tags: { highway: 'path' }, geometry: [{ lat: mid + 0.01, lon: w }, { lat: mid + 0.01, lon: e }] });
-      cb({ type: 'way', tags: { highway: 'residential' }, geometry: [{ lat: s + 0.005, lon: w }, { lat: s + 0.005, lon: e }] });
-      cb({ type: 'way', tags: { highway: 'footway' }, geometry: [{ lat: mid, lon: w }, { lat: mid, lon: e }] });
+      cb({ type: 'way', id: 101, tags: { highway: 'residential', name: 'River Road' },
+           geometry: [{ lat: s + 0.005, lon: w }, { lat: s + 0.005, lon: e }] });
+      // starts on River Road, runs north: its south end is within TH_SNAP of the road
+      cb({ type: 'way', id: 102, tags: { highway: 'path', name: 'Bear Creek Trail' },
+           geometry: [{ lat: s + 0.005, lon: (w + e) / 2 }, { lat: mid + 0.01, lon: (w + e) / 2 }] });
+      cb({ type: 'way', id: 103, tags: { highway: 'track' },
+           geometry: [{ lat: n - 0.01, lon: w }, { lat: n - 0.01, lon: e }] });
+      cb({ type: 'way', id: 104, tags: { highway: 'footway' },
+           geometry: [{ lat: mid, lon: w }, { lat: mid, lon: e }] });
     },
     arcgis: async () => { counts.arc++; return { features: [] }; },
   };
@@ -223,17 +244,26 @@ const cellsFixture = (dir) => {
   return { file: f, rows };
 };
 
-test('bake: produces one row per cell, keyed by cell index', async () => {
+test('bake: produces at most one row per cell, keyed by cell index', async () => {
   const dir = tmpdir();
   const { rows } = cellsFixture(dir);
   const out = path.join(dir, 'access.json');
   const opts = A.parseArgs([`--cells=${path.join(dir, 'cells.json')}`, `--out=${out}`,
     '--bbox=47,-123,49,-121', '--skip-usfs']);
   const r = await A.build(opts, fakeDeps());
-  assert.equal(r.rows.length, rows.length);
-  for (const row of r.rows) assert.equal(row.length, 5, 'rows are [i, j, road, trail, rough]');
+  /* A cell with nothing mapped within the cap gets NO ROW, deliberately: the app reads a missing row
+     as unknown, which is the same answer and costs nothing to store. So rows <= cells, and the ones
+     left out are exactly the ones the fixture's ways do not reach. */
+  assert.ok(r.rows.length > 0 && r.rows.length <= rows.length,
+    `${r.rows.length} rows for ${rows.length} cells`);
+  for (const row of r.rows) assert.equal(row.length, 11,
+    'rows are [i, j] then distance/way/walk per category');
+  for (const row of r.rows) {
+    const d = AC.decodeRow(row);
+    assert.ok(AC.CATS.some(c => d[c] >= 0), 'a row exists only when something was found');
+  }
   const keys = new Set(r.rows.map(x => x[0] + ':' + x[1]));
-  assert.equal(keys.size, rows.length, 'cell indices must be unique');
+  assert.equal(keys.size, r.rows.length, 'cell indices must be unique — one row per cell, no repeats');
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -245,13 +275,13 @@ test('bake: the synthetic trail and road land in the right cells', async () => {
     '--bbox=47,-123,49,-121', '--skip-usfs']);
   const r = await A.build(opts, fakeDeps());
   const classes = {};
-  for (const [, , road, trail, rough] of r.rows) {
-    const c = AC.classifyAccess({ road, trail, rough });
+  for (const row of r.rows) {
+    const c = AC.classifyAccess(AC.decodeRow(row));
     classes[c] = (classes[c] || 0) + 1;
   }
   assert.ok(classes.trail > 0, 'the path should produce trail cells');
-  assert.ok((classes.road || 0) + (classes.near || 0) > 0, 'the residential road should register');
-  assert.ok(!Object.keys(classes).includes('rough'), 'nothing rough was in the fixture');
+  assert.ok((classes.road || 0) + (classes.near || 0) + (classes.rough || 0) > 0,
+    'the road and track should register too');
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -272,16 +302,30 @@ test('bake: records provenance including both sources and the cells file it matc
 });
 
 test('bake: a regional re-bake replaces its own cells and carries the rest through', () => {
-  const prev = { version: 1, generated: 'old', cap_m: 2000, provenance: { counts: {} },
-    rows: [[10, 20, 100, -1, -1], [10, 21, -1, -1, -1], [10, 22, 500, 500, 500]] };
-  const fresh = { version: 1, generated: 'new', cap_m: 2000, provenance: { counts: {} },
-    rows: [[10, 21, 42, 43, 44]] };
+  /* Way indices are local to a file, so merging has to concatenate the two tables, re-point the
+     carried-over rows, and drop any way nothing references any more — otherwise a few regional
+     bakes would leave the file full of dead geometry. */
+  const g = n => AC.encodeGeom([[47 + n / 100, -121], [47 + n / 100, -120.99]]);
+  const prev = { version: 2, generated: 'old', cap_m: 2000, provenance: { counts: {} },
+    ways: [['Old Road', null, 'unclassified', 0, 0, g(1)], ['Dead Way', null, 'track', 2, 0, g(2)]],
+    rows: [[10, 20, 100, 0, -1, -1, -1, -1, -1, -1, -1],
+           [10, 21, -1, -1, -1, 700, 1, -1, -1, -1, -1]] };
+  const fresh = { version: 2, generated: 'new', cap_m: 2000, provenance: { counts: {} },
+    ways: [['New Trail', null, 'path', 1, 2, g(3)]],
+    rows: [[10, 21, -1, -1, -1, 42, 0, 17, -1, -1, -1]] };
   const m = A.mergeInto(prev, fresh);
-  assert.equal(m.rows.length, 3, 'no cell may be lost');
+  assert.equal(m.rows.length, 2, 'no cell may be lost');
   const byKey = Object.fromEntries(m.rows.map(r => [r[0] + ':' + r[1], r]));
-  assert.deepEqual(byKey['10:21'], [10, 21, 42, 43, 44], 'the rebaked cell takes the fresh values');
-  assert.deepEqual(byKey['10:20'], [10, 20, 100, -1, -1], 'an untouched cell keeps its own');
-  assert.equal(m.provenance.counts.carried_over, 2);
+  const nameOf = (row, cat) => {
+    const d = AC.decodeRow(row);
+    const wi = d[cat + 'Way'];
+    return wi >= 0 ? AC.wayLabel(AC.decodeWay(m.ways[wi])) : null;
+  };
+  assert.equal(nameOf(byKey['10:21'], 'trail'), 'New Trail', 'the rebaked cell takes the fresh way');
+  assert.equal(AC.decodeRow(byKey['10:21']).trail, 42, 'and the fresh distance');
+  assert.equal(nameOf(byKey['10:20'], 'road'), 'Old Road', 'an untouched cell keeps pointing at its own way');
+  assert.ok(!m.ways.some(w => w[0] === 'Dead Way'), 'a way nothing references any more must be dropped');
+  assert.equal(m.provenance.counts.carried_over, 1);
 });
 
 test('bake: the Overpass query asks for the ways that matter and skips the ones that do not', () => {
@@ -293,4 +337,154 @@ test('bake: the Overpass query asks for the ways that matter and skips the ones 
   assert.ok(/service.*forestry/.test(q), 'forestry spurs must be requested explicitly');
   assert.ok(!/\bfootway\b/.test(q.split('service')[0]),
     'sidewalks would dominate the urban tiles and are not trails');
+});
+
+/* ===================== way identity ===================== */
+
+test('identity: the nearest way is named, not just classified', async () => {
+  const dir = tmpdir();
+  cellsFixture(dir);
+  const opts = A.parseArgs([`--cells=${path.join(dir, 'cells.json')}`,
+    `--out=${path.join(dir, 'a.json')}`, '--bbox=47,-123,49,-121', '--skip-usfs']);
+  const r = await A.build(opts, fakeDeps());
+  const names = new Set();
+  for (const row of r.rows) {
+    const det = AC.accessDetail(AC.decodeRow(row), r.ways);
+    if (det.wayName) names.add(det.wayName);
+  }
+  assert.ok(names.has('Bear Creek Trail'), 'the trail should be named: got ' + [...names].join(', '));
+  assert.ok([...names].some(n => /River Road|unnamed track/.test(n)), 'other ways should be named too');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('identity: an unnamed way says so rather than going blank', () => {
+  // An unnamed track is often exactly the thing that reaches cut-over timber. "unnamed track" and
+  // "nothing here" are different answers and must not collapse into each other.
+  assert.equal(AC.wayLabel({ name: null, ref: null, type: 'track' }), 'unnamed track');
+  assert.equal(AC.wayLabel({ name: null, ref: null, type: 'unclassified' }), 'unnamed road');
+  assert.equal(AC.wayLabel(null), null, 'and no way at all is null, not "unnamed"');
+});
+
+test('identity: USFS road numbers and shouted trail names read properly', () => {
+  assert.equal(AC.wayLabel({ name: null, ref: '2703', type: 'nfsr' }), 'Forest Road 2703');
+  assert.equal(AC.wayLabel({ name: 'SETTLER', ref: '1060020', type: 'nfsr' }), 'Forest Road 1060020 (Settler)');
+  assert.equal(AC.wayLabel({ name: 'SHUKSAN LAKE', ref: null, type: 'nfst' }), 'Shuksan Lake Trail');
+  assert.equal(AC.wayLabel({ name: 'Wonderland Trail', ref: null, type: 'path' }), 'Wonderland Trail',
+    'an already-cased OSM name must not be re-cased');
+  assert.equal(AC.tidyName('PCT'), 'PCT', 'an acronym must survive tidying');
+});
+
+/* ===================== geometry ===================== */
+
+test('geometry: delta encoding round-trips to within a metre', () => {
+  const g = [[47.5, -121.5], [47.5123, -121.4987], [47.52, -121.47]];
+  const back = AC.decodeGeom(AC.encodeGeom(g));
+  assert.equal(back.length, g.length);
+  for (let i = 0; i < g.length; i++) {
+    const dy = (g[i][0] - back[i][0]) * 111320, dx = (g[i][1] - back[i][1]) * 75000;
+    assert.ok(Math.hypot(dx, dy) < 1.5, 'point ' + i + ' moved ' + Math.hypot(dx, dy).toFixed(2) + ' m');
+  }
+});
+
+test('geometry: it is shared by way, not duplicated per cell', async () => {
+  /* This is the whole reason the file is 8 MB and not 47 MB — both measured, see docs/access.md.
+     Many cells reference the same way, so the ways table must be far smaller than the row count. */
+  const dir = tmpdir();
+  const { rows } = cellsFixture(dir);
+  const opts = A.parseArgs([`--cells=${path.join(dir, 'cells.json')}`,
+    `--out=${path.join(dir, 'a.json')}`, '--bbox=47,-123,49,-121', '--skip-usfs']);
+  const r = await A.build(opts, fakeDeps());
+  assert.ok(r.ways.length < rows.length / 4,
+    `${r.ways.length} ways for ${rows.length} cells — geometry is being duplicated`);
+  // every way index in a row must resolve
+  for (const row of r.rows) for (const n of [3, 6, 9]) {
+    if (row[n] >= 0) assert.ok(r.ways[row[n]], 'row points at way ' + row[n] + ' which does not exist');
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('geometry: simplification keeps the shape and drops the redundant points', () => {
+  const straight = [];
+  for (let i = 0; i <= 50; i++) straight.push([47.5 + i * 0.0002, -121.5]);
+  const s2 = A.simplify(straight, 25);
+  assert.ok(s2.length < 5, 'a straight line needs two points, got ' + s2.length);
+  assert.deepEqual(s2[0], straight[0]);
+  assert.deepEqual(s2[s2.length - 1], straight[straight.length - 1], 'the ends must survive');
+
+  const zigzag = [];
+  for (let i = 0; i <= 20; i++) zigzag.push([47.5 + i * 0.002, -121.5 + (i % 2 ? 0.004 : 0)]);
+  assert.ok(A.simplify(zigzag, 25).length > 10, 'real corners must be kept');
+});
+
+test('geometry: clipping keeps the stretch near the cells and drops the rest', () => {
+  // A way running far past the only cell that references it should not carry its whole length.
+  const long = [];
+  for (let i = 0; i < 200; i++) long.push([47.0 + i * 0.01, -121.5]);
+  const clipped = A.clipToCells(long, [[47.5, -121.5]], 2600);
+  assert.ok(clipped.length < long.length / 4, 'expected heavy clipping, kept ' + clipped.length);
+  assert.ok(clipped.some(([la]) => Math.abs(la - 47.5) < 0.03), 'the stretch by the cell must survive');
+});
+
+/* ===================== the walk ===================== */
+
+test('walk: a trail ending on a road gets an inferred trailhead and a distance along it', async () => {
+  /* There is no USFS trailheads dataset and OSM's highway=trailhead tag is sparse — 13 nodes across
+     six sample tiles — so the walk figure would be almost never available without this inference. */
+  const dir = tmpdir();
+  cellsFixture(dir);
+  const opts = A.parseArgs([`--cells=${path.join(dir, 'cells.json')}`,
+    `--out=${path.join(dir, 'a.json')}`, '--bbox=47,-123,49,-121', '--skip-usfs']);
+  const r = await A.build(opts, fakeDeps());
+  const trailWays = r.ways.filter(w => w[2] === 'path');
+  assert.ok(trailWays.length, 'the fixture has a path');
+  assert.ok(trailWays.some(w => w[4] === AC.TRAILHEAD_INFERRED),
+    'a trail whose end sits on a road should get an inferred trailhead');
+
+  let walks = 0;
+  for (const row of r.rows) {
+    const det = AC.accessDetail(AC.decodeRow(row), r.ways);
+    if (det.walk != null) { walks++; assert.ok(det.walk >= 0); assert.match(det.trailheadNote, /road|trailhead/); }
+  }
+  assert.ok(walks > 0, 'some cells should have a walk figure');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('walk: without a trailhead the answer is a straight line, and says so', () => {
+  const d = { trail: 300, trailWay: 0, trailWalk: -1, road: -1, roadWay: -1, roadWalk: -1,
+              rough: -1, roughWay: -1, roughWalk: -1 };
+  const ways = [[null, null, 'path', 1, AC.TRAILHEAD_NONE, AC.encodeGeom([[47.5, -121.5], [47.51, -121.5]])]];
+  const det = AC.accessDetail(d, ways);
+  assert.equal(det.walk, null, 'no walk figure without a trailhead');
+  assert.equal(det.straight, 300, 'the straight-line distance is still reported');
+  assert.equal(det.trailheadNote, null);
+});
+
+test('walk: a mapped trailhead is distinguished from an inferred one', () => {
+  assert.match(AC.TRAILHEAD_NOTE[AC.TRAILHEAD_MAPPED], /mapped trailhead/);
+  assert.match(AC.TRAILHEAD_NOTE[AC.TRAILHEAD_INFERRED], /meets a drivable road/);
+  assert.notEqual(AC.TRAILHEAD_NOTE[AC.TRAILHEAD_MAPPED], AC.TRAILHEAD_NOTE[AC.TRAILHEAD_INFERRED],
+    'an inference must not be presented as a surveyed point');
+});
+
+/* ===================== naming does not weaken the framing ===================== */
+
+test('honesty: naming a way does not turn "mapped" into "passable"', () => {
+  const d = { trail: 200, trailWay: 0, trailWalk: 500, road: -1, roadWay: -1, roadWalk: -1,
+              rough: -1, roughWay: -1, roughWalk: -1 };
+  const ways = [['Bear Creek Trail', null, 'path', 1, AC.TRAILHEAD_INFERRED,
+                 AC.encodeGeom([[47.5, -121.5], [47.51, -121.5]])]];
+  const det = AC.accessDetail(d, ways);
+  assert.equal(det.wayName, 'Bear Creek Trail');
+  assert.match(det.blurb, /mapped/i, 'the blurb must still say "mapped" even when the way has a name');
+  assert.ok(!/passable|open|maintained|confirmed/i.test(det.blurb),
+    'and must not imply the way is passable');
+});
+
+test('honesty: primaryCat picks the category the class was decided on', () => {
+  // So the line drawn on the map is the way the label is talking about, not a different one.
+  assert.equal(AC.primaryCat({ trail: 100, road: 50, rough: -1 }), 'trail',
+    'trail outranks road even when the road is closer, matching the class precedence');
+  assert.equal(AC.primaryCat({ trail: -1, road: 50, rough: 10 }), 'road');
+  assert.equal(AC.primaryCat({ trail: 1900, road: -1, rough: -1 }), 'trail', 'the nearby case still names a way');
+  assert.equal(AC.primaryCat({ trail: -1, road: -1, rough: -1 }), null);
 });

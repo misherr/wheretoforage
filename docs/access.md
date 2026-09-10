@@ -1,7 +1,8 @@
 # Access: how you would reach a cell
 
-A per-cell classification of what is **mapped** as a way into each square mile —
-a trail, a drivable road, a rough or decommissioned way, or nothing.
+For each cell: **which** way is mapped into it, what kind, how far, and enough
+geometry to draw the approach. Not just "this is accessible" — the useful answer
+is *which* trail or road, and how far along it.
 
 ## It is a separate axis, and must stay one
 
@@ -37,6 +38,12 @@ absence of a mapped way is not evidence of absence of a way.
 | `rough` | a track, skid road or decommissioned spur is mapped within `NEAR` |
 | `near` | nothing in the cell, but something within `REACH` (2 km) |
 | `unknown` | nothing mapped within `REACH` |
+
+**Naming the way does not upgrade any of that.** "Forest Road 2703" is more
+useful than "road mapped", but it is still only what the map says: not confirmed
+passable, not confirmed open this season, not confirmed legal to drive. The tap
+sheet says so in as many words, and a test asserts the wording never drifts into
+implying otherwise.
 
 800 m is roughly "inside this cell" — a cell is about 1.6 km across — and 2 km is
 "a short walk from it". Distances are stored per category and classified at load
@@ -76,6 +83,67 @@ Attribution: OSM data is ODbL, and the licence is recorded in the output's
 `highway=unclassified` with `4wd_only=yes`, or with a dirt/earth/ground surface,
 is reported as **rough** rather than as a road. So is `highway=road`, which means
 "classification unknown" rather than "drivable".
+
+## What is stored
+
+```
+ways: [ [name, ref, type, catIndex, trailheadKind, geomDelta], ... ]
+rows: [ [i, j, dRoad, wRoad, walkRoad, dTrail, wTrail, walkTrail, dRough, wRough, walkRough], ... ]
+```
+
+Per cell, per category: the straight-line distance, an index into `ways`, and
+the walk along that way from its trailhead. `-1` anywhere means "not found
+within the cap", "no way", or "walk unknown". A cell with nothing mapped at all
+gets **no row** — the app reads a missing row as unknown, which is the same
+answer and costs nothing to store.
+
+### Geometry is shared, not duplicated — measured, not assumed
+
+Storing a copy of the relevant geometry against every cell was measured at
+**47 MB** statewide. Sharing by way and storing full geometry was measured at
+**74 MB** — *worse*, because the ways that end up referenced average 78 points
+each and only 10.3% of fetched ways are ever a nearest. What works is sharing
+**and** compressing:
+
+| encoding | projected statewide |
+| --- | --- |
+| duplicated per cell | 47 MB |
+| shared, full geometry | 74 MB |
+| shared, simplified 20 m | 15.0 MB |
+| shared, simplified + 4 dp | 13.9 MB |
+| **shared, simplified + delta-encoded** | **8.0 MB** |
+| shared, simplified 40 m + delta | 6.6 MB |
+| rows alone, no geometry | 1.7 MB |
+
+Measured on six real tiles covering 1,518 cells and scaled by 31.6×. So:
+
+- **Douglas-Peucker at 25 m.** Keeps 16% of the points; about 2 px at zoom 14,
+  which is the zoom you look at an approach from. Applied only to the STORED
+  copy — distances are computed from full geometry, so simplification can never
+  move a cell's class.
+- **Delta-encoded integers at 1e5** (about a metre). Halves it again.
+- **Clipped** to the stretch within 2.6 km of a cell that references it. A state
+  highway that happens to pass one cell should contribute the couple of
+  kilometres you can see, not its whole length across the state.
+
+## How far along the way
+
+Straight-line distance is not what determines the walk, so where a trailhead is
+known the stored figure is the distance **along** the way from it.
+
+There is no USFS trailheads dataset in EDW, and OSM's dedicated
+`highway=trailhead` tag is sparse — 13 nodes across six sample tiles. Relying
+on it alone would leave a walk figure for almost nobody. So trailheads come from
+two places, and which one is used is recorded and shown:
+
+- **mapped** — an OSM `highway=trailhead` node within 150 m of the way;
+- **inferred** — the way ends within 60 m of a drivable road. That is where you
+  leave the car, it is derivable from data already fetched, and the tap sheet
+  labels it "from where the way meets a drivable road" rather than dressing a
+  deduction up as a surveyed point.
+
+Where neither applies, the sheet reports the straight-line distance and says
+that is what it is.
 
 ## Running the bake
 

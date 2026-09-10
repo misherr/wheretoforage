@@ -1,4 +1,5 @@
-/* How you would physically reach a cell: is a way mapped into it, and what kind.
+/* How you would physically reach a cell: which way is mapped into it, what kind, how far, and
+   enough geometry to draw the approach.
 
    This is a SEPARATE AXIS FROM SUITABILITY and must stay that way. Nothing here may be read by
    src/model/, and access must never filter, weight or modify a score. A roadless cell with perfect
@@ -8,7 +9,8 @@
    The wording matters as much as the numbers. OSM and USFS coverage on private timberland is uneven,
    and absence of a mapped way is not evidence of absence of a way. So every label here says what the
    DATA says — "a trail is mapped here" — and a cell with nothing mapped nearby reads as **unknown**,
-   never as "trailless". Confirmed-trailless is a claim this data cannot support. */
+   never as "trailless". Naming a way does not upgrade that: a named way is still only mapped, not
+   confirmed passable, gated, or open this season. */
 
 /* Distances are metres from the cell centre. A cell is roughly 1.6 km across, so NEAR is about "in
    this cell" and REACH is about "a short walk from it". */
@@ -19,32 +21,20 @@ export const CAP = 2000;          // the bake stores -1 beyond this rather than 
 /* Ordered by usefulness to someone deciding where to walk, which is also the order the classes were
    asked for. A cell can satisfy several; the first match wins. */
 export const CLASSES = {
-  trail: {
-    rank: 0, label: 'Trail mapped',
-    blurb: 'A trail or path is mapped in this cell.',
-  },
-  road: {
-    rank: 1, label: 'Drivable road mapped',
-    blurb: 'A road passable by vehicle is mapped in this cell.',
-  },
-  rough: {
-    rank: 2, label: 'Rough way mapped',
-    blurb: 'A track, skid road or decommissioned spur is mapped here — walkable, probably not drivable.',
-  },
-  near: {
-    rank: 3, label: 'Mapped way nearby',
-    blurb: 'Nothing mapped in the cell itself, but a way is mapped within about a mile.',
-  },
-  unknown: {
-    rank: 4, label: 'No mapped access',
+  trail: { rank: 0, label: 'Trail mapped', blurb: 'A trail or path is mapped in this cell.' },
+  road: { rank: 1, label: 'Drivable road mapped', blurb: 'A road passable by vehicle is mapped in this cell.' },
+  rough: { rank: 2, label: 'Rough way mapped',
+    blurb: 'A track, skid road or decommissioned spur is mapped here — walkable, probably not drivable.' },
+  near: { rank: 3, label: 'Mapped way nearby',
+    blurb: 'Nothing mapped in the cell itself, but a way is mapped within about a mile.' },
+  unknown: { rank: 4, label: 'No mapped access',
     blurb: 'Nothing is mapped within about a mile. That may mean no way exists, or simply that '
          + 'nobody has mapped one — coverage on private timberland is patchy. Treat it as unknown, '
-         + 'not as trailless.',
-  },
+         + 'not as trailless.' },
 };
 export const CLASS_ORDER = ['trail', 'road', 'rough', 'near', 'unknown'];
+export const CATS = ['road', 'trail', 'rough'];      // the order they are stored in a row
 
-/* d is {road, trail, rough} in metres, or -1 / null where nothing was found inside CAP. */
 const has = (v, limit) => v != null && v >= 0 && v <= limit;
 
 export function classifyAccess(d) {
@@ -56,6 +46,19 @@ export function classifyAccess(d) {
   return 'unknown';
 }
 
+/* Which category the tap sheet should name and draw: the one the class was decided on, so the line
+   on the map is the way the label is talking about. */
+export function primaryCat(d) {
+  const cls = classifyAccess(d);
+  if (cls === 'trail' || cls === 'road' || cls === 'rough') return cls;
+  if (cls === 'near') {
+    let best = null;
+    for (const c of CATS) if (has(d[c], REACH) && (!best || d[c] < d[best])) best = c;
+    return best;
+  }
+  return null;
+}
+
 /* Sort key for the Top spots panel — ordering only, never a score input. Class first, then how far
    the nearest usable way is, so two "trail mapped" cells order by which one you walk less to reach.
    Unknown sorts last: it is the least actionable, not the worst habitat. */
@@ -63,7 +66,7 @@ export function accessRank(d) {
   const cls = classifyAccess(d);
   const base = CLASSES[cls].rank * 1e6;
   if (cls === 'unknown' || !d) return base;
-  const ds = [d.trail, d.road, d.rough].filter(v => v != null && v >= 0);
+  const ds = CATS.map(c => d[c]).filter(v => v != null && v >= 0);
   return base + (ds.length ? Math.min(...ds) : CAP);
 }
 
@@ -76,17 +79,138 @@ export function accessDistance(m) {
   return (mi < 1 ? mi.toFixed(1) : Math.round(mi * 10) / 10) + ' mi';
 }
 
-/* One line for the tap sheet: the class, then whichever ways are actually mapped and how far. */
-export function accessSummary(d) {
+/* ===================== naming a way ===================== */
+
+/* How each way type reads in prose. The point of naming the route is that "Forest Road 2703" tells
+   you something you can act on and "trail mapped" does not. */
+export const TYPE_LABEL = {
+  path: 'trail', bridleway: 'bridleway', cycleway: 'cycleway',
+  track: 'track', road: 'unclassified way',
+  motorway: 'highway', trunk: 'highway', primary: 'highway',
+  secondary: 'road', tertiary: 'road', unclassified: 'road', residential: 'street',
+  living_street: 'street', service: 'forestry spur',
+  motorway_link: 'highway ramp', trunk_link: 'highway ramp', primary_link: 'road',
+  secondary_link: 'road', tertiary_link: 'road',
+  nfsr: 'Forest Service road', 'nfsr-closed': 'Forest Service road (closed to vehicles)',
+  nfst: 'Forest Service trail',
+};
+
+/* Title-case a shouted USFS name: "SHUKSAN LAKE" -> "Shuksan Lake".
+   Two things are left alone. Anything already mixed case, because OSM names are entered properly
+   and re-casing them damages "McKenzie" and the like. And a short single all-caps token, because
+   that is an acronym rather than shouting — "PCT" must not become "Pct". Five characters is a
+   heuristic, not a rule: no trail in the state is named by a six-letter acronym, and the USFS names
+   this is for ("SETTLER", "SHUKSAN LAKE") are all longer. */
+export function tidyName(s) {
+  if (!s) return null;
+  const t = String(s).trim();
+  if (!t) return null;
+  if (!/^[^a-z]*$/.test(t)) return t;
+  if (t.length <= 5 && !/\s/.test(t)) return t;
+  return t.toLowerCase().replace(/\b([a-z])/g, (_, c) => c.toUpperCase());
+}
+
+/* The line the tap sheet shows. `unnamed` is said out loud rather than hidden: an unnamed track is
+   often exactly the thing that reaches cut-over timber, and pretending it has no identity would
+   throw away the distinction between "nothing here" and "something here without a name". */
+export function wayLabel(w) {
+  if (!w) return null;
+  const kind = TYPE_LABEL[w.type] || w.type || 'way';
+  const name = tidyName(w.name);
+  const ref = w.ref ? String(w.ref).trim() : null;
+  if (w.type === 'nfsr' || w.type === 'nfsr-closed') {
+    const num = ref ? 'Forest Road ' + ref : 'Forest Service road';
+    return name ? num + ' (' + name + ')' : num;
+  }
+  if (w.type === 'nfst') return name ? (/trail/i.test(name) ? name : name + ' Trail') : (ref ? 'Forest Trail ' + ref : 'Forest Service trail');
+  if (name) return /^(trail|road|path|way)$/i.test(name) ? name + ' (' + kind + ')' : name;
+  if (ref) return kind.replace(/^./, c => c.toUpperCase()) + ' ' + ref;
+  return 'unnamed ' + kind;
+}
+
+/* Where the walk is measured from. A mapped trailhead is authoritative; an inferred one is simply
+   where the trail meets a drivable road, which is where you would leave the car. Saying which is
+   which matters — the second is a deduction from the map, not something a surveyor recorded. */
+export const TRAILHEAD_NONE = 0, TRAILHEAD_MAPPED = 1, TRAILHEAD_INFERRED = 2;
+export const TRAILHEAD_NOTE = {
+  [TRAILHEAD_MAPPED]: 'from the mapped trailhead',
+  [TRAILHEAD_INFERRED]: 'from where the way meets a drivable road',
+};
+
+/* ===================== the encoded file ===================== */
+
+/* Geometry is delta-encoded integers at 1e5 (about a metre), shared by way rather than duplicated
+   per cell. Duplicating measured 47 MB statewide; sharing full geometry measured 74 MB because the
+   referenced ways average 78 points each; sharing simplified and delta-encoded lands near 8 MB.
+   See docs/access.md. */
+export const GEOM_SCALE = 1e5;
+
+export function decodeGeom(flat) {
+  const out = [];
+  let lat = 0, lon = 0;
+  for (let i = 0; i < flat.length; i += 2) {
+    lat += flat[i]; lon += flat[i + 1];
+    out.push([lat / GEOM_SCALE, lon / GEOM_SCALE]);
+  }
+  return out;
+}
+export function encodeGeom(coords) {
+  const out = [];
+  let lat = 0, lon = 0;
+  for (const [a, b] of coords) {
+    const A = Math.round(a * GEOM_SCALE), B = Math.round(b * GEOM_SCALE);
+    out.push(A - lat, B - lon); lat = A; lon = B;
+  }
+  return out;
+}
+
+// ways[k] = [name, ref, type, catIndex, trailheadKind, geomDelta]
+export function decodeWay(w) {
+  if (!w) return null;
+  return { name: w[0] || null, ref: w[1] || null, type: w[2], cat: CATS[w[3]],
+           trailhead: w[4] || TRAILHEAD_NONE, geom: decodeGeom(w[5] || []) };
+}
+
+/* rows[k] = [i, j, dRoad, wRoad, walkRoad, dTrail, wTrail, walkTrail, dRough, wRough, walkRough]
+   -1 anywhere means "not found within CAP" / "no way" / "walk unknown". */
+export function decodeRow(row) {
+  const d = {};
+  CATS.forEach((c, n) => {
+    d[c] = row[2 + n * 3];
+    d[c + 'Way'] = row[3 + n * 3];
+    d[c + 'Walk'] = row[4 + n * 3];
+  });
+  return d;
+}
+
+/* One structured answer for the tap sheet: the class, the way it is talking about, how far, and
+   whether that distance is a walk along the way or a straight line. */
+export function accessDetail(d, ways) {
   const cls = classifyAccess(d);
-  const parts = [];
-  if (d) {
-    for (const [k, name] of [['trail', 'trail'], ['road', 'road'], ['rough', 'rough way']]) {
-      const s = accessDistance(d[k]);
-      if (s) parts.push(name + ' ' + s);
+  const cat = primaryCat(d);
+  const out = { cls, label: CLASSES[cls].label, blurb: CLASSES[cls].blurb, cat,
+                way: null, wayName: null, straight: null, walk: null, trailheadNote: null, others: [] };
+  if (!d || !cat) return out;
+  out.straight = d[cat];
+  const wi = d[cat + 'Way'];
+  if (ways && wi != null && wi >= 0 && ways[wi]) {
+    out.way = decodeWay(ways[wi]);
+    out.wayName = wayLabel(out.way);
+    const walk = d[cat + 'Walk'];
+    if (walk != null && walk >= 0 && out.way.trailhead) {
+      out.walk = walk;
+      out.trailheadNote = TRAILHEAD_NOTE[out.way.trailhead];
     }
   }
-  return { cls, label: CLASSES[cls].label, blurb: CLASSES[cls].blurb, detail: parts.join(' · ') };
+  // the other categories, so the sheet can say "also a road 1.2 mi away"
+  for (const c of CATS) {
+    if (c === cat) continue;
+    if (d[c] == null || d[c] < 0) continue;
+    const w = ways && d[c + 'Way'] >= 0 ? decodeWay(ways[d[c + 'Way']]) : null;
+    out.others.push({ cat: c, m: d[c], name: w ? wayLabel(w) : null });
+  }
+  out.others.sort((a, b) => a.m - b.m);
+  return out;
 }
 
 /* ---- what counts as what, shared with scripts/build-access.mjs ----
@@ -103,7 +227,7 @@ export const OSM_TRAIL = new Set(['path', 'bridleway', 'cycleway']);
 export const OSM_ROUGH = new Set(['track', 'road']);
 
 /* USFS operational maintenance level. 3-5 are maintained for passenger cars or better; 1-2 are
-   high-clearance or closed-but-existing, which is exactly the "unmaintained way" case. */
+   high-clearance or closed, which is exactly the "unmaintained way" case. */
 export const USFS_DRIVABLE_ML = /^[345]/;
 
 export function osmCategory(tags) {
@@ -123,4 +247,9 @@ export function osmCategory(tags) {
     return 'road';
   }
   return null;
+}
+
+export function osmType(tags) {
+  if (!tags) return 'unknown';
+  return tags.highway || tags['abandoned:highway'] || tags['disused:highway'] || tags['razed:highway'] || 'unknown';
 }

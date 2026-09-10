@@ -137,6 +137,7 @@ a.lnk{color:var(--cap-light);text-decoration:none;font-weight:600}
 .actions{display:flex;gap:8px;margin-top:12px}
 
 /* top spots + model panels share sheet */
+a.drawway{color:var(--cap-light);text-decoration:underline;font-size:13px}
 .sortbar{display:flex;gap:6px;align-items:center;padding:8px 0 4px;font-size:12px;color:var(--pore-dim)}
 .sortbar .pill{font-size:12px;padding:4px 10px}
 .sortbar .pill.on{background:var(--cap);border-color:var(--cap);color:#1a1409}
@@ -204,7 +205,8 @@ import { makeEntry, applyVeg } from './src/model/cell.mjs';
 import { DLAT, DLON, BLK, BLAT, BLON, inWA, cellCenter, cellKey,
          terrainAt, pointKey as key } from './src/grid.mjs';
 // Access is a separate axis from suitability and never touches a score — see src/access.mjs.
-import { classifyAccess, accessSummary, accessRank, CLASSES as ACCESS_CLASSES } from './src/access.mjs';
+import { classifyAccess, accessDetail, accessRank, accessDistance, decodeRow as decodeAccessRow,
+         CLASSES as ACCESS_CLASSES } from './src/access.mjs';
 /* ===================== CONFIG ===================== */
 const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
 const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400; // local refine below 1 mi when zoomed way in
@@ -598,8 +600,12 @@ async function tryStatic(){
      Keyed by cell index rather than by row position so a cells.json re-bake cannot silently shift
      the association. */
   try{ const r=await fetch('data/access.json',{cache:'no-cache'});
-    if(r.ok){ const j=await r.json(); STATIC.access=new Map();
-      for(const [i,jj,road,trail,rough] of j.rows) STATIC.access.set(i+':'+jj,{road,trail,rough});
+    if(r.ok){ const j=await r.json();
+      /* Geometry is shared by way rather than duplicated per cell — the difference between an 8 MB
+         file and a 47 MB one. Rows carry indices into j.ways; decoding is deferred to the tap so
+         48,000 polylines are never built up front. */
+      STATIC.access={ways:j.ways||[],byCell:new Map()};
+      for(const row of j.rows) STATIC.access.byCell.set(row[0]+':'+row[1],decodeAccessRow(row));
       accessAsOf=j.generated||null;
       if(j.provenance&&j.provenance.cells_generated&&STATIC.cells&&j.provenance.cells_generated!==STATIC.cells.generated)
         console.warn('access.json was baked against a different cells.json — some cells may read as unknown');
@@ -771,7 +777,7 @@ async function loadFromStatic(gen){
       else { host=vg[3]<0?null:vg[3]; top=(vg[4]||[]).map(([ni,sh])=>({name:names[ni],share:sh,host:hostOf(names[ni])})); }
       const v={treeFrac:vg[0],canopy:vg[1],height:vg[2],host,top}; v.mult=vegMult(v); e.veg=v; vcache.set(key(lat,lon),v); applyVeg(e,DOY);
       if(v.treeFrac>0){ vegged++; if(v.host==null||!v.top.length) noType++; } }
-    if(STATIC.access){ const ix=cellKey(lat,lon); const a=STATIC.access.get(ix); if(a) e.access=a; }
+    if(STATIC.access){ const a=STATIC.access.byCell.get(cellKey(lat,lon)); if(a) e.access=a; }
     cells.set(cellKey(lat,lon),e);
     if(++i%4000===0){ progress(`Loading baked cells… ${i.toLocaleString()}`,0.2+0.8*i/j.rows.length); renderAll(); await sleep(0); }
   }
@@ -974,6 +980,7 @@ function showPoint(e,t){
     if(e.w&&e.w.meta){ const m=e.w.meta; const parts=[]; if(Math.abs(m.dz)>=30) parts.push(`${m.dT>0?'+':''}${(m.dT*1.8).toFixed(1)}°F lapse-rate correction from the weather grid point at ${ft(m.anchorElev).toLocaleString()} ft`); if(e.terr&&e.terr.aspect!=null&&Math.abs(m.tAsp)>=0.2) parts.push(`${compass(e.terr.aspect)} aspect: ${m.tAsp>0?'warmer':'cooler'} by ~${Math.abs(m.tAsp*1.8).toFixed(1)}°F, ${m.etMul<1?'holds':'loses'} moisture ${Math.round(Math.abs(1-m.etMul)*100)}% ${m.etMul<1?'longer':'faster'}`); if(parts.length) bits.push(parts.join(' · ')); }
     h+=`<p class="note">${bits.join('<br>')}</p>`;
   }
+  let pendingWay=null;   // the way the Getting-there section named, for the draw link below
   let vegH='';
   if(e.veg){ const v=e.veg;
     // An absent vegetation type has to say so. Silently dropping the host-quality clause and the Types
@@ -999,9 +1006,21 @@ function showPoint(e,t){
   {
     // `dim` above is scoped to the vegetation branch, which may not have run for this cell.
     const dim=t=>`<span style="color:var(--pore-dim)">${t}</span>`;
-    const ac=accessSummary(e.access);
-    h+=`<div class="sec">Getting there</div><dl><dt>Access</dt><dd>${ac.label}${ac.detail?' · '+dim(ac.detail):''}<br>${dim(ac.blurb)}</dd>`
-      +`<dt>Sources</dt><dd>${dim('OpenStreetMap and USFS roads and trails. Coverage on private timberland is uneven, so this describes the map, not the ground. It never affects the score.')}</dd></dl>`;
+    const ac=accessDetail(e.access,STATIC.access&&STATIC.access.ways);
+    /* Name the route rather than only classifying it: "Forest Road 2703, 0.4 mi" is actionable and
+       "trail mapped" is not. Naming it changes nothing about the honesty framing — a named way is
+       still only MAPPED here, not confirmed passable, gated, or open this season. */
+    const walkBit = ac.walk!=null
+      ? `${accessDistance(ac.walk)} along it ${dim(ac.trailheadNote)}`
+      : (ac.straight!=null ? `${accessDistance(ac.straight)} away ${dim('(straight line — no trailhead mapped on this way)')}` : '');
+    const nameBit = ac.wayName
+      ? `<b>${ac.wayName}</b>${walkBit?' · '+walkBit:''}`
+      : ac.label;
+    h+=`<div class="sec">Getting there</div><dl><dt>Access</dt><dd>${nameBit}<br>${dim(ac.blurb)}`
+      +(ac.way?` <a href="#" class="drawway">Show the approach on the map</a>`:'')+`</dd>`;
+    if(ac.others.length) h+=`<dt>Also nearby</dt><dd>${ac.others.map(o=>`${o.name||o.cat} ${accessDistance(o.m)}`).join('<br>')}</dd>`;
+    h+=`<dt>Sources</dt><dd>${dim('OpenStreetMap and USFS roads and trails. A way shown here is mapped, which is not the same as passable, open, or legal to use — coverage on private timberland is especially uneven. It never affects the score.')}</dd></dl>`;
+    pendingWay = ac.way;
   }
   if(e.w){
     const w=e.w,i=w.today; const days=[]; for(let d=Math.max(0,i-20);d<=i;d++) days.push(d); const mxp=Math.max(5,...days.map(d=>w.p[d]));
@@ -1016,7 +1035,27 @@ function showPoint(e,t){
   const evEl=$('elev-strip'), evDet=$('elev-detail');
   if(evEl) evEl.onclick=()=>{ elevOpen=!elevOpen; evEl.classList.toggle('open',elevOpen); evDet.hidden=!elevOpen; };
   $('sheet-body').querySelectorAll('.fc>div').forEach((el,i)=>el.onclick=()=>showPoint(e,i));
+  const dw=$('sheet-body').querySelector('.drawway');
+  if(dw&&pendingWay) dw.onclick=ev=>{ ev.preventDefault(); drawApproach(pendingWay,e); };
   map.panTo([e.lat,e.lon],{animate:true});
+}
+
+/* Draw the way the tap sheet just named, so the approach can be seen rather than imagined. One
+   layer at a time: a second tap replaces the first rather than littering the map. Dashed, because a
+   mapped way is not a promise about the ground. */
+let approachLayer=null;
+function drawApproach(way,cell){
+  if(approachLayer){ approachLayer.remove(); approachLayer=null; }
+  if(!way||!way.geom||way.geom.length<2) return;
+  const colour = way.cat==='trail'?'#5dcaa5':(way.cat==='road'?'#e58a2b':'#b8b09a');
+  approachLayer=L.layerGroup([
+    L.polyline(way.geom,{color:'#0f150f',weight:7,opacity:.55}),
+    L.polyline(way.geom,{color:colour,weight:3,dashArray:'7 5'}),
+  ]).addTo(map);
+  const b=L.latLngBounds(way.geom);
+  if(cell) b.extend([cell.lat,cell.lon]);
+  map.fitBounds(b.pad(0.25));
+  closeSheet();
 }
 
 function showTop(){
@@ -1034,7 +1073,7 @@ function showTop(){
   rising.slice(0,3).forEach(e=>{ const w=anchorHit(e.lat,e.lon).w;
     console.log(`[rising] ${e.lat}, ${e.lon}`,{fut:e.A.fut,habScore:e.hab.score,seasonNote:e.hab.seasonNote,'w.p':w&&w.p,'w.today':w&&w.today}); });
   openSheet('Where to go today',loading?'Still loading — best areas are scored first':'Best square miles across the state',true);
-  const row=(e,useBest)=>{const s=Math.round(useBest?e.A.best.score:e.A.now.score);const peak=useBest?' on '+fmtDay(e.A.best.date):(e.A.best.score>e.A.now.score+5?' · peaks '+fmtDay(e.A.best.date):'');return `<div class="spot" data-k="${key(e.lat,e.lon)}"${useBest?' data-rising="1"':''}><div class="sc" style="background:${colorOf(s)||'#556a55'}">${s}</div><div class="m"><b>${e.hab.zone}</b><span>${ft(e.elev).toLocaleString()} ft${e.terr&&e.terr.aspect!=null?' · '+compass(e.terr.aspect)+' face':''} · ${e.lat.toFixed(2)}, ${e.lon.toFixed(2)}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi':''}${peak}${STATIC.access?' · '+ACCESS_CLASSES[classifyAccess(e.access)].label.toLowerCase():''}</span></div></div>`;};
+  const row=(e,useBest)=>{const s=Math.round(useBest?e.A.best.score:e.A.now.score);const peak=useBest?' on '+fmtDay(e.A.best.date):(e.A.best.score>e.A.now.score+5?' · peaks '+fmtDay(e.A.best.date):'');return `<div class="spot" data-k="${key(e.lat,e.lon)}"${useBest?' data-rising="1"':''}><div class="sc" style="background:${colorOf(s)||'#556a55'}">${s}</div><div class="m"><b>${e.hab.zone}</b><span>${ft(e.elev).toLocaleString()} ft${e.terr&&e.terr.aspect!=null?' · '+compass(e.terr.aspect)+' face':''} · ${e.lat.toFixed(2)}, ${e.lon.toFixed(2)}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi':''}${peak}${STATIC.access?' · '+(accessDetail(e.access,STATIC.access.ways).wayName||ACCESS_CLASSES[classifyAccess(e.access)].label.toLowerCase()):''}</span></div></div>`;};
   let h='';
   const haveAccess=!!STATIC.access;
   if(haveAccess) h+=`<div class="sortbar">Sort: `
@@ -1080,7 +1119,7 @@ function showModel(){
 $('btn-top').onclick=showTop;
 $('btn-model').onclick=showModel;
 $('btn-refine').onclick=refine;
-$('btn-refresh').onclick=()=>{ apiBlocked=null; STATIC.tried=false; STATIC.cells=null; STATIC.weather=null; let miss=0; for(const e of cells.values()) if(!e.A||e.failed) miss++; if(!miss) wcache.clear(); loadState(); };
+$('btn-refresh').onclick=()=>{ if(approachLayer){ approachLayer.remove(); approachLayer=null; } apiBlocked=null; STATIC.tried=false; STATIC.cells=null; STATIC.weather=null; let miss=0; for(const e of cells.values()) if(!e.A||e.failed) miss++; if(!miss) wcache.clear(); loadState(); };
 $('btn-layers').onclick=ev=>{ ev.stopPropagation(); $('layers').classList.toggle('open'); };
 $('btn-base').onclick=()=>{ bases[baseOrder[baseIdx]].remove(); baseIdx=(baseIdx+1)%baseOrder.length; bases[baseOrder[baseIdx]].addTo(map); setStatus(['Satellite','Topo map','USGS topo'][baseIdx]); };
 $('btn-loc').onclick=()=>{ if(!navigator.geolocation){setStatus('Location not available');return;} setStatus('Finding you…'); navigator.geolocation.getCurrentPosition(pos=>{ userLoc=[pos.coords.latitude,pos.coords.longitude]; L.circleMarker(userLoc,{radius:6,color:'#fff',weight:2,fillColor:'#4a90d9',fillOpacity:1}).addTo(map); map.setView(userLoc,9); setStatus('Centered on your location'); },()=>setStatus('Location permission denied'),{enableHighAccuracy:false,timeout:10000}); };
