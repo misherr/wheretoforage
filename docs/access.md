@@ -110,16 +110,38 @@ enforces that, and a test asserts a stray gain value cannot surface on its own.
 
 ### Geometry lives in its own file, fetched on demand
 
-The up-front download is `access.json` — rows, way names, types, distances:
-**4.12 MB**. The polylines are `access-geom.json`, **5.39 MB**, and the app does
-not touch it until someone taps "Show the approach on the map". Most viewers
-never will, and nobody needs 53,200 polylines to draw one line.
+The up-front download is `access.json` — rows, way names, types, distances,
+walks and climbs: **4.97 MB**. The polylines are `access-geom.json`, **5.52 MB**,
+and the app does not touch it until someone taps "Show the approach on the map".
+Most viewers never will, and nobody needs 50,614 polylines to draw one line.
 
-That took the app's total static payload from 20.6 MB to **15.2 MB**, and the
-9.51 MB combined access data from 46% of the download to 27% of it. The two
-files are index-aligned and stamped from the same run; `mergeInto` moves
-geometry in lockstep with the ways table, because drifting indices would draw
-the wrong line for a cell, and a test asserts they stay paired.
+That keeps the up-front payload at **15.9 MB** of a 21.4 MB total. The two files
+are index-aligned and stamped from the same run; `mergeInto` moves geometry in
+lockstep with the ways table, because drifting indices would draw the wrong line
+for a cell, and a test asserts they stay paired. They also carry a **format
+version** that the app checks: rows went from 3 numbers per category to 4 and
+ways from 5 fields to 7, and a v3 file read by a v4 reader does not fail — it
+takes one category's distance as another's way index and reports it with a
+straight face. A version the app does not know is refused and every cell reads
+as unknown.
+
+### What removing the clip and adding the figures actually cost
+
+Measured, not projected — the projection was made first from the v3 statewide
+file and came in 4% high:
+
+| | v3 | v4 | |
+| --- | --- | --- | --- |
+| `access.json` (up front) | 4.12 MB | **4.97 MB** | +20.4% |
+| `access-geom.json` (lazy) | 5.39 MB | **5.52 MB** | +2.5% |
+| total | 9.51 MB | **10.49 MB** | +10.3% |
+
+The attribution matters. **Storing full geometry costs +0.13 MB, and only on the
+lazily-fetched file.** The +0.85 MB up front is the climb column and the OSM way
+ids — the walk and the external link, not the un-clipping. If that ever needs
+reclaiming, the climb column is the place to look: it is `-1` for most rows and
+could move into the geometry file, at the cost of the climb not appearing until
+the line is fetched.
 
 ### Geometry is shared, not duplicated — measured, not assumed
 
@@ -167,10 +189,14 @@ the whole answer: it accounted for 3.7% of points, the median drawn way was
 single complete 1.02 mi way that was never clipped at all.
 
 The dominant cause is **fragmentation**. OSM splits a named way at every tag
-change and every junction, so a long route arrives as many separate ways: the
-Pacific Crest Trail as 68 of them, US 101 as 71. 14% of named routes in
-Washington are multi-way, averaging 1.2 segments. Drawing only the segment
+change and every junction, so a long route arrives as many separate ways: 68 of
+them tagged "Pacific Crest Trail", 71 tagged "US 101". Drawing only the segment
 nearest the cell looks like a fragment of a trail because it is one.
+
+In the bake, 2,091 of 50,614 stored routes were assembled from more than one
+mapped way. The clearest single case: Baker Lake Trail arrived as ways of 7.18 mi
+and 2.37 mi and is stored as one 9.54 mi route, 68 points, verified drawn
+end-to-end in the browser.
 
 So segments are chained before anything is stored. Two segments join when they
 share `cat`, `type`, `name` and `ref` and an endpoint within 40 m. Both parts of
@@ -199,6 +225,22 @@ A joined route keeps the strongest trailhead found on any member and the OSM id
 of its longest constituent, and records how many pieces it came from so the
 sheet can disclose it. The walk and the climb are re-measured on the joined
 geometry, so the figures describe the line that is drawn.
+
+**Joining is deliberately conservative, and the PCT shows the limit.** Its 68
+"Pacific Crest Trail" ways collapse to 28 stored routes, not to one: it crosses
+side trails constantly, and every one of those is a junction the chaining refuses
+to pass through. That is the right trade — a wrong through-route drawn with
+confidence is worse than a real route drawn in pieces — but it means a long trail
+crossing a dense network still draws in sections, and the fix for that would be
+OSM route *relations*, which are a separate data source, not a tweak to this.
+
+Grouping is also by exact name, so the same trail tagged "Pacific Crest Trail"
+on one way and "PCNST" on the next stays two routes. Loosening that would start
+merging genuinely different ways, which is the failure the strictness is for.
+
+The largest gain from joining is not the drawn line at all: **cells with a walk
+figure went from 10,001 to 26,695**, because a cell in the middle of a route now
+inherits the trailhead on the segment at its far end.
 
 ## How far along the way
 
@@ -246,6 +288,70 @@ What is *not* done matters as much:
 - **Profile unavailable** (a terrain tile failed) → the walk is shown and the
   climb says it is unavailable. `-1`, never `0`.
 
+## The DEM is not clean, and cumulative gain amplifies that
+
+Cumulative positive difference is the right measure for a rolling approach and
+the wrong measure for noisy data: every spurious upward step is added and none
+is ever subtracted back out.
+
+The Terrarium tiles contain patches of garbage. On tile `10/164/363`, in the
+Mount St Helens blast zone, five adjacent pixels read 618, 101, 1295, 2820,
+3087 where the terrain is around 900 m:
+
+```
+py=7:   953  818   752  1173  1480  1241  1055
+py=8:  1143  618   101  1295  2820  3087  3072   <- garbage
+py=9:  1203  459   -90   770   762   758   759
+```
+
+**That is not a decoding fault.** The browser's own PNG decoder returns the
+identical bytes for that tile, which is how it was ruled out — worth repeating
+before blaming the decoder, because the same check is what proved the decoder
+right when `cells.json` was re-baked. It is what the source data says.
+
+One such pixel pair contributed 2,719 m of the 4,608 m total on USFS trail 211 —
+59% of the figure — and would have shipped as "15,100 ft of climb" on a 12 mi
+trail. So the profile is filtered before it is accumulated, in two stages:
+
+1. **A three-point median.** These artefacts are isolated single pixels, and a
+   median removes an isolated spike of any magnitude while leaving a genuine
+   slope untouched: the median of three monotone samples is the middle one.
+2. **A gradient gate**, `MAX_GRADE` = 300%, as a backstop for two bad pixels in
+   a row, which a three-point median cannot fix. The threshold is physical
+   rather than tuned: over 4,159 steps sampled from 333 real routes the steepest
+   implied gradient was **141%**, and 300% is 72° — neither walkable ground nor
+   a real DEM slope. The step is skipped rather than clamped, so a spike adds
+   nothing on the way up and no spurious rise on the way back down.
+
+Both filters under-count across a bad patch rather than inventing metres, which
+is the right direction for a figure presented as the climb to expect. Neither is
+redundant, and a test proves it: a 400 m spike over a 165 m step is a 242%
+gradient, under the gate, and only the median removes it.
+
+What it did to the statewide figures:
+
+| | before | after |
+| --- | --- | --- |
+| median climb | 102 ft | **46 ft** |
+| p90 | 2,287 ft | **1,818 ft** |
+| p99 | 6,972 ft | **4,777 ft** |
+| max | 16,486 ft | **10,587 ft** |
+| cells over 5,000 ft | 267 | **109** |
+
+7,053 cells fell, 5,205 were unchanged and 4 rose by a metre or two. The 109
+cells still over 5,000 ft are not noise — they are the long-walk cases below.
+
+### The walk figure is unbounded, deliberately
+
+It is the distance along that way from the only trailhead mapped on it, which is
+what the data supports and what was asked for. Usually that is a short number —
+median **0.9 mi**, p90 7.1 mi — but the tail is long: 5.8% of shown walks exceed
+10 mi, 1.6% exceed 20 mi, and the longest is 68.5 mi, a cell in the middle of a
+route whose only mapped trailhead is at one end. Nobody walks that; there is
+almost certainly a nearer way in, unmapped or mapped without a trailhead. The
+sheet's "Also nearby" line is what surfaces the alternative. Capping the figure
+would hide the situation rather than describe it.
+
 ## The external link
 
 **AllTrails does not work and is deliberately absent.** Checked rather than
@@ -292,19 +398,25 @@ just not drawable. Verified by deleting them: the statewide score hash is
 
 ### What the statewide bake actually produced
 
-46,383 cells of 48,032 have a mapped way within 2 km; the other 1,649 (3.4%)
-read as unknown. 53,200 distinct ways, 30,770 of them named or numbered, so
-**71% of cells name a real route** and the rest say "unnamed track" or similar.
-10,001 cells (22%) have a walk-from-trailhead figure; 921 mapped trailhead nodes
-were found statewide, and 16,326 ways got an inferred trailhead against 1,037
-mapped ones.
+**46,373 cells** of 48,032 have a mapped way within 2 km; the other 1,659 (3.5%)
+read as unknown. 461,608 ways were fetched, 53,361 of them were some cell's
+nearest, and those joined into **50,614 stored routes** — 2,091 of them assembled
+from more than one mapped way. 28,070 routes (55.5%) are named or numbered;
+43,498 carry an OSM way id and so get an exact external link. 17,136 routes have
+a trailhead, mapped or inferred, and **26,695 cells carry a walk figure** against
+10,001 under the pre-join bake: joining is what earns that, because a cell in the
+middle of a route now inherits the trailhead on the segment at its end. 26,691 of
+those also carry a climb. 618,866 geometry points are stored, and elevation came
+from 271 terrain tiles with no failures.
 
-It cost 638 Overpass requests, 799 retries and 939 MB over ten hours, and
-**20 tiny areas were abandoned** after failing at every mirror and every
-subdivision — 33 sq km of 184,000. 80 cells sit within 2 km of one, 76 of which
-still got data from an overlapping sub-quadrant, so 4 cells read unknown that
-might not have. A targeted re-run with `--bbox` would close that if it ever
-matters.
+**0 areas were abandoned**, against 20 in the previous run, and only one tile
+needed subdividing at all. That is not a code improvement — it is what a working
+mirror looks like; see below.
+
+It cost 309 Overpass requests, 59 retries and 901 MB, and the fetch took **36
+minutes** rather than ten hours. Re-assembling from the checkpoint afterwards —
+joining, elevation, rows, both files — takes **183 s and zero requests**, which is
+what made the de-spiking fix above affordable to discover late.
 
 ### Overpass is the awkward part
 
@@ -314,6 +426,19 @@ three:
 - **The main instance stopped answering entirely** partway through — a connect
   timeout, not a 429. A single hard-coded endpoint turns that into a dead job,
   so there is a mirror list and the script moves on to the next one.
+- **All three mirrors went down at once, and the health probe could not tell.**
+  A later run stalled at 10 of 316 tiles: two mirrors refused connections and
+  the third answered `/status` in 16 s and then timed out at 90 s on a query
+  returning six ways. `/status` is a static string that a queue-saturated server
+  still serves, so it was kept as "up" while being useless — every tile paid two
+  long timeouts before rotating off it, and 5 sub-areas were abandoned in 10
+  tiles. Two fixes: **the probe is now a real query** (a tiny bbox, one cheap
+  request per mirror per run, testing the thing we actually use), and there is a
+  **fourth mirror**, because three is not redundancy if all three can be down
+  together. It is still a pass/fail gate — the survivors keep their declared
+  order, and nothing is ranked by how fast it answered, which is the older lesson
+  below and still holds. The next run fetched 306 tiles in 36 minutes and
+  abandoned nothing.
 - **Dense tiles 504 on every mirror.** Overpass answers an over-expensive query
   with a failure rather than a partial result, and "expensive" tracks way
   density, so metro tiles fail while forest tiles answer in two seconds. On

@@ -510,11 +510,49 @@ export async function elevationProfile(geom, loader) {
   return out;
 }
 
+/* ===================== the DEM is not clean, and cumulative gain amplifies that =====================
+
+   Cumulative positive difference is the right measure for a rolling approach and the wrong measure
+   for noisy data: every spurious upward step is added and none is ever subtracted back out.
+
+   The Terrarium tiles contain patches of garbage. On tile 10/164/363, in the Mount St Helens blast
+   zone, five adjacent pixels read 618, 101, 1295, 2820, 3087 where the terrain is around 900 m. That
+   is not a decoding error — the browser's own PNG decoder returns the identical bytes, which is how
+   it was ruled out — it is what the source data says. One such pixel pair contributed 2,719 m of the
+   4,608 m total on USFS trail 211, 59% of the figure, and it would have been shown as "15,100 ft of
+   climb" on a 12 mi trail.
+
+   Two filters, in order:
+
+   1. A three-point MEDIAN over the profile. These artefacts are isolated single pixels, and a median
+      removes an isolated spike of any magnitude while leaving a genuine slope untouched — the median
+      of three monotone samples is the middle one.
+   2. A gradient gate as a backstop for two bad pixels in a row, which a 3-median cannot fix. The
+      threshold is a physical one rather than a tuned one: over 4,159 steps sampled from 333 real
+      routes the steepest implied gradient was 141%, and 300% is 72 degrees — not walkable ground and
+      not a real DEM slope, so a step that implies it is bad data. The step is skipped rather than
+      clamped, so a spike neither adds climb on the way up nor a spurious rise on the way back down.
+
+   Both under-count across a bad patch instead of inventing metres, which is the right direction for
+   a number presented as the climb to expect. */
+export const MAX_GRADE = 3.0;
+
+export function despike(elev) {
+  if (!elev || elev.length < 3) return elev;
+  const out = elev.slice();
+  for (let i = 1; i < elev.length - 1; i++) {
+    const a = elev[i - 1], b = elev[i], c = elev[i + 1];
+    if (a == null || b == null || c == null) continue;
+    out[i] = a < b ? (b < c ? b : (a < c ? c : a)) : (a < c ? a : (b < c ? c : b));   // median of three
+  }
+  return out;
+}
+
 /* Cumulative climb between two positions along a way, given its per-vertex elevations. */
 export function gainBetween(geom, elev, arcA, arcB) {
   if (!elev || elev.length !== geom.length) return -1;
   const lo = Math.min(arcA, arcB), hi = Math.max(arcA, arcB);
-  let arc = 0, gain = 0, prev = null, any = false;
+  let arc = 0, gain = 0, prev = null, prevArc = 0, any = false;
   for (let i = 0; i < geom.length; i++) {
     if (i > 0) {
       const [aLa, aLn] = geom[i - 1], [bLa, bLn] = geom[i];
@@ -522,9 +560,13 @@ export function gainBetween(geom, elev, arcA, arcB) {
     }
     if (arc < lo - 1 || arc > hi + 1) { prev = null; continue; }
     const e = elev[i];
-    if (e == null) { prev = null; continue; }
-    if (prev != null && e > prev) gain += e - prev;
-    prev = e; any = true;
+    if (e == null || !Number.isFinite(e)) { prev = null; continue; }
+    if (prev != null) {
+      const run = arc - prevArc;
+      // a step steeper than MAX_GRADE is bad data, not ground: skip it, do not clamp it
+      if (run > 1 && Math.abs(e - prev) / run <= MAX_GRADE && e > prev) gain += e - prev;
+    }
+    prev = e; prevArc = arc; any = true;
   }
   return any ? Math.round(gain) : -1;
 }
@@ -734,7 +776,7 @@ export async function build(opts, deps = {}) {
   const profiles = new Array(joined.length).fill(null);
   if (!opts.skipElevation) {
     for (let n = 0; n < joined.length; n++) {
-      profiles[n] = await elevationProfile(joined[n].geom, deps.tileFetch);
+      profiles[n] = despike(await elevationProfile(joined[n].geom, deps.tileFetch));
       if ((n + 1) % 5000 === 0) log('elevation  ' + (n + 1).toLocaleString() + '/' + joined.length.toLocaleString()
         + ' routes, ' + elevTiles + ' terrain tiles');
     }
@@ -809,7 +851,8 @@ export async function build(opts, deps = {}) {
                 points_stored: pts, join_snap_m: JOIN_SNAP_M,
                 routes_joined: outWays.filter(w => w[6] > 1).length },
     elevation: { source: TERRAIN_SOURCE.name, zoom: ELEV_Z, tiles: elevTiles,
-                 tile_failures: elevTileFails, method: 'cumulative positive difference at every vertex' },
+                 tile_failures: elevTileFails, method: 'cumulative positive difference at every vertex',
+                 despike: '3-point median', max_grade: MAX_GRADE },
     trailheads: { mapped_nodes: trailheadNodes.length, snap_m: TH_SNAP_M, mapped_m: TH_MAPPED_M,
                   ways_with_trailhead: withTh },
     tiles: tiles.length,

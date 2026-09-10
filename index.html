@@ -1098,9 +1098,17 @@ async function drawApproach(wayIndex,cell,link){
     L.polyline(way.geom,{color:'#0f150f',weight:7,opacity:.55}),
     L.polyline(way.geom,{color:colour,weight:3,dashArray:'7 5'}),
   ]).addTo(map);
-  const b=L.latLngBounds(way.geom);
+  const b=L.latLngBounds(way.geom).pad(0.25);
   if(cell) b.extend([cell.lat,cell.lon]);
-  map.fitBounds(b.pad(0.25));
+  /* Only fit when the map actually has a viewport. The geometry file is fetched on demand, so this
+     runs an unpredictable moment after the tap — and if iOS has backgrounded the page by then the
+     container is 0x0, getBoundsZoom cannot fit anything into no pixels, and fitBounds lands on zoom
+     0: you come back to the whole world instead of your trail. Defer to the next resize, which
+     Leaflet fires when the pane becomes visible again. */
+  const fit=()=>map.fitBounds(b);
+  const sz=map.getSize();
+  if(sz.x>0&&sz.y>0) fit();
+  else map.once('resize',fit);
   closeSheet();
 }
 

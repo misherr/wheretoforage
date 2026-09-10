@@ -878,3 +878,80 @@ test('mirrors: three was not enough redundancy', () => {
   for (const m of A.OVERPASS_MIRRORS) assert.match(m, /^https:\/\/.*\/interpreter$/,
     'every mirror must be an https interpreter endpoint: ' + m);
 });
+
+/* ===================== the DEM is not clean ===================== */
+
+test('elevation: an isolated garbage pixel does not become thousands of feet of climb', () => {
+  /* Real values from Terrarium tile 10/164/363, Mount St Helens blast zone, where the terrain is
+     around 900 m. The browser's own PNG decoder returns the identical bytes, so this is what the
+     source data says rather than a decoding fault. Cumulative gain adds every spurious rise and
+     subtracts none, so this one pixel pair contributed 2,719 m of a 4,608 m total on USFS trail 211
+     -- 59% of the figure, shown as "15,100 ft of climb" on a 12 mi trail. */
+  const geom = [];
+  for (let i = 0; i < 8; i++) geom.push([46.305 + i * 0.0015, -122.24]);   // ~165 m apart
+  const dirty = [920, 953, 1143, 618, 101, 2820, 770, 822];
+  // what a plain cumulative sum would have produced, which is the figure that shipped nowhere
+  let raw = 0;
+  for (let i = 1; i < dirty.length; i++) if (dirty[i] > dirty[i - 1]) raw += dirty[i] - dirty[i - 1];
+  const clean = A.gainBetween(geom, A.despike(dirty), 0, 1e6);
+  assert.ok(raw > 2500, 'the unfiltered total should be dominated by the spike, got ' + raw);
+  assert.ok(A.gainBetween(geom, dirty, 0, 1e6) < 400,
+    'the gradient gate alone should already reject the impossible steps');
+  assert.ok(clean < 400, 'after filtering the climb must be plausible for 1 km of trail, got ' + clean);
+});
+
+test('elevation: a spike too small for the gradient gate is still removed', () => {
+  /* The two filters cover different failures and neither is redundant. A garbage pixel does not have
+     to be absurd to matter: 400 m over a 165 m step is a 242% gradient, under MAX_GRADE, so the gate
+     passes it and a plain cumulative sum adds 400 m of climb that is not there. Only the median
+     removes it. Without this case, disabling the median entirely leaves every test still passing. */
+  const geom = [];
+  for (let i = 0; i < 6; i++) geom.push([46.305 + i * 0.0015, -122.24]);      // ~165 m apart
+  const dirty = [900, 910, 1310, 915, 925, 935];                              // one pixel 400 m high
+  const gated = A.gainBetween(geom, dirty, 0, 1e6);
+  const clean = A.gainBetween(geom, A.despike(dirty), 0, 1e6);
+  assert.ok(gated > 380, 'the gate should NOT catch this one -- that is the point, got ' + gated);
+  assert.ok(clean < 60, 'the median must remove it, got ' + clean);
+});
+
+test('elevation: the median leaves a genuine slope alone', () => {
+  /* The filter must not flatten real climbing -- that would trade one wrong number for another.
+     The median of three monotone samples is the middle one, so a steady ascent is untouched. */
+  const geom = [];
+  for (let i = 0; i < 10; i++) geom.push([47.5 + i * 0.002, -121.5]);
+  const climb = [100, 140, 180, 220, 260, 300, 340, 380, 420, 460];
+  assert.deepEqual(A.despike(climb), climb, 'a monotone profile must pass through unchanged');
+  assert.equal(A.gainBetween(geom, A.despike(climb), 0, 1e6), 360);
+  // and a real dip is a real dip, not a spike: a broad feature survives
+  const rolling = [100, 200, 300, 300, 200, 100, 100, 200, 300, 400];
+  assert.deepEqual(A.despike(rolling), rolling, 'a dip two samples wide is terrain, not noise');
+});
+
+test('elevation: a physically impossible step is skipped, not clamped', () => {
+  /* The backstop for two bad pixels in a row, which a three-point median cannot fix. The threshold
+     is physical, not tuned: over 4,159 steps sampled from 333 real routes the steepest implied
+     gradient was 141%, and MAX_GRADE is 300% -- 72 degrees, which is neither walkable ground nor a
+     real DEM slope. Skipping rather than clamping means a spike adds nothing on the way up and no
+     spurious rise on the way back down. */
+  assert.ok(A.MAX_GRADE >= 1.5, 'the gate must sit well above real terrain (141% was measured)');
+  const geom = [[47.500, -121.5], [47.5009, -121.5], [47.5018, -121.5]];   // ~100 m steps
+  // 100 m horizontal, 900 m up: 900% grade, impossible
+  assert.equal(A.gainBetween(geom, [500, 1400, 520], 0, 1e6), 0,
+    'neither the impossible rise nor the impossible fall may contribute');
+  // a steep but real step must still count: 100 m horizontal, 60 m up is a 60% grade
+  assert.equal(A.gainBetween(geom, [500, 560, 620], 0, 1e6), 120,
+    'steep real terrain must not be filtered out with the garbage');
+});
+
+test('elevation: the filtering is recorded in provenance, not applied invisibly', () => {
+  const dir = tmpdir();
+  cellsFixture(dir);
+  const opts = A.parseArgs([`--cells=${path.join(dir, 'cells.json')}`,
+    `--out=${path.join(dir, 'a.json')}`, '--bbox=47,-123,49,-121', '--skip-usfs']);
+  return A.build(opts, fakeDeps()).then(r => {
+    assert.equal(r.provenance.elevation.despike, '3-point median',
+      'a reader has to be able to tell the profile was filtered');
+    assert.equal(r.provenance.elevation.max_grade, A.MAX_GRADE);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
