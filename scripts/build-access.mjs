@@ -552,7 +552,7 @@ export async function build(opts, deps = {}) {
   }
 
   const wayIndex = new Map();
-  const outWays = [];
+  const outWays = [], outGeom = [];
   const clippedGeom = new Map();
   let ptsBefore = 0, ptsAfter = 0, named = 0, withTh = 0;
   for (const wid of referenced) {
@@ -565,7 +565,8 @@ export async function build(opts, deps = {}) {
     if (w.name || w.ref) named++;
     if (w.th) withTh++;
     wayIndex.set(wid, outWays.length);
-    outWays.push([w.name, w.ref, w.type, CATS.indexOf(w.cat), w.th, encodeGeom(clipped)]);
+    outWays.push([w.name, w.ref, w.type, CATS.indexOf(w.cat), w.th]);
+    outGeom.push(encodeGeom(clipped));
   }
 
   /* The trailhead's position along each way, so a per-cell walk distance is a subtraction. Measured
@@ -632,20 +633,30 @@ export async function build(opts, deps = {}) {
               ways_named: named, cell_walks: withWalk },
     seconds: Math.round((Date.now() - t0) / 1000),
   };
-  let out = { version: 2, generated: new Date().toISOString(), cap_m: CAP, provenance, ways: outWays, rows };
+  const generated = new Date().toISOString();
+  let out = { version: 3, generated, cap_m: CAP, provenance, ways: outWays, rows };
+  let geomOut = { version: 3, generated, geom: outGeom };
 
   if (opts.region !== 'state' && fs.existsSync(opts.out)) {
     const prev = JSON.parse(fs.readFileSync(opts.out, 'utf8'));
-    out = mergeInto(prev, out);
+    const pg = opts.out.replace(/\.json$/, '') + '-geom.json';
+    const prevGeom = fs.existsSync(pg) ? (JSON.parse(fs.readFileSync(pg, 'utf8')).geom || []) : [];
+    const m = mergeInto(prev, out, prevGeom, outGeom);
+    out = m.merged; geomOut = { version: 3, generated, geom: m.geom };
     log('merge      ' + out.provenance.counts.replaced.toLocaleString() + ' rebaked, '
       + out.provenance.counts.carried_over.toLocaleString() + ' carried over');
   }
 
+  /* Two files: names and distances up front, geometry only when someone asks to see a line. */
+  const geomPath = opts.out.replace(/\.json$/, '') + '-geom.json';
   if (opts.dryRun) log('dry run - not writing');
   else {
     atomicWrite(opts.out, JSON.stringify(out));
+    atomicWrite(geomPath, JSON.stringify(geomOut));
     log('wrote ' + opts.out + ' - ' + out.rows.length.toLocaleString() + ' cells, '
       + out.ways.length.toLocaleString() + ' ways, ' + (fs.statSync(opts.out).size / 1e6).toFixed(2) + ' MB');
+    log('wrote ' + geomPath + ' - geometry only, ' + (fs.statSync(geomPath).size / 1e6).toFixed(2)
+      + ' MB, fetched by the app only on the first "show the approach"');
     if (fs.existsSync(opts.checkpoint)) fs.unlinkSync(opts.checkpoint);
   }
   log('done in ' + Math.round((Date.now() - t0) / 1000) + 's - ' + osmRequests + ' Overpass ('
@@ -657,11 +668,15 @@ export async function build(opts, deps = {}) {
 /* A regional re-bake replaces its own cells and carries the rest through. Way indices are local to a
    file, so the tables are concatenated, carried-over rows re-pointed, and anything nothing points at
    any more is dropped — otherwise a few regional bakes would leave the file full of dead geometry. */
-export function mergeInto(prev, fresh) {
+/* Merging has to move geometry in lockstep with the ways table, or the two files silently drift and
+   the app draws the wrong line for a cell. `prevGeom`/`freshGeom` are the parallel arrays. */
+export function mergeInto(prev, fresh, prevGeom, freshGeom) {
   const mine = new Set(fresh.rows.map(r => r[0] + ':' + r[1]));
   const ways = (fresh.ways || []).slice();
+  const geom = (freshGeom || []).slice();
   const shift = ways.length;
   for (const w of (prev.ways || [])) ways.push(w);
+  for (const g of (prevGeom || [])) geom.push(g);
   const carried = (prev.rows || []).filter(r => !mine.has(r[0] + ':' + r[1])).map(r => {
     const row = r.slice();
     for (let n = 0; n < CATS.length; n++) { const at = 3 + n * 3; if (row[at] >= 0) row[at] += shift; }
@@ -670,16 +685,19 @@ export function mergeInto(prev, fresh) {
   const rows = [...carried, ...fresh.rows].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
   const used = new Set();
   for (const r of rows) for (let n = 0; n < CATS.length; n++) { const w = r[3 + n * 3]; if (w >= 0) used.add(w); }
-  const remap = new Map(); const kept = [];
-  [...used].sort((a, b) => a - b).forEach(old => { remap.set(old, kept.length); kept.push(ways[old]); });
+  const remap = new Map(); const kept = [], keptGeom = [];
+  [...used].sort((a, b) => a - b).forEach(old => {
+    remap.set(old, kept.length); kept.push(ways[old]); keptGeom.push(geom[old]);
+  });
   for (const r of rows) for (let n = 0; n < CATS.length; n++) {
     const at = 3 + n * 3;
     if (r[at] >= 0) r[at] = remap.get(r[at]);
   }
-  return { ...fresh, ways: kept, rows,
-    provenance: { ...fresh.provenance,
-      counts: { ...fresh.provenance.counts, cells: rows.length, ways: kept.length,
-                replaced: fresh.rows.length, carried_over: carried.length } } };
+  return { merged: { ...fresh, ways: kept, rows,
+      provenance: { ...fresh.provenance,
+        counts: { ...fresh.provenance.counts, cells: rows.length, ways: kept.length,
+                  replaced: fresh.rows.length, carried_over: carried.length } } },
+    geom: keptGeom };
 }
 
 const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

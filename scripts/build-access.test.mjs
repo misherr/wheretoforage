@@ -306,14 +306,16 @@ test('bake: a regional re-bake replaces its own cells and carries the rest throu
      carried-over rows, and drop any way nothing references any more — otherwise a few regional
      bakes would leave the file full of dead geometry. */
   const g = n => AC.encodeGeom([[47 + n / 100, -121], [47 + n / 100, -120.99]]);
-  const prev = { version: 2, generated: 'old', cap_m: 2000, provenance: { counts: {} },
-    ways: [['Old Road', null, 'unclassified', 0, 0, g(1)], ['Dead Way', null, 'track', 2, 0, g(2)]],
+  const prev = { version: 3, generated: 'old', cap_m: 2000, provenance: { counts: {} },
+    ways: [['Old Road', null, 'unclassified', 0, 0], ['Dead Way', null, 'track', 2, 0]],
     rows: [[10, 20, 100, 0, -1, -1, -1, -1, -1, -1, -1],
            [10, 21, -1, -1, -1, 700, 1, -1, -1, -1, -1]] };
-  const fresh = { version: 2, generated: 'new', cap_m: 2000, provenance: { counts: {} },
-    ways: [['New Trail', null, 'path', 1, 2, g(3)]],
+  const prevGeom = [g(1), g(2)];
+  const fresh = { version: 3, generated: 'new', cap_m: 2000, provenance: { counts: {} },
+    ways: [['New Trail', null, 'path', 1, 2]],
     rows: [[10, 21, -1, -1, -1, 42, 0, 17, -1, -1, -1]] };
-  const m = A.mergeInto(prev, fresh);
+  const freshGeom = [g(3)];
+  const { merged: m, geom: mg } = A.mergeInto(prev, fresh, prevGeom, freshGeom);
   assert.equal(m.rows.length, 2, 'no cell may be lost');
   const byKey = Object.fromEntries(m.rows.map(r => [r[0] + ':' + r[1], r]));
   const nameOf = (row, cat) => {
@@ -326,6 +328,11 @@ test('bake: a regional re-bake replaces its own cells and carries the rest throu
   assert.equal(nameOf(byKey['10:20'], 'road'), 'Old Road', 'an untouched cell keeps pointing at its own way');
   assert.ok(!m.ways.some(w => w[0] === 'Dead Way'), 'a way nothing references any more must be dropped');
   assert.equal(m.provenance.counts.carried_over, 1);
+  /* The two files have to move in lockstep, or the app draws the wrong line for a cell. */
+  assert.equal(mg.length, m.ways.length, 'geometry must be dropped and reindexed with the ways');
+  const trailIdx = AC.decodeRow(byKey['10:21']).trailWay;
+  assert.deepEqual(AC.decodeGeom(mg[trailIdx]), AC.decodeGeom(freshGeom[0]),
+    'the surviving way must still be paired with its own geometry');
 });
 
 test('bake: the Overpass query asks for the ways that matter and skips the ones that do not', () => {
@@ -400,6 +407,8 @@ test('geometry: it is shared by way, not duplicated per cell', async () => {
   for (const row of r.rows) for (const n of [3, 6, 9]) {
     if (row[n] >= 0) assert.ok(r.ways[row[n]], 'row points at way ' + row[n] + ' which does not exist');
   }
+  for (const w of r.ways) assert.equal(w.length, 5,
+    'a way entry carries name, ref, type, category and trailhead kind — geometry lives in its own file');
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -452,8 +461,9 @@ test('walk: a trail ending on a road gets an inferred trailhead and a distance a
 test('walk: without a trailhead the answer is a straight line, and says so', () => {
   const d = { trail: 300, trailWay: 0, trailWalk: -1, road: -1, roadWay: -1, roadWalk: -1,
               rough: -1, roughWay: -1, roughWalk: -1 };
-  const ways = [[null, null, 'path', 1, AC.TRAILHEAD_NONE, AC.encodeGeom([[47.5, -121.5], [47.51, -121.5]])]];
-  const det = AC.accessDetail(d, ways);
+  const ways = [[null, null, 'path', 1, AC.TRAILHEAD_NONE]];
+  const geoms = [AC.encodeGeom([[47.5, -121.5], [47.51, -121.5]])];
+  const det = AC.accessDetail(d, ways, geoms);
   assert.equal(det.walk, null, 'no walk figure without a trailhead');
   assert.equal(det.straight, 300, 'the straight-line distance is still reported');
   assert.equal(det.trailheadNote, null);
@@ -471,9 +481,8 @@ test('walk: a mapped trailhead is distinguished from an inferred one', () => {
 test('honesty: naming a way does not turn "mapped" into "passable"', () => {
   const d = { trail: 200, trailWay: 0, trailWalk: 500, road: -1, roadWay: -1, roadWalk: -1,
               rough: -1, roughWay: -1, roughWalk: -1 };
-  const ways = [['Bear Creek Trail', null, 'path', 1, AC.TRAILHEAD_INFERRED,
-                 AC.encodeGeom([[47.5, -121.5], [47.51, -121.5]])]];
-  const det = AC.accessDetail(d, ways);
+  const ways = [['Bear Creek Trail', null, 'path', 1, AC.TRAILHEAD_INFERRED]];
+  const det = AC.accessDetail(d, ways, [AC.encodeGeom([[47.5, -121.5], [47.51, -121.5]])]);
   assert.equal(det.wayName, 'Bear Creek Trail');
   assert.match(det.blurb, /mapped/i, 'the blurb must still say "mapped" even when the way has a name');
   assert.ok(!/passable|open|maintained|confirmed/i.test(det.blurb),
@@ -487,4 +496,40 @@ test('honesty: primaryCat picks the category the class was decided on', () => {
   assert.equal(AC.primaryCat({ trail: -1, road: 50, rough: 10 }), 'road');
   assert.equal(AC.primaryCat({ trail: 1900, road: -1, rough: -1 }), 'trail', 'the nearby case still names a way');
   assert.equal(AC.primaryCat({ trail: -1, road: -1, rough: -1 }), null);
+});
+
+/* ===================== the two files ===================== */
+
+test('split: geometry is written separately and stays index-aligned', async () => {
+  /* The whole point of the split is that the up-front download drops from 9.5 MB to 4.1 MB. It only
+     works if the two files agree about indices, so a drift here draws the wrong line for a cell. */
+  const dir = tmpdir();
+  cellsFixture(dir);
+  const out = path.join(dir, 'access.json');
+  const opts = A.parseArgs([`--cells=${path.join(dir, 'cells.json')}`, `--out=${out}`,
+    '--bbox=47,-123,49,-121', '--skip-usfs']);
+  const r = await A.build(opts, fakeDeps());
+  const geomPath = path.join(dir, 'access-geom.json');
+  assert.ok(fs.existsSync(geomPath), 'a geometry file must be written alongside');
+  const g = JSON.parse(fs.readFileSync(geomPath, 'utf8'));
+  assert.equal(g.geom.length, r.ways.length, 'one geometry per way, same order');
+  assert.equal(g.generated, r.generated, 'the two files must be stamped from the same run');
+  for (let i = 0; i < r.ways.length; i++) {
+    const w = AC.decodeWay(r.ways[i], g.geom[i]);
+    assert.ok(w.geom && w.geom.length >= 1, 'way ' + i + ' has no geometry');
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('split: a way can be named without its geometry being loaded', () => {
+  // This is what the tap sheet does before anyone asks to see a line.
+  const w = AC.decodeWay(['Bear Creek Trail', null, 'path', 1, AC.TRAILHEAD_INFERRED]);
+  assert.equal(AC.wayLabel(w), 'Bear Creek Trail');
+  assert.equal(w.geom, null, 'geometry stays null until the second file arrives');
+  const det = AC.accessDetail({ trail: 200, trailWay: 0, trailWalk: 100,
+    road: -1, roadWay: -1, roadWalk: -1, rough: -1, roughWay: -1, roughWalk: -1 },
+    [['Bear Creek Trail', null, 'path', 1, AC.TRAILHEAD_INFERRED]]);
+  assert.equal(det.wayName, 'Bear Creek Trail', 'the name is available with no geometry at all');
+  assert.equal(det.wayIndex, 0, 'and the index, so the line can be fetched on demand');
+  assert.equal(det.way.geom, null);
 });

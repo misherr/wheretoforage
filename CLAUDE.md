@@ -20,7 +20,7 @@ src/grid.mjs    the cell lattice, the state outline, terrainAt, pointKey
 src/access.mjs  how you would reach a cell — a separate axis, never a score input
 scripts/        build-cells.mjs, build-access.mjs, fetch-weather.mjs, serve.mjs
 tests/model/    the model regression suite
-data/           cells.json, weather.json, evt-names.json, access.json — all checked in
+data/           cells.json, weather.json, evt-names.json, access.json (+ -geom) — checked in
 ```
 
 Washington is divided into ~48,000 one-square-mile cells. Each carries baked

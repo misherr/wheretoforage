@@ -97,6 +97,19 @@ within the cap", "no way", or "walk unknown". A cell with nothing mapped at all
 gets **no row** — the app reads a missing row as unknown, which is the same
 answer and costs nothing to store.
 
+### Geometry lives in its own file, fetched on demand
+
+The up-front download is `access.json` — rows, way names, types, distances:
+**4.12 MB**. The polylines are `access-geom.json`, **5.39 MB**, and the app does
+not touch it until someone taps "Show the approach on the map". Most viewers
+never will, and nobody needs 53,200 polylines to draw one line.
+
+That took the app's total static payload from 20.6 MB to **15.2 MB**, and the
+9.51 MB combined access data from 46% of the download to 27% of it. The two
+files are index-aligned and stamped from the same run; `mergeInto` moves
+geometry in lockstep with the ways table, because drifting indices would draw
+the wrong line for a cell, and a test asserts they stay paired.
+
 ### Geometry is shared, not duplicated — measured, not assumed
 
 Storing a copy of the relevant geometry against every cell was measured at
@@ -122,9 +135,12 @@ Measured on six real tiles covering 1,518 cells and scaled by 31.6×. So:
   copy — distances are computed from full geometry, so simplification can never
   move a cell's class.
 - **Delta-encoded integers at 1e5** (about a metre). Halves it again.
-- **Clipped** to the stretch within 2.6 km of a cell that references it. A state
-  highway that happens to pass one cell should contribute the couple of
-  kilometres you can see, not its whole length across the state.
+- **Clipped** to the stretch within 2.6 km of a cell that references it. This
+  one turned out to be nearly a no-op — 621,072 points became 598,127, a 3.7%
+  saving — because the ways that get referenced are mostly short forest ways
+  already sitting next to their cells rather than long highways. It is kept
+  because it costs nothing and bounds the worst case, but it is not where the
+  savings came from.
 
 ## How far along the way
 
@@ -158,8 +174,27 @@ re-bake of the cell file cannot silently shift the association. The output
 records the `generated` stamp of the `cells.json` it was built against, and the
 app warns in the console if they do not match.
 
-Access is **optional** at runtime: if `data/access.json` is missing the app works
-exactly as before and every cell reads as unknown.
+Access is **optional** at runtime, and so is its geometry: with
+`data/access.json` missing the app works exactly as before and every cell reads
+as unknown, and with only the geometry file missing every route is still named,
+just not drawable. Verified by deleting them: the statewide score hash is
+211802998 either way.
+
+### What the statewide bake actually produced
+
+46,383 cells of 48,032 have a mapped way within 2 km; the other 1,649 (3.4%)
+read as unknown. 53,200 distinct ways, 30,770 of them named or numbered, so
+**71% of cells name a real route** and the rest say "unnamed track" or similar.
+10,001 cells (22%) have a walk-from-trailhead figure; 921 mapped trailhead nodes
+were found statewide, and 16,326 ways got an inferred trailhead against 1,037
+mapped ones.
+
+It cost 638 Overpass requests, 799 retries and 939 MB over ten hours, and
+**20 tiny areas were abandoned** after failing at every mirror and every
+subdivision — 33 sq km of 184,000. 80 cells sit within 2 km of one, 76 of which
+still got data from an overlapping sub-quadrant, so 4 cells read unknown that
+might not have. A targeted re-run with `--bbox` would close that if it ever
+matters.
 
 ### Overpass is the awkward part
 

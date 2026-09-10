@@ -164,11 +164,17 @@ export function encodeGeom(coords) {
   return out;
 }
 
-// ways[k] = [name, ref, type, catIndex, trailheadKind, geomDelta]
-export function decodeWay(w) {
+/* ways[k] = [name, ref, type, catIndex, trailheadKind]  — geometry lives in a SEPARATE file.
+   Splitting them is not tidiness. Everything the tap sheet needs to NAME a route is a few bytes;
+   the polyline to draw it is most of the file. Measured: 4.12 MB of names and distances against
+   5.39 MB of geometry. Loading the second up front would mean every viewer downloading 5 MB to draw
+   one line if and only if they ask for it, so the app fetches it on the first request and not
+   before. `geomFlat` is that file's entry for the same index, or omitted. */
+export function decodeWay(w, geomFlat) {
   if (!w) return null;
   return { name: w[0] || null, ref: w[1] || null, type: w[2], cat: CATS[w[3]],
-           trailhead: w[4] || TRAILHEAD_NONE, geom: decodeGeom(w[5] || []) };
+           trailhead: w[4] || TRAILHEAD_NONE,
+           geom: geomFlat ? decodeGeom(geomFlat) : null };
 }
 
 /* rows[k] = [i, j, dRoad, wRoad, walkRoad, dTrail, wTrail, walkTrail, dRough, wRough, walkRough]
@@ -185,16 +191,17 @@ export function decodeRow(row) {
 
 /* One structured answer for the tap sheet: the class, the way it is talking about, how far, and
    whether that distance is a walk along the way or a straight line. */
-export function accessDetail(d, ways) {
+export function accessDetail(d, ways, geoms) {
   const cls = classifyAccess(d);
   const cat = primaryCat(d);
-  const out = { cls, label: CLASSES[cls].label, blurb: CLASSES[cls].blurb, cat,
+  const out = { cls, label: CLASSES[cls].label, blurb: CLASSES[cls].blurb, cat, wayIndex: -1,
                 way: null, wayName: null, straight: null, walk: null, trailheadNote: null, others: [] };
   if (!d || !cat) return out;
   out.straight = d[cat];
   const wi = d[cat + 'Way'];
   if (ways && wi != null && wi >= 0 && ways[wi]) {
-    out.way = decodeWay(ways[wi]);
+    out.wayIndex = wi;
+    out.way = decodeWay(ways[wi], geoms && geoms[wi]);
     out.wayName = wayLabel(out.way);
     const walk = d[cat + 'Walk'];
     if (walk != null && walk >= 0 && out.way.trailhead) {
@@ -206,7 +213,7 @@ export function accessDetail(d, ways) {
   for (const c of CATS) {
     if (c === cat) continue;
     if (d[c] == null || d[c] < 0) continue;
-    const w = ways && d[c + 'Way'] >= 0 ? decodeWay(ways[d[c + 'Way']]) : null;
+    const w = ways && d[c + 'Way'] >= 0 ? decodeWay(ways[d[c + 'Way']]) : null;   // name only
     out.others.push({ cat: c, m: d[c], name: w ? wayLabel(w) : null });
   }
   out.others.sort((a, b) => a.m - b.m);
