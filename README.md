@@ -4,8 +4,8 @@ The app is one file (`index.html`). For public use it reads three static files a
 
 ## One-time setup
 0. Serve the repo root — **the app cannot be opened as a file any more.** `index.html` imports the model from `src/model/*.mjs`, and ES module imports are fetched, so `file://` fails CORS and the page comes up blank. Use `node scripts/serve.mjs 8080` (no dependencies) or `npx serve -l 8080`, then open http://localhost:8080.
-1. Run the app locally with `PUBLIC_MODE=false` (top of the script) and wait for a complete load — status line shows no "pending" or "missing" counts.
-2. Open the info panel (ⓘ) → **Export cells.json**. Save it as `data/cells.json`. This is the baked elevation, slope/aspect and LANDFIRE vegetation for every square-mile cell; it never needs refreshing unless you change the habitat model.
+1. Bake the cell file: `node scripts/build-cells.mjs`. About 4 minutes — 305 terrain tiles and 579 LANDFIRE requests — and it writes `data/cells.json` itself. It checkpoints as it goes, so if the network drops, re-run with `--resume` and it picks up where it stopped. Part of the state only: `--region=coast` or `--bbox=lat0,lon0,lat1,lon1`, which merges into the existing file. This used to be a button in the app; it is a script now so it can run in CI and produce a reviewable diff.
+2. Check it: `npm test`. `data/cells.json` needs refreshing only when the habitat gate or the vegetation rules change — and note that rebuilding moves slope and aspect for ~7,000 cells, because the old in-browser bake computed some of them from an incomplete neighbourhood. That changes scores, so re-bake deliberately rather than as housekeeping.
 3. Copy `scripts/`, `.github/`, `data/` and `index.html` into the repo. Commit and push.
 4. GitHub → Actions → **Update weather** → Run workflow, with **grids = `past,forecast`**. It writes `data/weather.json` and commits it. After that it runs itself on two schedules (below). The first few runs will report anchors still to backfill — see "The first few days" .
 5. Set `PUBLIC_MODE=true` in `index.html` and push. Enable GitHub Pages on the main branch.

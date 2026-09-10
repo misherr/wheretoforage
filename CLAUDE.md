@@ -7,6 +7,15 @@ Screen."
 
 ## Files
 
+- **`src/grid.mjs`** — the cell lattice (`DLAT`/`DLON`/`BLK`, `cellCenter`,
+  `cellKey`), the Washington outline (`inWA`), and `terrainAt()` for slope and
+  aspect. Imported by **both** `index.html` and `scripts/build-cells.mjs`, and
+  that is the point: while `cells.json` came out of a button inside the app there
+  was exactly one copy of this geometry by construction, and with a separate bake
+  script there would be two. See "The script must agree with the app" — that
+  mistake has already cost this repo 5,844 mismatched cells once and 74 orphaned
+  anchors another time. It also carries `pointKey`, the elevation-cache key,
+  whose 4-decimal truncation is load-bearing and documented there.
 - **`src/model/`** — the ecological model, extracted from `index.html` so that
   changing the science does not mean reading the whole application: `util.mjs`
   (numeric curves, unit conversions, score bands), `habitat.mjs` (region,
@@ -29,17 +38,19 @@ Screen."
   - `const PUBLIC_MODE` near the top of the script switches the whole
     app between two modes:
     - `false` — live API mode: fetches Open-Meteo weather and LANDFIRE
-      vegetation itself, used for local development and for baking
-      `data/cells.json` via the info panel's **Export cells.json** button.
+      vegetation itself, used for local development only. It no longer bakes
+      `data/cells.json` — `scripts/build-cells.mjs` does that.
     - `true` — public mode: reads only `data/cells.json` and
       `data/weather.json`, never calls an API from the phone. This is what
       gets deployed (GitHub Pages).
 - **`data/cells.json`** — baked per-cell elevation, slope, aspect, and
   LANDFIRE 2024 vegetation (tree fraction, canopy %, stand height,
-  host-quality score, top vegetation types). Generated via the app's own export
-  button in live mode. **Do not regenerate or overwrite** — the checked-in copy
-  is the real data the user produced. The one sanctioned exception is a
-  vegetation-only re-bake; see "Re-baking cells.json for vegetation only".
+  host-quality score, top vegetation types), plus a `provenance` block recording
+  the generator and version, the LANDFIRE product year, the terrain tile source
+  and when it ran. Produced by `scripts/build-cells.mjs`. **Do not regenerate or
+  overwrite unless asked** — the checked-in copy is the real data the user
+  produced, and a rebuild moves slope and aspect for ~7,000 cells, which moves
+  scores. See "Rebaking moves slope and aspect, and why that is not a bug".
 - **`data/evt-names.json`** — LANDFIRE EVT code → class name, 1,069 entries,
   checked in because the service no longer publishes the mapping anywhere. See
   "LANDFIRE EVT: the mapping is checked in, and why" before touching it.
@@ -57,6 +68,25 @@ Screen."
   score). Keeps per-request timeout, retry-on-thrown-fetch-error,
   checkpoint/resume, and the >25% failure abort, and adds a daily call ledger
   (see "Call budget").
+- **`scripts/build-cells.mjs`** — bakes `data/cells.json`. Node, no
+  dependencies. Imports `everHabitat` and `vegSummary` from `src/model/` and the
+  lattice from `src/grid.mjs`, so it cannot disagree with the app about either
+  the science or the geometry. Reads elevation from the Terrarium terrain tiles
+  (with its own PNG decoder — Node has no canvas and this repo has no
+  dependencies), samples LANDFIRE EVT/EVC/EVH at four points per cell, and writes
+  rows in lattice scan order so the file diffs. Checkpoints before the first
+  request, every 5 batches, and again on failure, so a connect timeout costs
+  minutes rather than the whole run — re-run with `--resume`.
+  `--region=<name>` or `--bbox=lat0,lon0,lat1,lon1` re-bakes part of the state
+  and merges into the existing file, sampling one block of apron so an edge
+  cell's slope does not depend on which region produced it. A full statewide
+  bake is 305 terrain tiles + 579 LANDFIRE requests, about 4 minutes.
+- **`scripts/build-cells.test.mjs`** — `node --test scripts/build-cells.test.mjs`.
+  No network: the two service calls are injected, so checkpoint/resume is tested
+  against synthetic terrain rather than against whether LANDFIRE agrees with
+  itself twice. Covers the quarter-point geometry against `vegFor`'s own
+  expression, the lattice, the PNG decoder on all five filter types, provenance,
+  the regional merge, and that a resumed bake equals an uninterrupted one.
 - **`scripts/serve.mjs`** — dependency-free static server for local
   development, `node scripts/serve.mjs [port]`. Exists because the app can no
   longer be opened over `file://`, and because it guarantees the `.mjs` MIME
@@ -593,6 +623,64 @@ guaranteed stable across LANDFIRE releases:
 is not truncated, checks every name `cells.json` references is producible from
 it, and asserts no forested cell is missing a type.
 
+## Rebaking moves slope and aspect, and why that is not a bug
+
+`scripts/build-cells.mjs` was built to reproduce the checked-in `data/cells.json`
+exactly, as the proof that it is a faithful replacement for the button rather than
+a second, subtly different generator. Measured over all 48,032 cells:
+
+| field | matches the checked-in file |
+| --- | --- |
+| the cell set itself | 48,032 / 48,032, none gained, none lost |
+| `elev` | 48,032 / 48,032 |
+| `treeFrac`, `canopy`, `height`, `host`, `top` | 48,032 / 48,032 each |
+| `slope` | 41,186 / 48,032 — **6,846 differ** |
+| `aspect` | 41,793 / 48,032 — **6,239 differ** |
+
+Elevation being identical is what makes the cause provable: the inputs to
+`terrainAt()` are the same, so the difference is entirely in **which neighbours
+were available when it ran**.
+
+The app fetched elevation per weather-anchor group, in an order driven by habitat
+priority and by the map viewport, then computed slope and aspect immediately. A
+cell whose neighbour belonged to a group that had not been reached yet fell back
+to a one-sided gradient. Two measurements confirm it:
+
+- Cells whose four-neighbourhood crosses a 0.2° anchor-group boundary differ at
+  **28.1%**; interior cells at **8.3%**.
+- **6,675 of the 7,092** differing cells are reproduced exactly by recomputing
+  the gradient with some subset of neighbours withheld. The remaining 417 are the
+  same effect where the withheld neighbour is a gated-out cell whose elevation is
+  not in the file, so it cannot be reconstructed from the file alone.
+
+So the script's values are the better ones — it samples every cell of every
+retained block before computing any terrain, which makes the answer independent of
+visit order — and the old values are an artifact of a viewport. **That does not
+make overwriting them a tidy-up.** Aspect drives the model's north/south
+adjustment (~1 °C cooler, ~18% less ET on north slopes), and 6,069 of the 39,981
+forested cells have different terrain, so a rebuild moves scores: slope shifts by
+a median 1.2° (p90 6.2°, max 32.9°), aspect by a median 17°, and 803 cells flip
+between flat and not-flat. Re-baking is therefore a **scoring change and needs
+the user's sign-off**, exactly like editing a constant.
+
+Do not "fix" this by making the script reproduce the artifact.
+
+### The related bug in `pointKey`, deliberately left alone
+
+While reproducing the file, a second and independent defect turned up.
+`cellCenter()` returns a 5-decimal coordinate, but the elevation cache is keyed by
+`pointKey`, which truncates to 4 — and `lat + DLAT` lands a hair *below* the
+neighbour's own 5-decimal value often enough that the two round to different
+strings. **77 of every 300 cells in latitude** (0 in longitude) therefore take a
+one-sided north-south gradient even though the neighbour's elevation is sitting in
+the cache.
+
+It is deterministic, so the script reproduces it faithfully and the numbers above
+are unaffected by it. Widening the key would move slope and aspect again, on top
+of the rebuild difference — another scoring change, and one worth doing on its own
+so its effect can be measured separately. Left as it is, and written down in
+`src/grid.mjs` beside the function.
+
 ## Re-baking cells.json for vegetation only
 
 `data/cells.json` is normally not to be regenerated. Filling in EVT is the
@@ -697,9 +785,9 @@ tuned by hand against field experience, not derived from a spec.
 
 ## Deployment flow
 
-1. Local dev: `PUBLIC_MODE=false`, let a full load complete, export
-   `data/cells.json` from the info panel when the model or vegetation data
-   changes.
+1. Bake `data/cells.json` with `node scripts/build-cells.mjs` when the habitat
+   gate or the vegetation rules change. There is no longer an export button in
+   the app, and `PUBLIC_MODE=false` is for local development only.
 2. Commit `data/cells.json`, `index.html`, `scripts/`, `.github/` — push.
 3. Run the "Update weather" GitHub Action once manually with
    **grids = `past,forecast`** to seed `data/weather.json`; after that the two

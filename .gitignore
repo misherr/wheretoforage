@@ -2,3 +2,5 @@
 node_modules/
 .claude/
 data/weather.json.tmp
+data/cells.json.tmp
+data/*.checkpoint.json

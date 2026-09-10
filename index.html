@@ -196,17 +196,17 @@ import { LAPSE, adjustWeather, analyze, fullAnalysis, verdict } from './src/mode
 import { STAGE_KEYS, STAGE_LABELS, stageBreakdown, stageOf } from './src/model/phenology.mjs';
 import { hostOf, HOST_UNKNOWN, vegMult, vegSummary } from './src/model/vegetation.mjs';
 import { makeEntry, applyVeg } from './src/model/cell.mjs';
+// The cell lattice, the state outline and terrainAt() are shared with scripts/build-cells.mjs, which
+// bakes data/cells.json. A second copy of this geometry would drift, and the symptom is a blank map.
+import { DLAT, DLON, BLK, BLAT, BLON, inWA, cellCenter, cellKey,
+         terrainAt, pointKey as key } from './src/grid.mjs';
 /* ===================== CONFIG ===================== */
 const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
-const DLAT=0.0145, DLON=0.0214, BLK=4; // 1 sq mi cells at 47.5°N, grouped in 4x4 blocks
-const BLAT=DLAT*BLK, BLON=DLON*BLK;
 const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400; // local refine below 1 mi when zoomed way in
 const PAST_DAYS = 26, FC_DAYS = 8, ANCHOR = 0.2; // 26 days covers the 3–24 day trigger window; anchors every ~14 mi keep the load under Open-Meteo's free quota
-const WA = [[-123.32,49.0],[-117.03,49.0],[-117.04,46.0],[-116.92,45.99],[-118.98,45.99],[-119.5,45.92],[-120.4,45.7],[-121.2,45.7],[-121.9,45.68],[-122.4,45.57],[-122.8,45.63],[-123.1,46.17],[-123.6,46.25],[-124.1,46.28],[-124.15,46.9],[-124.25,47.3],[-124.45,47.8],[-124.75,48.4],[-123.6,48.2],[-123.1,48.18],[-122.75,48.15],[-122.9,48.45],[-123.2,48.6],[-123.32,48.8]];
 
 /* ===================== HELPERS ===================== */
 const $=id=>document.getElementById(id);
-function inWA(lat,lon){ let ins=false; for(let i=0,j=WA.length-1;i<WA.length;j=i++){ const [xi,yi]=WA[i],[xj,yj]=WA[j]; if((yi>lat)!==(yj>lat) && lon<(xj-xi)*(lat-yi)/(yj-yi)+xi) ins=!ins;} return ins; }
 function doyOf(d){ const s=new Date(d.getFullYear(),0,0); return Math.floor((d-s)/86400000); }
 function localISO(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
 const shortDay=iso=>new Date(iso+'T12:00:00').toLocaleDateString(undefined,{weekday:'narrow'});
@@ -265,7 +265,6 @@ function stageIcon(key){
 /* ===================== DATA ===================== */
 const wcache=new Map();   // weather anchors: key -> {w} | {failed:true}
 const ecache=new Map();   // elevation: key -> meters
-const key=(lat,lon)=>lat.toFixed(4)+','+lon.toFixed(4);
 let RH_OK=true;
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 let waitNote=null;
@@ -408,18 +407,6 @@ async function getWeather(anchors,onProgress){
   return anchors.map(a=>{const e=wcache.get(key(a[0],a[1])); return e&&e.w?e.w:null;});
 }
 const DOY=doyOf(new Date());
-/* terrain: slope & aspect from an elevation grid */
-function terrainAt(getE,lat,lon,d,dl){
-  dl=dl??d;
-  const eN=getE(lat+d,lon),eS=getE(lat-d,lon),eE=getE(lat,lon+dl),eW=getE(lat,lon-dl),e0=getE(lat,lon);
-  if(e0==null) return {slope:0,aspect:null};
-  const my=d*111320, mx=dl*111320*Math.cos(lat*Math.PI/180);
-  const dzdy=(eN!=null&&eS!=null)?(eN-eS)/(2*my):(eN!=null?(eN-e0)/my:(eS!=null?(e0-eS)/my:0));
-  const dzdx=(eE!=null&&eW!=null)?(eE-eW)/(2*mx):(eE!=null?(eE-e0)/mx:(eW!=null?(e0-eW)/mx:0));
-  const slope=Math.atan(Math.hypot(dzdx,dzdy))*180/Math.PI;
-  let aspect=slope<1.5?null:(Math.atan2(-dzdx,-dzdy)*180/Math.PI+360)%360; // direction the slope faces
-  return {slope,aspect};
-}
 const compass=a=>a==null?'flat':['N','NE','E','SE','S','SW','W','NW'][Math.round(a/45)%8];
 const snapAnchor=(lat,lon,sp)=>[Math.floor(lat/sp)*sp+sp/2,Math.floor(lon/sp)*sp+sp/2];
 /* Baked weather (data/weather.json) sits on a fixed lattice: the active anchors of a grid are the
@@ -501,8 +488,6 @@ function showTapHint(){ const el=$('tap-hint'); if(!el) return; el.classList.rem
 function dismissTapHint(){ const el=$('tap-hint'); if(!el||el.style.display!=='block') return; el.classList.add('fade'); localStorage.setItem('tapHintSeen','1'); setTimeout(()=>{ el.style.display='none'; },400); }
 let T=0; // selected forecast day 0..7
 const cells=new Map();       // 1-sq-mi cells: cellKey -> entry
-const cellKey=(la,lo)=>Math.floor(la/DLAT+1e-9)+':'+Math.floor(lo/DLON+1e-9);
-const cellCenter=(i,j)=>[+((i+0.5)*DLAT).toFixed(5),+((j+0.5)*DLON).toFixed(5)];
 
 /* ---- overlays ---- */
 const OVERLAYS={
@@ -775,14 +760,6 @@ async function loadFromStatic(gen){
   } else if(vegged) console.log('cells.json: vegetation type present for',(vegged-noType).toLocaleString(),'of',vegged.toLocaleString(),'forested cells');
 }
 function download(name,text){ const b=new Blob([text],{type:'application/json'}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(u); a.remove();},2000); }
-function exportCells(){
-  const names=[]; const idx=n=>{ let i=names.indexOf(n); if(i<0){ names.push(n); i=names.length-1; } return i; }; const rows=[];
-  for(const e of cells.values()){ if(e.elev==null||isNaN(e.elev)||e.size!==DLAT) continue; const v=e.veg;
-    rows.push([+e.lat.toFixed(5),+e.lon.toFixed(5),Math.round(e.elev),e.terr?+e.terr.slope.toFixed(1):0,e.terr&&e.terr.aspect!=null?Math.round(e.terr.aspect):-1,
-      v?[+v.treeFrac.toFixed(2),Math.round(v.canopy),+v.height.toFixed(1),v.host==null?-1:+v.host.toFixed(2),v.top.map(t=>[idx(t.name),+t.share.toFixed(2)])]:null]); }
-  download('cells.json',JSON.stringify({version:1,generated:new Date().toISOString(),dlat:DLAT,dlon:DLON,anchor:ANCHOR,names,rows}));
-  return rows.length;
-}
 function exportWeather(){
   const anchors=[]; let time=null; const r1=a=>(a||[]).map(v=>v==null?null:Math.round(v*10)/10);
   for(const [k,v] of wcache){ if(!v.w) continue; const [lat,lon]=k.split(',').map(Number); time=time||v.w.time; anchors.push({lat,lon,elev:v.w.elev,p:r1(v.w.p),tmax:r1(v.w.tmax),tmin:r1(v.w.tmin),et0:r1(v.w.et0),snow:r1(v.w.snow),rh:v.w.rh?v.w.rh.map(x=>x==null?null:Math.round(x)):null}); }
@@ -1029,8 +1006,7 @@ function showTop(){
 
 function showModel(){
   openSheet('How the forecast works','Model notes and what to trust',true);
-  const wire=()=>{ const a=$('btn-export-cells'),b=$('btn-export-weather'),n=$('export-note'); if(!a) return;
-    a.onclick=()=>{ if(loading||vegQueue.length){ n.textContent='Wait for the load (including the vegetation check) to finish first.'; return; } const k=exportCells(); n.textContent=`Exported ${k.toLocaleString()} cells. Put the file at data/cells.json in the repo.`; };
+  const wire=()=>{ const b=$('btn-export-weather'),n=$('export-note'); if(!b) return;
     b.onclick=()=>{ const k=exportWeather(); n.textContent=`Exported ${k} weather anchors. Put it at data/weather.json (the daily job will overwrite it).`; }; };
   setTimeout(wire,0);
   $('sheet-body').innerHTML=`<div class="model">
@@ -1047,8 +1023,8 @@ function showModel(){
 <li><b>Shrub-steppe and alpine</b> — scored near zero.</li></ul>
 <p>Each cell is also checked against LANDFIRE 2024 (USGS, 30 m): four samples per square mile of vegetation type, tree canopy cover and stand height. Cells with no tree cover drop out; young regenerating stands under ~25 ft are heavily marked down; and the named vegetation type sets a host-quality factor — Sitka spruce, silver fir, mountain hemlock and spruce-fir systems score full, Douglas-fir–hemlock moderate, hardwoods, shrub, harvested regeneration and non-forest low or zero. LANDFIRE is a model of vegetation, not a survey, so treat it as a strong hint — Use the topo (green = forest) and satellite basemaps to pick real stands of the host trees, then tap the exact spot for a point forecast.</p>
 <h3>Elevation, slope and aspect</h3><p>Weather is pulled at anchor points every ~14 mi (about 450 across the state's forest), which is the only API traffic — roughly a fifth of Open-Meteo's free daily quota per full load. Every cell and every tapped spot then gets its own elevation from open terrain tiles (Mapzen/AWS Terrarium, ~75 m resolution, decoded in the browser so it costs no API calls), and temperatures are shifted by the standard lapse rate (3.5°F per 1,000 ft). Slope and aspect come from the surrounding terrain: north-facing slopes are modeled ~2°F cooler and lose moisture ~18% slower, south-facing the reverse — so early-season north slopes and late-season sunny slopes score the way experienced foragers expect. Weather itself comes from NOAA/ECMWF model grids that assimilate the regional station network; the app does not read individual stations directly.</p>
-<h3>Data files</h3><p>For a public deployment the app reads two static files instead of calling any API from the phone: <code>data/cells.json</code> (elevation, slope, aspect and LANDFIRE vegetation for every cell — bake it once here) and <code>data/weather.json</code> (all weather anchors — refreshed once a day by the GitHub Actions job in the repo). Export after a complete live load.</p>
-<div class="actions"><button class="pill cap" id="btn-export-cells">Export cells.json</button><button class="pill" id="btn-export-weather">Export weather.json</button></div><p class="note" id="export-note"></p>
+<h3>Data files</h3><p>For a public deployment the app reads two static files instead of calling any API from the phone: <code>data/cells.json</code> (elevation, slope, aspect and LANDFIRE vegetation for every cell — baked by <code>scripts/build-cells.mjs</code>) and <code>data/weather.json</code> (all weather anchors — refreshed once a day by the GitHub Actions job in the repo). Export after a complete live load.</p>
+<div class="actions"><button class="pill" id="btn-export-weather">Export weather.json</button></div><p class="note" id="export-note"></p>
 <h3>Reading the number</h3><ul><li>Medium 25–44 · Good 45–64 · High 65–79 · Very high 80+</li><li>"Rising" means the trigger has happened but the flush hasn't surfaced yet.</li><li>"Past prime" means you'll mostly find aged, maggoty caps.</li></ul>
 <p>Sources of weather: Open-Meteo best-match model (NOAA GFS/HRRR blended with ICON, ERA5-based reanalysis for history). Mountain microclimates vary; treat any cell as a hypothesis, not a promise.</p></div>`;
 }
