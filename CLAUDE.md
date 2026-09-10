@@ -17,9 +17,10 @@ something here says "see X", read X before changing that area.
 index.html      the app: Leaflet map, canvas overlay, tap sheet, Top spots
 src/model/      the ecological model — the science, and nothing else
 src/grid.mjs    the cell lattice, the state outline, terrainAt, pointKey
-scripts/        build-cells.mjs (bakes cells), fetch-weather.mjs (archive), serve.mjs
+src/access.mjs  how you would reach a cell — a separate axis, never a score input
+scripts/        build-cells.mjs, build-access.mjs, fetch-weather.mjs, serve.mjs
 tests/model/    the model regression suite
-data/           cells.json, weather.json, evt-names.json — all checked in
+data/           cells.json, weather.json, evt-names.json, access.json — all checked in
 ```
 
 Washington is divided into ~48,000 one-square-mile cells. Each carries baked
@@ -54,6 +55,10 @@ that does not say so. File-by-file detail:
 7. **Read [`src/model/CLAUDE.md`](src/model/CLAUDE.md) before touching
    `src/model/`.** It carries that directory's rules, and
    `tests/model/purity.test.mjs` enforces them mechanically.
+8. **Access never touches a score.** It is a separate axis: its own module
+   outside `src/model/`, its own data file, its own section of the tap sheet, and
+   a *sort* option in Top spots rather than a filter. Tests assert the model
+   cannot even see it. [docs/access.md](docs/access.md)
 
 ## Critical invariants
 
@@ -78,6 +83,9 @@ while nothing throws.
   scored as though their trees were ideal, for days, invisibly.
 - **The model is deterministic and takes `doy` as an argument.** Nothing under
   `src/model/` may read the clock, the DOM or the network.
+- **Access data says what is *mapped*, never what exists.** A cell with nothing
+  mapped nearby reads as *unknown*, not as trailless — coverage on private
+  timberland is patchy, and absence of a mapped way is not absence of a way.
 
 ## Current phase
 
@@ -159,6 +167,7 @@ Baking data:
 node scripts/build-cells.mjs            # ~4 min: 305 terrain tiles, 579 LANDFIRE requests
 node scripts/build-cells.mjs --resume   # after a connect timeout
 node scripts/build-cells.mjs --region=coast
+node scripts/build-access.mjs           # ~316 Overpass tiles + USFS; --resume works
 ```
 
 `data/weather.json` maintains itself — `weather.yml` runs two crons, one for both
@@ -192,6 +201,7 @@ grids and one forecast-only. [docs/weather-archive.md](docs/weather-archive.md)
 | [verification.md](docs/verification.md) | checks that caught real bugs; traps not to rediscover |
 | [development.md](docs/development.md) | local setup, fetch-script environment variables |
 | [deploys.md](docs/deploys.md) | branches, staging, rollback |
+| [access.md](docs/access.md) | how a cell is reached, and why it never touches a score |
 | [`src/model/CLAUDE.md`](src/model/CLAUDE.md) | **rules for changing the model itself** |
 
 ## Repo

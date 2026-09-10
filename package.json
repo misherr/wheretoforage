@@ -6,7 +6,7 @@
   "scripts": {
     "test": "npm run test:model && npm run test:data",
     "test:model": "node --test tests/model/relational.test.mjs tests/model/snapshot.test.mjs tests/model/purity.test.mjs",
-    "test:data": "node --test scripts/fetch-weather.test.mjs scripts/evt-names.test.mjs scripts/build-cells.test.mjs",
+    "test:data": "node --test scripts/fetch-weather.test.mjs scripts/evt-names.test.mjs scripts/build-cells.test.mjs scripts/build-access.test.mjs",
     "snapshots:update": "node tests/model/update-snapshots.mjs"
   },
   "engines": {

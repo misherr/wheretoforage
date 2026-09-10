@@ -88,6 +88,22 @@ every file, what it does, and the reasoning that is not obvious from reading it.
   itself twice. Covers the quarter-point geometry against `vegFor`'s own
   expression, the lattice, the PNG decoder on all five filter types, provenance,
   the regional merge, and that a resumed bake equals an uninterrupted one.
+- **`src/access.mjs`** — the access vocabulary: what counts as a trail, a
+  drivable road or a rough way, the distance thresholds, and the labels. Shared
+  by the bake script and the app so the two cannot disagree. Deliberately
+  outside `src/model/`: access is not an input to any score. See
+  [access.md](access.md).
+- **`scripts/build-access.mjs`** — bakes `data/access.json` from OpenStreetMap
+  (via Overpass) and USFS roads and trails. Tiled, resumable, and it subdivides
+  an area when Overpass cannot answer for it, which is how the metro tiles get
+  done. `--region`/`--bbox` merge into the existing file.
+- **`scripts/build-access.test.mjs`** — no network. Covers the classification,
+  the polyline densification, the tiling, the regional merge, and the assertion
+  that matters most: that nothing under `src/model/` can see access at all.
+- **`data/access.json`** — per-cell distance to the nearest mapped trail, road
+  and rough way, keyed by cell index rather than row position. Optional at
+  runtime: without it every cell reads as unknown and the app is otherwise
+  unchanged.
 - **`scripts/serve.mjs`** — dependency-free static server for local
   development, `node scripts/serve.mjs [port]`. Exists because the app can no
   longer be opened over `file://`, and because it guarantees the `.mjs` MIME

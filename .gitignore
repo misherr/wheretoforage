@@ -4,3 +4,5 @@ node_modules/
 data/weather.json.tmp
 data/cells.json.tmp
 data/*.checkpoint.json
+data/access.json.tmp
+data/*.ckpt.json

@@ -137,6 +137,9 @@ a.lnk{color:var(--cap-light);text-decoration:none;font-weight:600}
 .actions{display:flex;gap:8px;margin-top:12px}
 
 /* top spots + model panels share sheet */
+.sortbar{display:flex;gap:6px;align-items:center;padding:8px 0 4px;font-size:12px;color:var(--pore-dim)}
+.sortbar .pill{font-size:12px;padding:4px 10px}
+.sortbar .pill.on{background:var(--cap);border-color:var(--cap);color:#1a1409}
 .spot{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);cursor:pointer}
 .spot .sc{width:50px;height:50px;border-radius:12px;display:grid;place-items:center;font-size:18px;font-weight:700;color:#fff;flex:none}
 .spot .m{flex:1;min-width:0}.spot .m b{display:block;font-size:14px;font-weight:600}.spot .m span{font-size:12px;color:var(--pore-dim)}
@@ -200,6 +203,8 @@ import { makeEntry, applyVeg } from './src/model/cell.mjs';
 // bakes data/cells.json. A second copy of this geometry would drift, and the symptom is a blank map.
 import { DLAT, DLON, BLK, BLAT, BLON, inWA, cellCenter, cellKey,
          terrainAt, pointKey as key } from './src/grid.mjs';
+// Access is a separate axis from suitability and never touches a score — see src/access.mjs.
+import { classifyAccess, accessSummary, accessRank, CLASSES as ACCESS_CLASSES } from './src/access.mjs';
 /* ===================== CONFIG ===================== */
 const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
 const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400; // local refine below 1 mi when zoomed way in
@@ -547,7 +552,7 @@ function progress(txt,frac){ const p=$('prog'); if(txt==null&&frac==null){p.styl
 function setStatus(t){ $('status').textContent=t; }
 
 /* ===================== STATIC DATA (baked cells + daily weather file) ===================== */
-const STATIC={cells:null,weather:null,tried:false}; let weatherAsOf=null, weatherSource='local';
+const STATIC={cells:null,weather:null,access:null,tried:false}; let weatherAsOf=null, weatherSource='local', accessAsOf=null;
 /* The dev-branch staging site has no weather job of its own — a second scheduled fetch would double
    the Open-Meteo spend — so it borrows production's file, which GitHub Pages serves with
    Access-Control-Allow-Origin: *. Its own committed data/weather.json is whatever dev last merged and
@@ -589,6 +594,16 @@ async function loadWeatherFile(){
 async function tryStatic(){
   if(STATIC.tried) return; STATIC.tried=true;
   try{ const r=await fetch('data/cells.json',{cache:'no-cache'}); if(r.ok) STATIC.cells=await r.json(); }catch(_){}
+  /* Access is optional: the app is fully functional without it, every cell just reads as unknown.
+     Keyed by cell index rather than by row position so a cells.json re-bake cannot silently shift
+     the association. */
+  try{ const r=await fetch('data/access.json',{cache:'no-cache'});
+    if(r.ok){ const j=await r.json(); STATIC.access=new Map();
+      for(const [i,jj,road,trail,rough] of j.rows) STATIC.access.set(i+':'+jj,{road,trail,rough});
+      accessAsOf=j.generated||null;
+      if(j.provenance&&j.provenance.cells_generated&&STATIC.cells&&j.provenance.cells_generated!==STATIC.cells.generated)
+        console.warn('access.json was baked against a different cells.json — some cells may read as unknown');
+    } }catch(_){}
   STATIC.weather=await loadWeatherFile();
   if(STATIC.weather){ if(isStaging) console.log(`staging: weather from ${weatherSource}`); ingestWeather(STATIC.weather); }
 }
@@ -756,6 +771,7 @@ async function loadFromStatic(gen){
       else { host=vg[3]<0?null:vg[3]; top=(vg[4]||[]).map(([ni,sh])=>({name:names[ni],share:sh,host:hostOf(names[ni])})); }
       const v={treeFrac:vg[0],canopy:vg[1],height:vg[2],host,top}; v.mult=vegMult(v); e.veg=v; vcache.set(key(lat,lon),v); applyVeg(e,DOY);
       if(v.treeFrac>0){ vegged++; if(v.host==null||!v.top.length) noType++; } }
+    if(STATIC.access){ const ix=cellKey(lat,lon); const a=STATIC.access.get(ix); if(a) e.access=a; }
     cells.set(cellKey(lat,lon),e);
     if(++i%4000===0){ progress(`Loading baked cells… ${i.toLocaleString()}`,0.2+0.8*i/j.rows.length); renderAll(); await sleep(0); }
   }
@@ -903,6 +919,7 @@ function openSheet(title,sub,tall){ $('sh-title').innerHTML=title; $('sh-sub').t
 function closeSheet(){ sheet.classList.remove('open'); document.body.classList.remove('sheet-open'); }
 $('close').onclick=closeSheet;
 $('grab').onclick=()=>sheet.classList.toggle('tall');
+let topSort='score';
 let ty=null; sheet.addEventListener('touchstart',e=>{ty=e.touches[0].clientY},{passive:true}); sheet.addEventListener('touchend',e=>{ if(ty==null)return; const dy=e.changedTouches[0].clientY-ty; if(dy>70&&$('sheet-body').scrollTop<=0) { if(sheet.classList.contains('tall')) sheet.classList.remove('tall'); else closeSheet(); } else if(dy<-70) sheet.classList.add('tall'); ty=null; },{passive:true});
 
 function bar(k,v,note){ return `<div class="k">${k}</div><div class="bg"><b style="width:${Math.round(v*100)}%"></b></div><div class="v">${Math.round(v*100)}</div>`; }
@@ -977,6 +994,15 @@ function showPoint(e,t){
         : `<dt>Types</dt><dd>${v.top.map(t=>`${Math.round(t.share*100)}% ${t.name}${t.host?' '+dim('('+t.host.lab+')'):''}`).join('<br>')}${noHost?'<br>'+dim('No sample qualified for a host-quality score here.'):''}</dd>`); }
   else if(!vegBroken&&hab.score>0.08) vegH=`<dt>Forest</dt><dd style="color:var(--pore-dim)">Vegetation check pending</dd>`;
   h+=`<div class="sec">Ecology</div><dl>${vegH}<dt>Hosts</dt><dd>${hab.hosts}</dd><dt>Season</dt><dd>${hab.seasonNote}</dd>${hab.elevNote?`<dt>Elevation</dt><dd>${hab.elevNote}</dd>`:''}</dl>`;
+  /* Getting there. Deliberately its own section and deliberately below the score: it is not an
+     input to the number above it, and the wording says what is MAPPED rather than what exists. */
+  {
+    // `dim` above is scoped to the vegetation branch, which may not have run for this cell.
+    const dim=t=>`<span style="color:var(--pore-dim)">${t}</span>`;
+    const ac=accessSummary(e.access);
+    h+=`<div class="sec">Getting there</div><dl><dt>Access</dt><dd>${ac.label}${ac.detail?' · '+dim(ac.detail):''}<br>${dim(ac.blurb)}</dd>`
+      +`<dt>Sources</dt><dd>${dim('OpenStreetMap and USFS roads and trails. Coverage on private timberland is uneven, so this describes the map, not the ground. It never affects the score.')}</dd></dl>`;
+  }
   if(e.w){
     const w=e.w,i=w.today; const days=[]; for(let d=Math.max(0,i-20);d<=i;d++) days.push(d); const mxp=Math.max(5,...days.map(d=>w.p[d]));
     h+=`<div class="sec">Rain, last 3 weeks (inches)</div><div class="rain">`+days.map(d=>`<div class="${w.p[d]>=10?'hi':''}"><b style="height:${Math.round(w.p[d]/mxp*38)}px"></b><span>${w.p[d]>=2.5?inch(w.p[d]).replace(/^0/,''):''}</span></div>`).join('')+`</div><p class="note">Left = 3 weeks ago, right = today. Lighter bars ≥0.4".</p>`;
@@ -997,20 +1023,31 @@ function showTop(){
   const pool=[...cells.values()].filter(e=>e.A&&!e.failed);
   const byK=new Map(); pool.forEach(e=>byK.set(key(e.lat,e.lon),e));
   const spread=(list,n,minMi)=>{ const out=[]; for(const e of list){ if(out.every(o=>dist([o.lat,o.lon],[e.lat,e.lon])>=minMi)) out.push(e); if(out.length>=n) break; } return out; };
-  const all=spread(pool.filter(e=>e.A.now.score>=25).sort((a,b)=>b.A.now.score-a.A.now.score),8,10);
+  /* Sorting only. accessRank never enters a score — it reorders a list of cells that were already
+     selected by score, so the same cells appear either way. */
+  const scoreSort=(a,b)=>b.A.now.score-a.A.now.score;
+  const accessSort=(a,b)=>accessRank(a.access)-accessRank(b.access)||scoreSort(a,b);
+  const qualified=pool.filter(e=>e.A.now.score>=25);
+  const all=spread(qualified.slice().sort(topSort==='access'?accessSort:scoreSort),8,10);
   const rising=spread(pool.filter(e=>e.A.best&&e.A.best.score>=45&&e.A.best.score>=e.A.now.score+10).sort((a,b)=>b.A.best.score-a.A.best.score),6,10);
   const near=userLoc? spread(pool.filter(e=>e.A.now.score>=25).sort((a,b)=>dist(userLoc,[a.lat,a.lon])-dist(userLoc,[b.lat,b.lon])),5,5):null;
   rising.slice(0,3).forEach(e=>{ const w=anchorHit(e.lat,e.lon).w;
     console.log(`[rising] ${e.lat}, ${e.lon}`,{fut:e.A.fut,habScore:e.hab.score,seasonNote:e.hab.seasonNote,'w.p':w&&w.p,'w.today':w&&w.today}); });
   openSheet('Where to go today',loading?'Still loading — best areas are scored first':'Best square miles across the state',true);
-  const row=(e,useBest)=>{const s=Math.round(useBest?e.A.best.score:e.A.now.score);const peak=useBest?' on '+fmtDay(e.A.best.date):(e.A.best.score>e.A.now.score+5?' · peaks '+fmtDay(e.A.best.date):'');return `<div class="spot" data-k="${key(e.lat,e.lon)}"${useBest?' data-rising="1"':''}><div class="sc" style="background:${colorOf(s)||'#556a55'}">${s}</div><div class="m"><b>${e.hab.zone}</b><span>${ft(e.elev).toLocaleString()} ft${e.terr&&e.terr.aspect!=null?' · '+compass(e.terr.aspect)+' face':''} · ${e.lat.toFixed(2)}, ${e.lon.toFixed(2)}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi':''}${peak}</span></div></div>`;};
+  const row=(e,useBest)=>{const s=Math.round(useBest?e.A.best.score:e.A.now.score);const peak=useBest?' on '+fmtDay(e.A.best.date):(e.A.best.score>e.A.now.score+5?' · peaks '+fmtDay(e.A.best.date):'');return `<div class="spot" data-k="${key(e.lat,e.lon)}"${useBest?' data-rising="1"':''}><div class="sc" style="background:${colorOf(s)||'#556a55'}">${s}</div><div class="m"><b>${e.hab.zone}</b><span>${ft(e.elev).toLocaleString()} ft${e.terr&&e.terr.aspect!=null?' · '+compass(e.terr.aspect)+' face':''} · ${e.lat.toFixed(2)}, ${e.lon.toFixed(2)}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi':''}${peak}${STATIC.access?' · '+ACCESS_CLASSES[classifyAccess(e.access)].label.toLowerCase():''}</span></div></div>`;};
   let h='';
+  const haveAccess=!!STATIC.access;
+  if(haveAccess) h+=`<div class="sortbar">Sort: `
+    +`<button class="pill${topSort==='score'?' on':''}" data-sort="score">Highest chance</button>`
+    +`<button class="pill${topSort==='access'?' on':''}" data-sort="access">Easiest access</button></div>`;
   if(!all.length) h+=`<div class="empty">Nothing at medium or better anywhere scored so far. ${rising.length?'But conditions are building — see below.':'Play the timeline to see if rain is coming.'}</div>`;
   else h+=`<div class="sec">Highest chance now</div>`+all.map(e=>row(e)).join('');
   if(near&&near.length) h+=`<div class="sec">Closest to you (medium or better)</div>`+near.map(e=>row(e)).join('');
   if(rising.length) h+=`<div class="sec">Coming up this week</div>`+rising.map(e=>row(e,true)).join('');
-  h+=`<p class="note">Each entry is one square mile; entries are kept at least 10 mi apart so you see distinct areas. Tap one to zoom there.</p>`;
+  h+=`<p class="note">Each entry is one square mile; entries are kept at least 10 mi apart so you see distinct areas. Tap one to zoom there.`
+    +`${haveAccess?' Access describes what is mapped in OpenStreetMap and USFS data, not what exists on the ground, and never changes a score.':''}</p>`;
   $('sheet-body').innerHTML=h;
+  $('sheet-body').querySelectorAll('.sortbar .pill').forEach(b=>b.onclick=()=>{ topSort=b.dataset.sort; showTop(); });
   $('sheet-body').querySelectorAll('.spot').forEach(el=>el.onclick=()=>{ const e=byK.get(el.dataset.k); map.setView([e.lat,e.lon],11); if(marker) marker.remove(); marker=L.circleMarker([e.lat,e.lon],{radius:7,color:'#fff',weight:2,fillColor:'#b8742c',fillOpacity:1}).addTo(map); if(el.dataset.rising){ const bt=bestDayIndex(e); quickPlayTo(bt,()=>showPoint(e,bt)); } else showPoint(e); });
 }
 
