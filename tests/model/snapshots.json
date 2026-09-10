@@ -302,9 +302,9 @@
       "best": 0
     },
     "youngPlantation": {
-      "score": 4.210499,
-      "habitat": 0.053238,
-      "vegMult": 0.05571,
+      "score": 21.052494,
+      "habitat": 0.266192,
+      "vegMult": 0.278552,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -312,7 +312,7 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 4.210499
+      "best": 21.052494
     },
     "sparseCanopy": {
       "score": 13.229889,

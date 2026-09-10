@@ -161,8 +161,17 @@ second growth at 61% cover scored exactly what 200 ft old growth at 55% did.
 
 The parts that matter if you retune it:
 
-- nothing under 5 m at any cover — boletes fruit from established
-  ectomycorrhizal root systems, and a stand that short has none;
+- young stands are **penalised, not excluded**. The first version put anything
+  under 5 m near zero at any cover, reasoning that boletes fruit from
+  established ectomycorrhizal root systems. That was stronger than the evidence
+  supports: *B. edulis* does fruit in young plantations and along brushy edges
+  near saplings, and an impression that it favours old growth partly reflects
+  where people search rather than where the fungus fruits. A 3 m clearcut is
+  still genuinely poor odds — 4.5x below a 33 m stand — but it is on the scale.
+  Only 66 of 39,981 forested cells are under 5 m, so this is a correctness
+  point about the term, not something visible on the map;
+- the three tallest anchors (18, 25, 33 m) are the calibrated ones and must not
+  drift when the young end is retuned; a test pins them;
 - the height reward keeps climbing to 33 m instead of saturating at 15 m
   (see the EVH limit above for why 33 and not higher);
 - moderate cover beats both extremes, and the preferred cover **falls and

@@ -164,8 +164,13 @@ export function hostOf(name) {
 
    The shape, and the reason for each number:
 
-   - Nothing under 5 m, whatever the cover. Boletus edulis fruits from established ectomycorrhizal
-     root systems; a stand at 16 ft is regenerating clearcut or a thicket and has none worth finding.
+   - Young stands are penalised, not excluded. The first version of this curve put anything under
+     5 m near zero at any cover, on the reasoning that Boletus edulis fruits from established
+     ectomycorrhizal root systems. That is stronger than the evidence supports: it does fruit in
+     young plantations and along brushy edges near saplings, and an impression that it favours old
+     growth partly reflects where people search rather than where the fungus fruits. A 3 m clearcut
+     is genuinely poor odds, so the term still discriminates hard — 4.5x between 3 m and 33 m — but
+     a young stand now sits on the scale instead of off it.
    - The height reward keeps climbing to 33 m instead of saturating at 15 m. 33 m is not a guess and
      not the height of real old growth: it is the 99th percentile of LANDFIRE EVH across Washington.
      The dataset tops out at 40 m, so the genuine 60 m Douglas-fir and hemlock this ought to reward
@@ -183,7 +188,9 @@ export function hostOf(name) {
    Cover modulates rather than gates (the 0.55 floor): getting the cover wrong should cost a mature
    stand something, not everything, because EVC is a 30 m average over a square mile and a single
    number cannot distinguish an even 60% from a mosaic of gaps and closed patches. */
-export const HEIGHT_QUALITY = [[0, 0], [5, 0.06], [8, 0.35], [12, 0.58], [18, 0.78], [25, 0.92], [33, 1.0]];
+/* The three tallest anchors — 18, 25 and 33 m — are the calibrated ones and must not drift: 33 m is
+   the EVH 99th percentile and 1.0 is defined there. Only the young end below 18 m has been relaxed. */
+export const HEIGHT_QUALITY = [[0, 0], [1, 0.10], [3, 0.22], [5, 0.30], [8, 0.45], [12, 0.62], [18, 0.78], [25, 0.92], [33, 1.0]];
 export const COVER_OPTIMUM = [[8, 60], [15, 56], [25, 48], [33, 44]];
 export const COVER_WIDTH = [[8, 17], [15, 20], [25, 26], [33, 30]];
 export const COVER_FLOOR = 0.55;

@@ -363,19 +363,53 @@ test('structure: a tall moderate-cover stand beats a tall dense one', () => {
   assert.ok(mod > dense, `tall+moderate ${mod} must beat tall+dense ${dense}`);
 });
 
-test('structure: a short open stand scores near zero', () => {
-  // Regenerating clearcut. B. edulis fruits from established ectomycorrhizal root systems, and a
-  // stand at 13 ft has none worth driving to.
-  assert.ok(scoreOf(F.shortOpenStand) < 0.05 * scoreOf(F.tallModerateStand),
-    'a 4 m stand at 15% cover must be a rounding error next to a mature one');
-  // Tied to the constant rather than to a number picked here: HEIGHT_QUALITY puts 0.06 at exactly
-  // 5 m, so nothing shorter can exceed that at any cover. Raising the 5 m knee fails this.
+test('structure: a young stand is penalised, not excluded', () => {
+  /* This assertion was reversed deliberately. It used to require a stand under 5 m to score "near
+     zero at any cover", on the reasoning that B. edulis fruits only from established
+     ectomycorrhizal root systems. That is stronger than the evidence supports — it does fruit in
+     young plantations and along brushy edges near saplings, and an impression that it favours old
+     growth partly reflects where people search. The invariant is now that a young stand is on the
+     scale and clearly below a mature one, rather than off the scale entirely. */
+  const young = M.structureFactor(70, 5);        // 16 ft plantation at good cover
+  const mature = M.structureFactor(50, 25);      // 82 ft stand at moderate cover
+  assert.ok(young > 0.15 * mature,
+    `a 5 m stand at 70% cover (${young.toFixed(3)}) must be a real number next to a mature stand ` +
+    `(${mature.toFixed(3)}), not an exclusion`);
+  assert.ok(young < 0.45 * mature,
+    `but it must still be plainly worse (${young.toFixed(3)} vs ${mature.toFixed(3)})`);
+
+  // Tied to the constant rather than a number picked here, so moving the knee has to be deliberate.
   const kneeAt5 = M.HEIGHT_QUALITY.find(([h]) => h === 5)[1];
-  assert.ok(kneeAt5 < 0.1, `the 5 m knee (${kneeAt5}) is not "near zero" any more`);
-  let worst = 0;
-  for (let c = 0; c <= 100; c++) worst = Math.max(worst, M.structureFactor(c, 4.9));
-  assert.ok(worst <= kneeAt5 + 1e-9,
-    `under 5 m must stay at or below the 5 m knee at every cover, got ${worst.toFixed(4)}`);
+  assert.ok(kneeAt5 > 0.15 && kneeAt5 < 0.5,
+    `the 5 m knee (${kneeAt5}) should be a penalty, not an exclusion and not a free pass`);
+});
+
+test('structure: a 3 m clearcut is still poor odds', () => {
+  // Relaxing the floor must not flatten it. A regenerating clearcut should remain one of the worst
+  // things the structure term can say about a cell, just not a disqualification.
+  const clearcut = M.structureFactor(40, 3), mature = M.structureFactor(50, 25);
+  assert.ok(clearcut < 0.3 * mature,
+    `a 3 m clearcut (${clearcut.toFixed(3)}) must stay well below a mature stand (${mature.toFixed(3)})`);
+  assert.ok(clearcut > 0.05 * mature,
+    `but not be excluded outright (${clearcut.toFixed(3)})`);
+  // and the ordering through the young end must be strict, not flat
+  let prev = -1;
+  for (const h of [1, 3, 5, 8, 12]) {
+    const v = M.structureFactor(50, h);
+    assert.ok(v > prev, `structure must rise strictly through the young end, stalled at ${h} m`);
+    prev = v;
+  }
+});
+
+test('structure: the calibrated tall anchors have not moved', () => {
+  /* 18, 25 and 33 m are the anchors set against the real EVH range — 33 m is its 99th percentile and
+     1.0 is defined there. Relaxing the young end must leave them exactly where they were, so this
+     pins them: a future change to the low end that drags the tall end with it fails here. */
+  const anchor = h => M.HEIGHT_QUALITY.find(([x]) => x === h);
+  assert.deepEqual(anchor(18), [18, 0.78], "the 18 m anchor moved");
+  assert.deepEqual(anchor(25), [25, 0.92], "the 25 m anchor moved");
+  assert.deepEqual(anchor(33), [33, 1.0], "the 33 m anchor moved — that is the EVH p99, not a free knob");
+  assert.equal(M.structureFactor(44, 33), 1, "the top of the scale must still be reachable");
 });
 
 test('structure: taller stands tolerate lower cover than short ones', () => {
