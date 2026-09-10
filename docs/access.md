@@ -125,6 +125,26 @@ takes one category's distance as another's way index and reports it with a
 straight face. A version the app does not know is refused and every cell reads
 as unknown.
 
+### The geometry URL carries the bake stamp, and that is load-bearing
+
+`access-geom.json` is fetched `force-cache` — "use the cached copy whatever its
+age" — which is right for a 5.5 MB file that never changes at a given URL and
+wrong for one that gets re-baked. On the first v4 deploy the server served
+`access.json` v4 while `access-geom.json` came back **v3 from the browser's disk
+cache**: 53,200 entries against 50,614, and it would have stayed that way
+indefinitely for any returning viewer.
+
+The format check turned that into "Could not load the line" instead of wrong
+lines drawn in silence, which is the honest failure — but the feature was still
+broken, and before that check existed the same staleness would have drawn a
+previous bake's geometry with no sign of trouble. So the URL is keyed on the
+bake's own `generated` stamp, which makes the cache entry change exactly when the
+data changes and `force-cache` both safe and optimal. `access.json` is fetched
+`no-cache`, so the stamp is always the live one.
+
+Caught by verifying the deployed site rather than the local one. A local server
+sends no far-future caching and had nothing stale to serve.
+
 ### What removing the clip and adding the figures actually cost
 
 Measured, not projected — the projection was made first from the v3 statewide

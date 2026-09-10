@@ -1067,13 +1067,24 @@ function showPoint(e,t){
    layer at a time: a second tap replaces the first rather than littering the map. Dashed, because a
    mapped way is not a promise about the ground. */
 let approachLayer=null, geomFetch=null;
-/* Geometry is 5.4 MB and only ever needed one line at a time, so it is fetched on the first request
-   rather than at load. Fetched once and kept; a failure leaves the rest of the app untouched. */
+/* Geometry is 5.5 MB and only ever needed one line at a time, so it is fetched on the first request
+   rather than at load. Fetched once and kept; a failure leaves the rest of the app untouched.
+
+   The URL carries the bake's own `generated` stamp, and that is load-bearing. `force-cache` means
+   "use the cached copy whatever its age", which is right for a large file that never changes at a
+   given URL and wrong for one that is re-baked: a returning viewer kept the PREVIOUS bake's
+   geometry forever. It happened on the first v4 deploy — access.json was v4 from the server while
+   access-geom.json came back v3 from the disk cache, 53,200 entries against 50,614. The format
+   check caught it and said "Could not load the line", which is the honest failure but still a
+   broken feature; before that check existed the same staleness would have drawn wrong lines with no
+   sign of trouble. Stamping the URL makes the cache entry change exactly when the data does, so
+   force-cache becomes both safe and optimal. access.json is fetched no-cache, so the stamp is
+   always the live one. */
 async function loadAccessGeom(){
   if(!STATIC.access) return null;
   if(STATIC.access.geom) return STATIC.access.geom;
   if(!geomFetch) geomFetch=(async()=>{
-    try{ const r=await fetch('data/access-geom.json',{cache:'force-cache'});
+    try{ const r=await fetch('data/access-geom.json?g='+encodeURIComponent(accessAsOf||''),{cache:'force-cache'});
       if(!r.ok) return null;
       const j=await r.json();
       // Same reasoning as access.json, one step further: a stale geometry file draws the wrong line.

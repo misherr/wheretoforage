@@ -955,3 +955,24 @@ test('elevation: the filtering is recorded in provenance, not applied invisibly'
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+test('cache: the geometry URL is stamped, or a re-bake never reaches a returning viewer', () => {
+  /* force-cache means "use the cached copy whatever its age". That is right for a 5.5 MB file that
+     never changes at a given URL and wrong for one that is re-baked: on the first v4 deploy the
+     server served access.json v4 while access-geom.json came back v3 from the disk cache -- 53,200
+     entries against 50,614 -- and it would have stayed that way indefinitely. The format check
+     turned that into "Could not load the line" rather than wrong lines drawn silently, but the
+     feature was still broken. The fix is to key the URL on the bake stamp. */
+  const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
+  const at = app.indexOf("'data/access-geom.json");
+  assert.ok(at > 0, 'the geometry fetch must still exist');
+  const line = app.slice(at, at + 160);
+  if (/force-cache/.test(line)) {
+    assert.match(line, /access-geom\.json\?g='\+encodeURIComponent\(accessAsOf/,
+      'force-cache is only safe on a URL that changes with the bake: ' + line.split('\n')[0]);
+  }
+  // and the stamp has to come from the file that is always revalidated
+  const acc = app.indexOf("fetch('data/access.json'");
+  assert.match(app.slice(acc, acc + 80), /cache:'no-cache'/,
+    'access.json must be fetched no-cache, or the stamp keying the geometry URL is itself stale');
+});
