@@ -45,6 +45,11 @@ export const OVERPASS_MIRRORS = process.env.OVERPASS_URL ? [process.env.OVERPASS
   'https://overpass.kumi.systems/api/interpreter',
   'https://overpass.private.coffee/api/interpreter',
   'https://overpass-api.de/api/interpreter',
+  /* Added after a statewide run stalled with all three of the above unusable at once: two would not
+     accept a connection and the third answered /status in 16 s and then timed out at 90 s on a
+     six-way query. This one answered the identical query in 1.8 s. Three mirrors was not enough
+     redundancy — the whole set can be down together. */
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
 ];
 const USFS_ROADS = 'https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_RoadBasic_01/MapServer';
 const USFS_TRAILS = 'https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_TrailNFSPublish_01/MapServer/0';
@@ -60,6 +65,7 @@ const TH_MAPPED_M = 150;      // a mapped trailhead node this close to a way bel
 const MIRROR_TRIES = 3;       // per area, across mirrors, before asking for a smaller area instead
 const MAX_SPLIT_DEPTH = 4;    // a 0.3 deg tile can become 256 pieces; metro tiles need about 16
 const ATTEMPTS = 6;           // USFS only — its endpoints are stable and do not need subdividing
+const PROBE_TIMEOUT = 45000;  // a mirror that cannot answer a six-way query in 45 s is not usable for a tile
 const REQ_TIMEOUT = 180000;
 const POLITE_MS = Number(process.env.OVERPASS_PAUSE || 1200);
 const TILE_WORKERS = Number(process.env.ACCESS_WORKERS || 4);
@@ -170,18 +176,30 @@ out geom;`;
 let osmRequests = 0, osmRetries = 0, usfsRequests = 0, usfsRetries = 0, osmBytes = 0, osmGaveUp = 0;
 let mirror = 0, mirrors = OVERPASS_MIRRORS;
 
-/* Probe the mirrors once and drop the ones that do not answer, KEEPING THE DECLARED ORDER. Do not
-   reorder by probe latency: /status is a static string, and answering it fast says nothing about how
-   long the server will queue a real query. Sorting that way put the flaky mirror first and produced
-   tile times between 8 s and 179 s unrelated to how much data the tile held. */
+/* Probe the mirrors once and drop the ones that cannot answer, KEEPING THE DECLARED ORDER. Do not
+   reorder by probe latency: sorting that way put the flaky mirror first and produced tile times
+   between 8 s and 179 s unrelated to how much data the tile held.
+
+   The probe is a REAL query, not /status. /status is a static string that a queue-saturated server
+   still serves: during one stalled run a mirror answered it (in 16 s) and then timed out at 90 s on
+   a query returning six ways, so it was kept as "up" while being useless, and the run spent every
+   tile paying two long timeouts before rotating off it. A tiny bbox costs one cheap request per
+   mirror per run and tests the thing we actually use. It is still a pass/fail liveness gate — the
+   survivors keep their declared order and nothing is ranked by how fast it answered. */
+const PROBE_QUERY = '[out:json][timeout:25];way["highway"="path"](48.70,-121.62,48.72,-121.60);out ids;';
 export async function pickMirrors(list = OVERPASS_MIRRORS, fetchImpl = fetch) {
   const alive = [];
   for (const url of list) {
     try {
-      const r = await fetchImpl(url.replace('/interpreter', '/status'),
-        { headers: { 'user-agent': UA }, signal: AbortSignal.timeout(40000) });
-      if (r.ok) { await r.text(); alive.push(url); }
-    } catch { /* unreachable; leave it out */ }
+      const r = await fetchImpl(url, {
+        method: 'POST', body: 'data=' + encodeURIComponent(PROBE_QUERY),
+        headers: { 'content-type': 'application/x-www-form-urlencoded', 'user-agent': UA },
+        signal: AbortSignal.timeout(PROBE_TIMEOUT),
+      });
+      if (!r.ok) { await r.text().catch(() => {}); continue; }
+      JSON.parse(await r.text());        // a proxy that returns HTML for a query is not a mirror
+      alive.push(url);
+    } catch { /* unreachable, saturated, or not really an Overpass endpoint; leave it out */ }
   }
   return alive;
 }

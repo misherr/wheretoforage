@@ -826,3 +826,55 @@ test('honesty: with no access data the sheet says nothing, rather than "nothing 
   assert.match(AC.CLASSES.unknown.blurb, /may mean no way exists, or simply that nobody has mapped one/,
     'and the unknown class keeps saying which of the two it cannot distinguish');
 });
+
+/* ===================== mirrors ===================== */
+
+test('mirrors: a saturated mirror is dropped, even though it answers /status', async () => {
+  /* This is what stalled a statewide run. /status is a static string a queue-saturated server still
+     serves: one mirror answered it in 16 s and then timed out at 90 s on a query returning six ways.
+     A /status probe kept it as "up", so every tile paid two long timeouts before rotating off it, and
+     tiny sub-areas were abandoned. The probe is a real query for that reason. */
+  const seen = [];
+  const fake = async (url, opts) => {
+    seen.push({url, method: opts && opts.method});
+    if (url.includes('saturated')) throw new Error('The operation was aborted due to timeout');
+    if (url.includes('dead')) { const e = new Error('connect'); e.cause = {code: 'UND_ERR_CONNECT_TIMEOUT'}; throw e; }
+    if (url.includes('proxy')) return { ok: true, text: async () => '<html>not overpass</html>' };
+    return { ok: true, text: async () => JSON.stringify({elements: []}) };
+  };
+  const alive = await A.pickMirrors([
+    'https://dead.example/api/interpreter',
+    'https://saturated.example/api/interpreter',
+    'https://proxy.example/api/interpreter',
+    'https://good.example/api/interpreter',
+  ], fake);
+  assert.deepEqual(alive, ['https://good.example/api/interpreter'],
+    'only a mirror that actually answered a query may survive the probe');
+  for (const c of seen) {
+    assert.equal(c.method, 'POST', 'the probe must be a real query, not a GET of /status');
+    assert.ok(!c.url.includes('/status'), 'probing /status is what let a saturated mirror through');
+  }
+});
+
+test('mirrors: the survivors keep their declared order, and there are four of them', () => {
+  /* Ranking by how fast a mirror answered put the flaky one first and produced tile times between
+     8 s and 179 s unrelated to how much data the tile held. The probe is a gate, not a ranking. */
+  const order = ['https://a/api/interpreter', 'https://b/api/interpreter', 'https://c/api/interpreter'];
+  const slowThenFast = async (url) => {
+    await new Promise(r => setTimeout(r, url.includes('//a/') ? 30 : 1));
+    return { ok: true, text: async () => JSON.stringify({elements: []}) };
+  };
+  return A.pickMirrors(order, slowThenFast).then(alive => {
+    assert.deepEqual(alive, order, 'the slowest responder must still come first if it was declared first');
+  });
+});
+
+test('mirrors: three was not enough redundancy', () => {
+  /* All three original mirrors were unusable simultaneously during one run. That is the reason for
+     the fourth, and dropping back to three would reintroduce a stall with no fallback. */
+  assert.ok(A.OVERPASS_MIRRORS.length >= 4,
+    'at least four mirrors: the first three have all been down at the same time');
+  assert.equal(new Set(A.OVERPASS_MIRRORS).size, A.OVERPASS_MIRRORS.length, 'no duplicates');
+  for (const m of A.OVERPASS_MIRRORS) assert.match(m, /^https:\/\/.*\/interpreter$/,
+    'every mirror must be an https interpreter endpoint: ' + m);
+});
