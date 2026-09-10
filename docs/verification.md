@@ -137,3 +137,52 @@ real — prefer them to "it loaded fine".
 - **A bare `git push --force` to `preview` can destroy someone else's commit** —
   it did nearly hide the staging repo's rogue weather job. Use
   `--force-with-lease`, and `git fetch preview` first or the lease goes stale.
+
+## Does the DEM garbage reach slope and aspect?
+
+Terrarium contains patches of garbage at water/land boundaries — see
+[terrain.md](terrain.md#the-terrarium-tiles-contain-garbage-at-waterland-boundaries).
+It corrupts `terrainAt` for 6 of 48,032 cells today. The check that measures it,
+rather than assuming either way:
+
+1. Fetch every z10 tile covering the state bbox **plus one tile of margin** —
+   de-spiking a pixel on a tile edge needs neighbours from the next tile over.
+2. Call a pixel an outlier when it sits more than 300 m from the median of its 8
+   neighbours (statewide p99.99 is 130 m, so 300 m is well clear of real ground).
+3. Recompute every cell's slope and aspect **twice from the same tiles**, once raw
+   and once with outliers replaced. Comparing raw against the checked-in
+   `cells.json` instead would confound the answer with the one-sided-gradient
+   edge cells — 1,192 of them, and all 1,192 turned out to have a neighbour that
+   is not itself a baked cell, which is the proof that the reconstruction is
+   faithful rather than a coincidence.
+4. Cross-check the affected sample points against **USGS 3DEP** (`epqs.nationalmap.gov`),
+   not against a median. This is what showed that a median cannot repair these
+   patches: it takes the worst error from 1,141 m only to 139 m, because the
+   garbage is 13–43 pixels wide.
+5. Then ask what the user would see. The two worst cells score **2 and 1** out of
+   100, because the LANDFIRE samples are 50% Open Water and the vegetation
+   multiplier is 0.15. A terrain error that cannot move a score is not worth a
+   re-bake.
+
+The habitat gate is the part worth re-checking after any elevation change:
+`everHabitat(lat, lon, elev, doy) > 0.08` decides whether a cell exists at all,
+so a garbage elevation can *create* a cell (46.26225,-123.5957, a Columbia River
+cell reading 965 m) or *delete* one (47.68325,-122.2475 reading -503 m). Count
+that directly; it does not show up in any distribution of the cells you have.
+
+## Driving the walk caveat by hand
+
+522 cells show the long-walk caveat. The longest is cell (3206, -5675), centre
+46.49425,-121.4343 — a PCT cell claiming 68.5 mi from its only mapped trailhead,
+with an unnamed trail 0.3 mi away in "Also nearby", which is the whole reason the
+caveat exists. With the app open:
+
+```js
+const e = [...cells.values()].find(c => Math.abs(c.lat-46.49425)<1e-6 && Math.abs(c.lon+121.4343)<1e-6);
+showPoint(e);
+document.querySelector('#sheet-body .caveat').textContent
+```
+
+The assertion in `build-access.test.mjs` proves the caveat is *rendered*; only
+opening it shows that it reads as a caveat and not as an error, and that the
+number above it is still 68.5 mi.

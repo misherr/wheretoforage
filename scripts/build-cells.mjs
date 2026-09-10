@@ -36,7 +36,7 @@ export const GENERATOR = 'scripts/build-cells.mjs';
 export const GENERATOR_VERSION = '1.0.0';
 
 /* ---- sources ---- */
-const ELEV_Z = 10;   // ~76 m per pixel at 47 degrees N — plenty for square-mile cells and slope/aspect
+const ELEV_Z = 10;   // 103 m per pixel at 47.5 degrees N — plenty for square-mile cells and slope/aspect
 export const TERRAIN_SOURCE = {
   name: 'Mapzen Terrarium (AWS elevation-tiles-prod)',
   url: 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
