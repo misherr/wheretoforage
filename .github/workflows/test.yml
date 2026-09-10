@@ -1,0 +1,47 @@
+name: Tests
+
+# The model has no other safety net. A bad scoring change does not look like a crash — it looks like
+# confident numbers on a map that nobody can eyeball for correctness, which is exactly how host
+# quality stayed inert statewide for days and got caught by a wasted field trip instead of by a test.
+# So the suite runs on every push and every pull request to dev and main, and a red run is visible on
+# the commit and on the PR before anything reaches production.
+#
+# Guarded to the production repo like every other workflow here, in the opposite direction from
+# staging-pages.yml. The staging mirror is a full copy of this tree, so an unguarded workflow runs
+# twice; weather.yml was unguarded once and duly spent a second day's Open-Meteo quota. Tests are
+# cheap rather than metered, but the guard also keeps a red X off the mirror where nobody is looking.
+# See CLAUDE.md, "Both workflows are repository-guarded, in opposite directions".
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: github.repository == 'misherr/wheretoforage'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      # No dependencies and no build step, so there is nothing to install and no lockfile to cache.
+      # `npm test` is test:model then test:data; split into two steps only so a red X names which
+      # half broke. test:data already reads the checked-in data/cells.json and data/evt-names.json,
+      # so a truncated or half-written artifact fails here too rather than only in the browser.
+      - name: Model regression suite
+        run: npm run test:model
+
+      - name: Data and script suites
+        run: npm run test:data
