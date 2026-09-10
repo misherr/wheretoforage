@@ -114,6 +114,9 @@ body.sheet-open #tap-hint{opacity:0}
 .elev-bars svg{width:16px;height:16px;flex:none}
 
 .sec{margin:14px 0 6px;font-size:12px;color:var(--pore-dim);font-weight:600}
+/* A figure that is real but should not be read at face value. Muted gold, reused from the score
+   bands rather than a new colour, and no icon: it is a caveat, not an error. */
+.caveat{color:var(--c-med)}
 .bars{display:grid;grid-template-columns:118px 1fr 40px;gap:6px 10px;align-items:center;font-size:13px}
 .bars .bg{height:8px;border-radius:4px;background:var(--moss-2);overflow:hidden}
 .bars .bg b{display:block;height:100%;border-radius:4px;background:var(--cap-light)}
@@ -293,7 +296,7 @@ async function fetchJSON(u,tries=9){
   const err=new Error('Weather service kept refusing ('+(lastReason||'rate limited')+')'); err.status=429; throw err;
 }
 /* ---- elevation from open terrain tiles (AWS Terrarium PNG, no key, no quota) ---- */
-const ELEV_Z=10; // ~76 m per pixel at 47°N — plenty for square-mile cells and slope/aspect
+const ELEV_Z=10; // 103 m per pixel at 47.5°N — plenty for square-mile cells and slope/aspect
 const tcache=new Map(); let tilesBroken=false;
 function tileXY(lat,lon,z){ const n=2**z; const x=(lon+180)/360*n; const lr=lat*Math.PI/180; const y=(1-Math.log(Math.tan(lr)+1/Math.cos(lr))/Math.PI)/2*n; return {x,y}; }
 function loadTileData(url,cache,k){ if(cache.has(k)) return cache.get(k);
@@ -1033,7 +1036,11 @@ function showPoint(e,t){
       h+=`<dt>Walk from the trailhead</dt><dd>${accessDistance(ac.walk)}`
         +(climb?` · ${climb}`:'')
         +`<br>${dim(ac.trailheadNote)}`
-        +(climb?'':`<br>${dim('Elevation gain unavailable for this stretch.')}`)+`</dd>`;
+        +(climb?'':`<br>${dim('Elevation gain unavailable for this stretch.')}`)
+        /* An implausibly long walk is still shown, with the number intact, and told what it is.
+           Capping it would replace a measurement with an invention; hiding it would imply nothing
+           is known about reaching this cell. */
+        +(ac.walkDoubt?`<br><span class="caveat">${ac.walkDoubt}</span>`:'')+`</dd>`;
     } else if(ac.straight!=null){
       h+=`<dt>Distance</dt><dd>${accessDistance(ac.straight)} ${dim('in a straight line')}<br>${dim(NO_TRAILHEAD_NOTE)}</dd>`;
     }
@@ -1173,7 +1180,7 @@ function showModel(){
 <li><b>Puget lowland</b> — weighted low: Douglas-fir is a poor host; look for planted spruce, pine and fir.</li>
 <li><b>Shrub-steppe and alpine</b> — scored near zero.</li></ul>
 <p>Each cell is also checked against LANDFIRE 2024 (USGS, 30 m): four samples per square mile of vegetation type, tree canopy cover and stand height. Cells with no tree cover drop out; young regenerating stands under ~25 ft are heavily marked down; and the named vegetation type sets a host-quality factor — Sitka spruce, silver fir, mountain hemlock and spruce-fir systems score full, Douglas-fir–hemlock moderate, hardwoods, shrub, harvested regeneration and non-forest low or zero. LANDFIRE is a model of vegetation, not a survey, so treat it as a strong hint — Use the topo (green = forest) and satellite basemaps to pick real stands of the host trees, then tap the exact spot for a point forecast.</p>
-<h3>Elevation, slope and aspect</h3><p>Weather is pulled at anchor points every ~14 mi (about 450 across the state's forest), which is the only API traffic — roughly a fifth of Open-Meteo's free daily quota per full load. Every cell and every tapped spot then gets its own elevation from open terrain tiles (Mapzen/AWS Terrarium, ~75 m resolution, decoded in the browser so it costs no API calls), and temperatures are shifted by the standard lapse rate (3.5°F per 1,000 ft). Slope and aspect come from the surrounding terrain: north-facing slopes are modeled ~2°F cooler and lose moisture ~18% slower, south-facing the reverse — so early-season north slopes and late-season sunny slopes score the way experienced foragers expect. Weather itself comes from NOAA/ECMWF model grids that assimilate the regional station network; the app does not read individual stations directly.</p>
+<h3>Elevation, slope and aspect</h3><p>Weather is pulled at anchor points every ~14 mi (about 450 across the state's forest), which is the only API traffic — roughly a fifth of Open-Meteo's free daily quota per full load. Every cell and every tapped spot then gets its own elevation from open terrain tiles (Mapzen/AWS Terrarium, ~100 m resolution, decoded in the browser so it costs no API calls), and temperatures are shifted by the standard lapse rate (3.5°F per 1,000 ft). Slope and aspect come from the surrounding terrain: north-facing slopes are modeled ~2°F cooler and lose moisture ~18% slower, south-facing the reverse — so early-season north slopes and late-season sunny slopes score the way experienced foragers expect. Weather itself comes from NOAA/ECMWF model grids that assimilate the regional station network; the app does not read individual stations directly.</p>
 <h3>Data files</h3><p>For a public deployment the app reads two static files instead of calling any API from the phone: <code>data/cells.json</code> (elevation, slope, aspect and LANDFIRE vegetation for every cell — baked by <code>scripts/build-cells.mjs</code>) and <code>data/weather.json</code> (all weather anchors — refreshed once a day by the GitHub Actions job in the repo). Export after a complete live load.</p>
 <div class="actions"><button class="pill" id="btn-export-weather">Export weather.json</button></div><p class="note" id="export-note"></p>
 <h3>Reading the number</h3><ul><li>Medium 25–44 · Good 45–64 · High 65–79 · Very high 80+</li><li>"Rising" means the trigger has happened but the flush hasn't surfaced yet.</li><li>"Past prime" means you'll mostly find aged, maggoty caps.</li></ul>

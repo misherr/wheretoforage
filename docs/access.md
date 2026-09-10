@@ -260,7 +260,8 @@ merging genuinely different ways, which is the failure the strictness is for.
 
 The largest gain from joining is not the drawn line at all: **cells with a walk
 figure went from 10,001 to 26,695**, because a cell in the middle of a route now
-inherits the trailhead on the segment at its far end.
+inherits the trailhead on the segment at its far end. (Of those, 10,604 are cells
+where the sheet *shows* the walk — see "Stored is not the same as shown" below.)
 
 ## How far along the way
 
@@ -361,16 +362,49 @@ What it did to the statewide figures:
 7,053 cells fell, 5,205 were unchanged and 4 rose by a metre or two. The 109
 cells still over 5,000 ft are not noise — they are the long-walk cases below.
 
-### The walk figure is unbounded, deliberately
+### The walk figure is unbounded, and past 10 miles it says so
 
 It is the distance along that way from the only trailhead mapped on it, which is
-what the data supports and what was asked for. Usually that is a short number —
-median **0.9 mi**, p90 7.1 mi — but the tail is long: 5.8% of shown walks exceed
-10 mi, 1.6% exceed 20 mi, and the longest is 68.5 mi, a cell in the middle of a
-route whose only mapped trailhead is at one end. Nobody walks that; there is
-almost certainly a nearer way in, unmapped or mapped without a trailhead. The
-sheet's "Also nearby" line is what surfaces the alternative. Capping the figure
-would hide the situation rather than describe it.
+what the data supports. Usually that is a short number, but the tail is long.
+Measured over the 10,604 walks the sheet actually shows:
+
+| | |
+| --- | --- |
+| median | 1.3 mi |
+| p90 | 6.6 mi |
+| p95 | 9.8 mi |
+| p99 | 23.4 mi |
+| max | 68.5 mi |
+| over 10 mi | 522 cells, 4.9% of shown walks |
+| over 20 mi | 143 cells, 1.4% |
+
+The 68.5 mi case is a cell in the middle of the PCT whose only mapped trailhead
+is at one end — and whose "Also nearby" line lists an unnamed trail **0.3 mi**
+away. Nobody walks 68 miles to pick boletes; the real approach is unmapped, or
+mapped without a trailhead.
+
+**So past 10 miles the sheet says so, and does not touch the number.**
+`WALK_DOUBT` is 16,093 m, the 95th percentile of shown walks and about four hours
+each way, and `walkDoubtNote` adds: *"Almost certainly not the real approach.
+This is the distance along the whole route from the only trailhead mapped on it,
+and a nearer way in is likely unmapped, or mapped without a trailhead."* Where
+another kind of way is within reach it adds *"Check Also nearby"*, and where
+nothing is — 168 of the 522 — it does not, because sending a reader to an empty
+section would be its own small lie.
+
+The three obvious alternatives are all worse:
+
+- **Capping it** replaces a measurement with an invention, and "10+ mi" hides
+  that the honest answer is 68.
+- **Hiding it** leaves the cell looking as though nothing is known about reaching
+  it, which is false — the way, its name and its trailhead are all known.
+- **Preferring a way with a nearer trailhead** would change which way the sheet
+  names and which line it draws, and only the nearest way *per category* is
+  stored, so the nearer trailhead usually is not in the data at all. Noted in
+  [ROADMAP.md](../ROADMAP.md), not done.
+
+The label is styled as a caveat rather than an error, because the figure is not
+an error. It is a correct answer to a question nobody asked.
 
 ## The external link
 
@@ -425,8 +459,18 @@ from more than one mapped way. 28,070 routes (55.5%) are named or numbered;
 43,498 carry an OSM way id and so get an exact external link. 17,136 routes have
 a trailhead, mapped or inferred, and **26,695 cells carry a walk figure** against
 10,001 under the pre-join bake: joining is what earns that, because a cell in the
-middle of a route now inherits the trailhead on the segment at its end. 26,691 of
-those also carry a climb. 618,866 geometry points are stored, and elevation came
+middle of a route now inherits the trailhead on the segment at its end. 33,416
+walk values are stored in all, since a cell can have one per category, and 33,389
+of them carry a climb.
+
+**Stored is not the same as shown, and the difference is large.** `accessDetail`
+reports only the *primary* category — the nearest way, which is what the class and
+the drawn line are about — so the sheet displays a walk for **10,604 cells**, not
+26,695. The other 16,091 have a walk sitting in a category the sheet is not
+talking about: a cell 200 m from an unnamed track with no trailhead and 900 m from
+a named trail with one shows the track. That is the right default and a real
+limitation; it is in [ROADMAP.md](../ROADMAP.md) rather than fixed here, because
+changing it changes which way the sheet names. 618,866 geometry points are stored, and elevation came
 from 271 terrain tiles with no failures.
 
 **0 areas were abandoned**, against 20 in the previous run, and only one tile

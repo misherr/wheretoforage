@@ -209,7 +209,7 @@ export function accessDetail(d, ways, geoms) {
   const cat = primaryCat(d);
   const out = { cls, label: CLASSES[cls].label, blurb: CLASSES[cls].blurb, cat, wayIndex: -1,
                 way: null, wayName: null, straight: null, walk: null, gain: null,
-                trailheadNote: null, others: [] };
+                trailheadNote: null, walkDoubt: null, others: [] };
   if (!d || !cat) return out;
   out.straight = d[cat];
   const wi = d[cat + 'Way'];
@@ -233,6 +233,9 @@ export function accessDetail(d, ways, geoms) {
     out.others.push({ cat: c, m: d[c], name: w ? wayLabel(w) : null });
   }
   out.others.sort((a, b) => a.m - b.m);
+  /* After the others, because whether there is anything else nearby changes what the note can
+     honestly tell you to do about it. */
+  out.walkDoubt = walkDoubtNote(out.walk, out.others.length > 0);
   return out;
 }
 
@@ -285,6 +288,24 @@ export function gainLabel(m) {
   const ft = m * 3.28084;
   if (ft < 50) return 'negligible climb';
   return Math.round(ft / 50) * 50 + ' ft of climb';
+}
+
+/* Past this, a walk figure stops describing a walk and starts describing the data. The figure is
+   real — it is the distance along the route from the only trailhead mapped on it — but at this
+   length nobody is walking it to pick mushrooms, and reading it as an approach would be a mistake.
+
+   10 miles is the 95th percentile of the walks the sheet actually shows: 522 of 10,604 statewide,
+   against a median of 1.3 mi. It is also about four hours each way on a trail.
+
+   It is a label, not a cap. Capping would replace a measured number with a made-up one; hiding it
+   would leave the cell looking as though nothing is known about reaching it, which is false. Both
+   would be less honest than saying what the number is and what it probably means. */
+export const WALK_DOUBT = 16093;                     // metres — 10 miles
+export function walkDoubtNote(m, hasOthers) {
+  if (m == null || m < WALK_DOUBT) return null;
+  return 'Almost certainly not the real approach. This is the distance along the whole route from the '
+    + 'only trailhead mapped on it, and a nearer way in is likely unmapped, or mapped without a '
+    + 'trailhead.' + (hasOthers ? ' Check "Also nearby".' : '');
 }
 
 /* What to say when there is no trailhead to measure from. Computing a distance from an arbitrary end

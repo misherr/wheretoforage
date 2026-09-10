@@ -87,7 +87,9 @@ while nothing throws.
   mapped nearby reads as *unknown*, not as trailless — coverage on private
   timberland is patchy, and absence of a mapped way is not absence of a way.
   The same applies to the walk and the climb: with no trailhead to measure from
-  they are reported as unavailable, never computed from an arbitrary point.
+  they are reported as unavailable, never computed from an arbitrary point, and
+  past `WALK_DOUBT` (10 mi) a walk is **labelled, never capped or hidden** — the
+  figure is real and the caveat says what it probably means.
 
 ## Current phase
 
@@ -210,6 +212,7 @@ grids and one forecast-only. [docs/weather-archive.md](docs/weather-archive.md)
 | [development.md](docs/development.md) | local setup, fetch-script environment variables |
 | [deploys.md](docs/deploys.md) | branches, staging, rollback |
 | [access.md](docs/access.md) | how a cell is reached, and why it never touches a score |
+| [ROADMAP.md](ROADMAP.md) | work deliberately not done, and the reasoning for leaving it |
 | [`src/model/CLAUDE.md`](src/model/CLAUDE.md) | **rules for changing the model itself** |
 
 ## Repo

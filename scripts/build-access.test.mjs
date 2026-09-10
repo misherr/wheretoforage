@@ -976,3 +976,70 @@ test('cache: the geometry URL is stamped, or a re-bake never reaches a returning
   assert.match(app.slice(acc, acc + 80), /cache:'no-cache'/,
     'access.json must be fetched no-cache, or the stamp keying the geometry URL is itself stale');
 });
+
+/* ===================== an implausibly long walk =====================
+   The walk figure is unbounded by design: it says what is mapped. Past a point that stops being a
+   useful reading of the ground and becomes a statement about the data, and the sheet has to say so
+   without capping the number or hiding it. */
+
+const longWalkRow = (walkM, others) => ({
+  trail: 400, trailWay: 0, trailWalk: walkM, trailGain: 900,
+  road: others ? 1200 : -1, roadWay: others ? 1 : -1, roadWalk: -1, roadGain: -1,
+  rough: -1, roughWay: -1, roughWalk: -1, roughGain: -1,
+});
+const longWalkWays = [['Pacific Crest Trail', null, 'path', 1, AC.TRAILHEAD_MAPPED, 12345, 4],
+                      ['Forest Road 24', null, 'track', 2, AC.TRAILHEAD_NONE, null, 1]];
+
+test('walk: an implausibly long walk keeps its number and gets labelled', () => {
+  const det = AC.accessDetail(longWalkRow(110000, true), longWalkWays);
+  assert.equal(det.walk, 110000, 'the measured number survives intact — no cap, no rounding away');
+  assert.equal(det.gain, 900, 'and the climb with it');
+  assert.ok(det.walkDoubt, 'a 68 mi walk must carry a caveat');
+  assert.match(det.walkDoubt, /not the real approach/i, 'say plainly what it probably is not');
+  assert.match(det.walkDoubt, /unmapped|without a trailhead/i, 'and why the data looks like this');
+  assert.match(det.walkDoubt, /Also nearby/, 'point at the alternative, since there is one here');
+});
+
+test('walk: a normal walk gets no caveat', () => {
+  /* The median shown walk is 1.3 mi. If the caveat appeared on those it would be noise, and the
+     honest notes on this sheet only work while every one of them means something. */
+  for (const m of [0, 500, 3000, 12000, AC.WALK_DOUBT - 1]) {
+    const det = AC.accessDetail(longWalkRow(m, true), longWalkWays);
+    assert.equal(det.walkDoubt, null, m + ' m must not be flagged');
+  }
+  const det = AC.accessDetail(longWalkRow(AC.WALK_DOUBT, true), longWalkWays);
+  assert.ok(det.walkDoubt, 'the threshold itself is flagged');
+});
+
+test('walk: the caveat does not point at "Also nearby" when nothing is nearby', () => {
+  /* A third of the flagged cells have no other category within reach. Telling those readers to
+     check a list that is not on the page would be a small lie in a note whose whole job is to be
+     straight with them. */
+  const det = AC.accessDetail(longWalkRow(110000, false), longWalkWays);
+  assert.ok(det.walkDoubt, 'still flagged');
+  assert.equal(det.others.length, 0, 'nothing else is mapped in reach');
+  assert.ok(!/Also nearby/.test(det.walkDoubt), 'so do not send them to a section that is empty');
+});
+
+test('walk: the caveat is a label, never a filter', () => {
+  /* Guards the decision, not the wording: suppressing or capping the figure would both be easier to
+     write than this and both would be less honest. */
+  const long = AC.accessDetail(longWalkRow(110000, true), longWalkWays);
+  const short = AC.accessDetail(longWalkRow(2000, true), longWalkWays);
+  assert.equal(long.walk, 110000);
+  assert.equal(long.wayName, short.wayName, 'the way is still named');
+  assert.equal(long.wayIndex, short.wayIndex, 'the line can still be drawn');
+  assert.equal(long.trailheadNote, short.trailheadNote, 'and it still says where it measured from');
+  assert.ok(AC.accessDistance(long.walk).length > 0, 'and the distance still formats');
+  assert.ok(AC.WALK_DOUBT > 0 && Number.isFinite(AC.WALK_DOUBT), 'the threshold is a real distance');
+});
+
+test('walk: the sheet renders the caveat where the figure is', () => {
+  const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
+  const at = app.indexOf('Walk from the trailhead');
+  assert.ok(at > 0, 'the walk block must still exist');
+  const block = app.slice(at, at + 900);
+  assert.match(block, /ac\.walkDoubt/, 'the caveat has to be rendered, not just computed');
+  assert.match(block, /accessDistance\(ac\.walk\)/, 'and the number stays on the line above it');
+  assert.match(app, /\.caveat\{/, 'with a style of its own, so it reads as a caveat');
+});
