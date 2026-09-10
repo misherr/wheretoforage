@@ -164,7 +164,8 @@ export function encodeGeom(coords) {
   return out;
 }
 
-/* ways[k] = [name, ref, type, catIndex, trailheadKind]  — geometry lives in a SEPARATE file.
+/* ways[k] = [name, ref, type, catIndex, trailheadKind, osmId, segments]  — geometry lives in a
+   SEPARATE file.
    Splitting them is not tidiness. Everything the tap sheet needs to NAME a route is a few bytes;
    the polyline to draw it is most of the file. Measured: 4.12 MB of names and distances against
    5.39 MB of geometry. Loading the second up front would mean every viewer downloading 5 MB to draw
@@ -174,17 +175,29 @@ export function decodeWay(w, geomFlat) {
   if (!w) return null;
   return { name: w[0] || null, ref: w[1] || null, type: w[2], cat: CATS[w[3]],
            trailhead: w[4] || TRAILHEAD_NONE,
+           osmId: w[5] != null && w[5] > 0 ? w[5] : null,
+           segments: w[6] || 1,
            geom: geomFlat ? decodeGeom(geomFlat) : null };
 }
 
-/* rows[k] = [i, j, dRoad, wRoad, walkRoad, dTrail, wTrail, walkTrail, dRough, wRough, walkRough]
-   -1 anywhere means "not found within CAP" / "no way" / "walk unknown". */
+/* rows[k] = [i, j] then four numbers per category: distance, way index, walk, elevation gain.
+   -1 anywhere means "not found within CAP" / "no way" / "not computable". Gain is only ever present
+   alongside a walk, because both are measured from a trailhead and mean nothing without one. */
+/* The stored format version. The row stride and the way-entry width have both changed once, and a
+   file from the other side of that change decodes into confident nonsense rather than failing: v3
+   rows are 3 wide per category, so a v4 reader takes one category's distance as another's way index.
+   The app refuses a version it does not know and reads every cell as unknown instead, which is the
+   answer it would give with no file at all. */
+export const ACCESS_FORMAT = 4;
+export const ROW_STRIDE = 4;
 export function decodeRow(row) {
   const d = {};
   CATS.forEach((c, n) => {
-    d[c] = row[2 + n * 3];
-    d[c + 'Way'] = row[3 + n * 3];
-    d[c + 'Walk'] = row[4 + n * 3];
+    const at = 2 + n * ROW_STRIDE;
+    d[c] = row[at];
+    d[c + 'Way'] = row[at + 1];
+    d[c + 'Walk'] = row[at + 2];
+    d[c + 'Gain'] = row[at + 3];
   });
   return d;
 }
@@ -195,7 +208,8 @@ export function accessDetail(d, ways, geoms) {
   const cls = classifyAccess(d);
   const cat = primaryCat(d);
   const out = { cls, label: CLASSES[cls].label, blurb: CLASSES[cls].blurb, cat, wayIndex: -1,
-                way: null, wayName: null, straight: null, walk: null, trailheadNote: null, others: [] };
+                way: null, wayName: null, straight: null, walk: null, gain: null,
+                trailheadNote: null, others: [] };
   if (!d || !cat) return out;
   out.straight = d[cat];
   const wi = d[cat + 'Way'];
@@ -206,6 +220,8 @@ export function accessDetail(d, ways, geoms) {
     const walk = d[cat + 'Walk'];
     if (walk != null && walk >= 0 && out.way.trailhead) {
       out.walk = walk;
+      const gain = d[cat + 'Gain'];
+      if (gain != null && gain >= 0) out.gain = gain;
       out.trailheadNote = TRAILHEAD_NOTE[out.way.trailhead];
     }
   }
@@ -259,4 +275,45 @@ export function osmCategory(tags) {
 export function osmType(tags) {
   if (!tags) return 'unknown';
   return tags.highway || tags['abandoned:highway'] || tags['disused:highway'] || tags['razed:highway'] || 'unknown';
+}
+
+/* Feet, because the rest of the app is in feet. Rounded coarsely: the terrain tiles are ~76 m per
+   pixel and the geometry is simplified to 25 m, so a figure to the nearest foot would be false
+   precision. */
+export function gainLabel(m) {
+  if (m == null || m < 0) return null;
+  const ft = m * 3.28084;
+  if (ft < 50) return 'negligible climb';
+  return Math.round(ft / 50) * 50 + ' ft of climb';
+}
+
+/* What to say when there is no trailhead to measure from. Computing a distance from an arbitrary end
+   of the way would be worse than saying nothing: it would look like an answer. */
+export const NO_TRAILHEAD_NOTE =
+  'No trailhead is mapped on this way, so there is nowhere to measure a walk from — '
+  + 'the figure above is a straight line from the cell to the way.';
+
+/* ===================== external links =====================
+
+   AllTrails is deliberately absent. Every AllTrails URL form — a trail page, the explore map with
+   bounds, and their search — answers HTTP 403 to any programmatic request, so none of it can be
+   verified to work, and their per-trail pages need a slug this data does not contain. Linking their
+   search with a trail name would be exactly the "may land on the wrong trail" case to avoid: the
+   same name recurs across the state, and a wrong trail is worse than no link.
+
+   So: the OpenStreetMap way page where the way came from OSM, because that identifies the *exact*
+   way the sheet just named (verified 200 against real way ids), and CalTopo centred on the cell
+   otherwise, because it works for USFS features too and a topo view is what you want for an
+   approach. Gaia GPS was tried and its map deep link did not resolve. */
+export function externalLinks(way, lat, lon) {
+  const out = [];
+  if (way && way.osmId) {
+    out.push({ label: 'This way on OpenStreetMap',
+               url: 'https://www.openstreetmap.org/way/' + way.osmId,
+               note: 'the exact way named above' });
+  }
+  out.push({ label: 'Open in CalTopo',
+             url: 'https://caltopo.com/map.html#ll=' + lat.toFixed(5) + ',' + lon.toFixed(5) + '&z=14&b=t',
+             note: 'topo map centred on this cell' });
+  return out;
 }

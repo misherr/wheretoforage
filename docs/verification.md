@@ -69,6 +69,27 @@ real — prefer them to "it loaded fine".
 
 ## Traps worth not rediscovering
 
+- **Open the tap sheet from the console.** It is the part of the app no test
+  reaches — a `dim is not defined` crash in the access block got through the
+  whole suite and was only found by tapping a cell. `showPoint` and the Leaflet
+  map are exposed for this:
+  ```js
+  const e = cells.get('3361:-5681');          // any cell index, i:j
+  leafletMap.setView([e.lat, e.lon], 13); showPoint(e);
+  document.getElementById('sheet-body').innerText
+  ```
+  To check the drawn approach is the whole route rather than a fragment, click
+  the link and measure what landed on the map:
+  ```js
+  document.querySelector('#sheet-body a.drawway').click();
+  // after it loads:
+  let pl; leafletMap.eachLayer(l => { if (l.getLatLngs && !pl) pl = l; });
+  const p = pl.getLatLngs(); let m = 0;
+  for (let i = 1; i < p.length; i++) m += p[i-1].distanceTo(p[i]);
+  console.log(p.length, 'points,', (m/1609.34).toFixed(2), 'mi');
+  ```
+  Baker Lake Trail is the case that proves the joining: it was two ways of
+  7.18 mi and 2.37 mi, and draws as one 9.54 mi route with 68 points.
 - **The console verification snippets need the names exposed deliberately.** The
   inline script is a module, so its scope is not the global scope and
   `anchorHit`, `cells`, `wcache`, `STATIC`, `snapLattice`, `key`, `WBASE`,

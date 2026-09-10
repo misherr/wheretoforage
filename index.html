@@ -205,8 +205,9 @@ import { makeEntry, applyVeg } from './src/model/cell.mjs';
 import { DLAT, DLON, BLK, BLAT, BLON, inWA, cellCenter, cellKey,
          terrainAt, pointKey as key } from './src/grid.mjs';
 // Access is a separate axis from suitability and never touches a score — see src/access.mjs.
-import { classifyAccess, accessDetail, accessRank, accessDistance, decodeRow as decodeAccessRow,
-         decodeWay as decodeAccessWay, CLASSES as ACCESS_CLASSES } from './src/access.mjs';
+import { classifyAccess, accessDetail, accessRank, accessDistance, gainLabel, externalLinks,
+         NO_TRAILHEAD_NOTE, decodeRow as decodeAccessRow, decodeWay as decodeAccessWay,
+         CLASSES as ACCESS_CLASSES, ACCESS_FORMAT } from './src/access.mjs';
 /* ===================== CONFIG ===================== */
 const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
 const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400; // local refine below 1 mi when zoomed way in
@@ -601,6 +602,13 @@ async function tryStatic(){
      the association. */
   try{ const r=await fetch('data/access.json',{cache:'no-cache'});
     if(r.ok){ const j=await r.json();
+      /* A file from a different format version is worse than no file: the row stride has changed
+         once, and a mismatched reader takes one category's distance as another's way index and
+         reports it with a straight face. Refuse it and let every cell read as unknown. */
+      if(j.version!==ACCESS_FORMAT){
+        console.warn(`access.json is format v${j.version}, this build reads v${ACCESS_FORMAT} — ignoring it; every cell will read as unknown`);
+        throw new Error('access format');
+      }
       /* Geometry is shared by way rather than duplicated per cell — the difference between an 8 MB
          file and a 47 MB one. Rows carry indices into j.ways; decoding is deferred to the tap so
          48,000 polylines are never built up front. */
@@ -1003,25 +1011,40 @@ function showPoint(e,t){
   h+=`<div class="sec">Ecology</div><dl>${vegH}<dt>Hosts</dt><dd>${hab.hosts}</dd><dt>Season</dt><dd>${hab.seasonNote}</dd>${hab.elevNote?`<dt>Elevation</dt><dd>${hab.elevNote}</dd>`:''}</dl>`;
   /* Getting there. Deliberately its own section and deliberately below the score: it is not an
      input to the number above it, and the wording says what is MAPPED rather than what exists. */
-  {
+  if(STATIC.access){
+    /* Only when there is access data at all. With no file — or one this build cannot read — the
+       section is omitted entirely rather than rendered as "nothing is mapped within about a mile",
+       which would be a claim about a lookup that never happened. */
     // `dim` above is scoped to the vegetation branch, which may not have run for this cell.
     const dim=t=>`<span style="color:var(--pore-dim)">${t}</span>`;
-    const ac=accessDetail(e.access,STATIC.access&&STATIC.access.ways,STATIC.access&&STATIC.access.geom);
+    const ac=accessDetail(e.access,STATIC.access.ways,STATIC.access.geom);
     /* Name the route rather than only classifying it: "Forest Road 2703, 0.4 mi" is actionable and
        "trail mapped" is not. Naming it changes nothing about the honesty framing — a named way is
        still only MAPPED here, not confirmed passable, gated, or open this season. */
-    const walkBit = ac.walk!=null
-      ? `${accessDistance(ac.walk)} along it ${dim(ac.trailheadNote)}`
-      : (ac.straight!=null ? `${accessDistance(ac.straight)} away ${dim('(straight line — no trailhead mapped on this way)')}` : '');
-    const nameBit = ac.wayName
-      ? `<b>${ac.wayName}</b>${walkBit?' · '+walkBit:''}`
-      : ac.label;
-    h+=`<div class="sec">Getting there</div><dl><dt>Access</dt><dd>${nameBit}<br>${dim(ac.blurb)}`
+    h+=`<div class="sec">Getting there</div><dl><dt>Access</dt><dd>`
+      +(ac.wayName?`<b>${ac.wayName}</b>`:ac.label)
+      +(ac.way&&ac.way.segments>1?' '+dim('('+ac.way.segments+' mapped segments joined)'):'')
+      +`<br>${dim(ac.blurb)}`
       +(ac.wayIndex>=0?` <a href="#" class="drawway">Show the approach on the map</a>`:'')+`</dd>`;
+    /* The walk. Where there is no trailhead to measure from, say so rather than computing a distance
+       from an arbitrary end of the way — an invented start point would look like an answer. */
+    if(ac.walk!=null){
+      const climb = ac.gain!=null ? gainLabel(ac.gain) : null;
+      h+=`<dt>Walk from the trailhead</dt><dd>${accessDistance(ac.walk)}`
+        +(climb?` · ${climb}`:'')
+        +`<br>${dim(ac.trailheadNote)}`
+        +(climb?'':`<br>${dim('Elevation gain unavailable for this stretch.')}`)+`</dd>`;
+    } else if(ac.straight!=null){
+      h+=`<dt>Distance</dt><dd>${accessDistance(ac.straight)} ${dim('in a straight line')}<br>${dim(NO_TRAILHEAD_NOTE)}</dd>`;
+    }
     if(ac.others.length) h+=`<dt>Also nearby</dt><dd>${ac.others.map(o=>`${o.name||o.cat} ${accessDistance(o.m)}`).join('<br>')}</dd>`;
+    if(ac.way){
+      const links=externalLinks(ac.way,e.lat,e.lon);
+      h+=`<dt>Elsewhere</dt><dd>${links.map(l=>`<a href="${l.url}" target="_blank" rel="noopener">${l.label}</a> ${dim('— '+l.note)}`).join('<br>')}</dd>`;
+    }
     h+=`<dt>Sources</dt><dd>${dim('OpenStreetMap and USFS roads and trails. A way shown here is mapped, which is not the same as passable, open, or legal to use — coverage on private timberland is especially uneven. It never affects the score.')}</dd></dl>`;
     pendingWay = ac.wayIndex;
-  }
+  } else pendingWay = -1;     // nothing to draw, and nothing left over from the last cell
   if(e.w){
     const w=e.w,i=w.today; const days=[]; for(let d=Math.max(0,i-20);d<=i;d++) days.push(d); const mxp=Math.max(5,...days.map(d=>w.p[d]));
     h+=`<div class="sec">Rain, last 3 weeks (inches)</div><div class="rain">`+days.map(d=>`<div class="${w.p[d]>=10?'hi':''}"><b style="height:${Math.round(w.p[d]/mxp*38)}px"></b><span>${w.p[d]>=2.5?inch(w.p[d]).replace(/^0/,''):''}</span></div>`).join('')+`</div><p class="note">Left = 3 weeks ago, right = today. Lighter bars ≥0.4".</p>`;
@@ -1052,7 +1075,13 @@ async function loadAccessGeom(){
   if(!geomFetch) geomFetch=(async()=>{
     try{ const r=await fetch('data/access-geom.json',{cache:'force-cache'});
       if(!r.ok) return null;
-      const j=await r.json(); STATIC.access.geom=j.geom||null; return STATIC.access.geom;
+      const j=await r.json();
+      // Same reasoning as access.json, one step further: a stale geometry file draws the wrong line.
+      if(j.version!==ACCESS_FORMAT){
+        console.warn(`access-geom.json is format v${j.version} — not drawing approaches`);
+        return null;
+      }
+      STATIC.access.geom=j.geom||null; return STATIC.access.geom;
     }catch(_){ return null; }
   })();
   return geomFetch;
@@ -1145,7 +1174,11 @@ loadState();
 /* Module scope is not the global scope. The verification snippets in docs/verification.md — the ones under
    "Verification that has actually caught bugs", which are run by hand in the browser console — refer
    to these by name, so expose them deliberately rather than letting the move quietly break them. */
-Object.assign(window,{anchorHit,snapLattice,key,cells,wcache,STATIC,habitat,analyze,fullAnalysis,vegMult});
+Object.assign(window,{anchorHit,snapLattice,key,cells,wcache,STATIC,habitat,analyze,fullAnalysis,vegMult,
+  /* showPoint and the Leaflet instance are here so the tap sheet can be driven from a console. It
+     is the part of the app a test cannot reach, and the "dim is not defined" crash in the access
+     block was caught by opening it by hand rather than by any assertion. */
+  showPoint,leafletMap:map});
 // WBASE/WCOARSE/WLATTICE are reassigned when the archive loads, so bind them live rather than
 // copying whatever they happened to hold at startup.
 Object.defineProperties(window,{WBASE:{get:()=>WBASE},WCOARSE:{get:()=>WCOARSE},WLATTICE:{get:()=>WLATTICE}});

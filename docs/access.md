@@ -87,15 +87,26 @@ is reported as **rough** rather than as a road. So is `highway=road`, which mean
 ## What is stored
 
 ```
-ways: [ [name, ref, type, catIndex, trailheadKind, geomDelta], ... ]
-rows: [ [i, j, dRoad, wRoad, walkRoad, dTrail, wTrail, walkTrail, dRough, wRough, walkRough], ... ]
+ways: [ [name, ref, type, catIndex, trailheadKind, osmId, segments], ... ]
+rows: [ [i, j,  dRoad, wRoad, walkRoad, gainRoad,
+              dTrail, wTrail, walkTrail, gainTrail,
+              dRough, wRough, walkRough, gainRough], ... ]
 ```
 
-Per cell, per category: the straight-line distance, an index into `ways`, and
-the walk along that way from its trailhead. `-1` anywhere means "not found
-within the cap", "no way", or "walk unknown". A cell with nothing mapped at all
-gets **no row** — the app reads a missing row as unknown, which is the same
-answer and costs nothing to store.
+Per cell, per category: the straight-line distance, an index into `ways`, the
+walk along that way from its trailhead, and the cumulative climb over that
+stretch. `-1` anywhere means "not found within the cap", "no way", or "not
+computable". A cell with nothing mapped at all gets **no row** — the app reads a
+missing row as unknown, which is the same answer and costs nothing to store.
+
+A way carries its OSM way id where it came from OSM, which is what makes an
+exact external link possible, and a segment count, which is what lets the sheet
+say a route was assembled from several mapped pieces. `osmId` is `null` for USFS
+features; `segments` is 1 for a way that needed no joining.
+
+**Gain never appears without a walk.** Both are measured from a trailhead, so a
+climb with no start point would be a number with no meaning. `accessDetail`
+enforces that, and a test asserts a stray gain value cannot surface on its own.
 
 ### Geometry lives in its own file, fetched on demand
 
@@ -135,12 +146,59 @@ Measured on six real tiles covering 1,518 cells and scaled by 31.6×. So:
   copy — distances are computed from full geometry, so simplification can never
   move a cell's class.
 - **Delta-encoded integers at 1e5** (about a metre). Halves it again.
-- **Clipped** to the stretch within 2.6 km of a cell that references it. This
-  one turned out to be nearly a no-op — 621,072 points became 598,127, a 3.7%
-  saving — because the ways that get referenced are mostly short forest ways
-  already sitting next to their cells rather than long highways. It is kept
-  because it costs nothing and bounds the worst case, but it is not where the
-  savings came from.
+There used to be a third step, and it has been removed:
+
+- **~~Clipped~~ to the stretch within 2.6 km of a cell that references it.** It
+  saved 3.7% of points — 621,072 became 598,127 — and it truncated every tapped
+  trail whose far end ran past the cells that reference it. A trail that draws as
+  a partial line is the feature not working, so a 3.7% saving was not a trade
+  worth making. Full geometry is now stored for every way a cell references, and
+  a test asserts a way running well past the cells keeps its whole length.
+
+Since geometry lazy-loads on tap it is no longer part of the up-front payload,
+which is what makes storing it in full affordable at all.
+
+## A route, not a segment
+
+The reported symptom was "trails draw truncated". The clip was the obvious
+suspect, and measuring it first is what stopped a plausible diagnosis from being
+the whole answer: it accounted for 3.7% of points, the median drawn way was
+2.14 mi and p90 8.03 mi, and the specific trail that prompted the report was a
+single complete 1.02 mi way that was never clipped at all.
+
+The dominant cause is **fragmentation**. OSM splits a named way at every tag
+change and every junction, so a long route arrives as many separate ways: the
+Pacific Crest Trail as 68 of them, US 101 as 71. 14% of named routes in
+Washington are multi-way, averaging 1.2 segments. Drawing only the segment
+nearest the cell looks like a fragment of a trail because it is one.
+
+So segments are chained before anything is stored. Two segments join when they
+share `cat`, `type`, `name` and `ref` and an endpoint within 40 m. Both parts of
+that matter — a name shared across the state ("Forest Road 23") is not one
+route, and neither are two unnamed tracks that happen to touch, so an unnamed
+way is never joined to anything.
+
+**A junction is never chained through.** Guessing a path through a fork would
+invent a route nobody can walk. The test for that is endpoint *degree* computed
+over the whole group: a point where exactly two segment ends meet is a join,
+three or more is a junction. Two bugs found while writing it, both of which a
+single happy-path fixture would have missed:
+
+- Asking "is there exactly one unused candidate left?" is a different question.
+  At a three-way fork the first seed correctly refuses, and by the time the
+  second seed looks the first is already marked used, so the fork looks
+  unambiguous and gets joined. Degree is a property of the group, not of how far
+  the loop has got.
+- The incoming segment has to run *into* the join whichever end of the chain is
+  growing: appending at the tail needs a segment that starts at the point,
+  prepending at the head needs one that ends there. Reversing on the matched end
+  alone is right for one case and backwards for the other, which produced a
+  chain with a doubled point and a silently dropped segment.
+
+A joined route keeps the strongest trailhead found on any member and the OSM id
+of its longest constituent, and records how many pieces it came from so the
+sheet can disclose it. The walk and the climb are re-measured on the joined
+geometry, so the figures describe the line that is drawn.
 
 ## How far along the way
 
@@ -161,6 +219,51 @@ two places, and which one is used is recorded and shown:
 Where neither applies, the sheet reports the straight-line distance and says
 that is what it is.
 
+## Distance and climb to the spot
+
+For the named route the sheet reports the walking distance from the trailhead to
+the cell and the cumulative climb over that stretch.
+
+The climb is **cumulative positive difference sampled at every vertex of the
+stored geometry**, not the difference between the two endpoints. A rolling
+approach that climbs 300 m in four rises and gives most of it back is a 300 m
+climb to walk; endpoint subtraction would call it flat. The samples come from
+the same Terrarium tiles at the same zoom the cell bake reads, so the climb and
+the cell's own elevation cannot disagree about the terrain.
+
+The figures are rounded coarsely on purpose — the tiles are ~76 m per pixel at
+z10 and the stored geometry is simplified to 25 m, so anything finer than the
+nearest 50 ft would be false precision. Under 50 ft reads "negligible climb".
+
+What is *not* done matters as much:
+
+- **No trailhead mapped or inferrable** → the walk and the climb are reported as
+  unavailable, and the sheet gives the straight-line distance labelled as such.
+  Measuring from an arbitrary end of the way would produce a figure that looks
+  like an answer.
+- **Trailhead inferred** → the figures are shown and the sheet still says the
+  start point is where the way meets a drivable road, not a surveyed trailhead.
+- **Profile unavailable** (a terrain tile failed) → the walk is shown and the
+  climb says it is unavailable. `-1`, never `0`.
+
+## The external link
+
+**AllTrails does not work and is deliberately absent.** Checked rather than
+assumed: a trail page, the explore map with bounds, the explore map with a
+centre, and their search all answer HTTP 403 to a programmatic request, and
+their per-trail URLs need a slug this data does not contain. Linking their
+search with a trail name would be exactly the wrong-trail risk to avoid — the
+same trail names recur across the state.
+
+What is linked instead:
+
+| link | when | why |
+| --- | --- | --- |
+| `openstreetmap.org/way/<id>` | the way came from OSM | it identifies the *exact* way the sheet just named. Verified 200 against real ids, e.g. way 174583494, "Baker Lake Trail" |
+| `caltopo.com/map.html#ll=<lat>,<lon>` | always | works for USFS features too, and a topo view is what an approach needs. Verified 200 |
+
+Gaia GPS was tried; its map deep link did not resolve, so it is not offered.
+
 ## Running the bake
 
 ```bash
@@ -168,6 +271,13 @@ node scripts/build-access.mjs                 # the whole state, ~316 tiles
 node scripts/build-access.mjs --resume        # after an interruption
 node scripts/build-access.mjs --region=coast  # merged into the existing file
 ```
+
+**The checkpoint is kept on success, not deleted.** It holds the fetched,
+unclipped geometry, and everything after the fetch — joining, elevation, the row
+format, what gets stored — is assembly. Deleting it meant a change to any of
+that cost a ten-hour re-fetch, which is exactly what happened once. With it
+kept, `--resume` re-assembles in **30 seconds and zero network requests**. That
+is the single most useful thing learned from this bake.
 
 Rows are keyed by cell index `[i, j]`, not by position in `cells.json`, so a
 re-bake of the cell file cannot silently shift the association. The output

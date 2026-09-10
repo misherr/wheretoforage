@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
 
 import * as A from './build-access.mjs';
 import * as AC from '../src/access.mjs';
@@ -224,13 +225,51 @@ function fakeDeps(counts = {}) {
       // starts on River Road, runs north: its south end is within TH_SNAP of the road
       cb({ type: 'way', id: 102, tags: { highway: 'path', name: 'Bear Creek Trail' },
            geometry: [{ lat: s + 0.005, lon: (w + e) / 2 }, { lat: mid + 0.01, lon: (w + e) / 2 }] });
+      /* This one deliberately runs half a degree past the eastern edge of the cells. Only its
+         western end is near anything, so the clip that used to trim a way to the stretch within
+         2.6 km of a referencing cell would cut most of it off. */
       cb({ type: 'way', id: 103, tags: { highway: 'track' },
-           geometry: [{ lat: n - 0.01, lon: w }, { lat: n - 0.01, lon: e }] });
+           geometry: [{ lat: n - 0.01, lon: w }, { lat: n - 0.01, lon: e },
+                      { lat: n - 0.01, lon: e + 0.5 }] });
       cb({ type: 'way', id: 104, tags: { highway: 'footway' },
            geometry: [{ lat: mid, lon: w }, { lat: mid, lon: e }] });
     },
     arcgis: async () => { counts.arc++; return { features: [] }; },
+    /* A synthetic Terrarium tile that rises 4 m per pixel eastward, so a route running east climbs
+       steadily and the gain arithmetic has real bytes to work from rather than a stub. */
+    tileFetch: async () => {
+      counts.tiles = (counts.tiles || 0) + 1;
+      const W = 256, px = new Uint8Array(W * W * 3);   // real tile size: elevationProfile indexes to 255
+      for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
+        const v = Math.round((500 + x * 4 + 32768) * 256);
+        const i = (y * W + x) * 3;
+        px[i] = (v >> 16) & 255; px[i + 1] = (v >> 8) & 255; px[i + 2] = v & 255;
+      }
+      const buf = encodePNG(W, W, 3, px);
+      return { ok: true, status: 200, arrayBuffer: async () => buf };
+    },
   };
+}
+
+/* Minimal PNG encoder, filter 0 — enough to feed the real decoder real bytes. */
+function encodePNG(width, height, channels, pixels) {
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(zlib.crc32 ? zlib.crc32(body) : 0);
+    return Buffer.concat([len, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; ihdr[9] = { 1: 0, 2: 4, 3: 2, 4: 6 }[channels]; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  const stride = width * channels;
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y++) {
+    raw[y * (stride + 1)] = 0;
+    for (let x = 0; x < stride; x++) raw[y * (stride + 1) + 1 + x] = pixels[y * stride + x] & 255;
+  }
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
 }
 
 const cellsFixture = (dir) => {
@@ -256,8 +295,8 @@ test('bake: produces at most one row per cell, keyed by cell index', async () =>
      left out are exactly the ones the fixture's ways do not reach. */
   assert.ok(r.rows.length > 0 && r.rows.length <= rows.length,
     `${r.rows.length} rows for ${rows.length} cells`);
-  for (const row of r.rows) assert.equal(row.length, 11,
-    'rows are [i, j] then distance/way/walk per category');
+  for (const row of r.rows) assert.equal(row.length, 2 + AC.CATS.length * AC.ROW_STRIDE,
+    'rows are [i, j] then distance/way/walk/gain per category');
   for (const row of r.rows) {
     const d = AC.decodeRow(row);
     assert.ok(AC.CATS.some(c => d[c] >= 0), 'a row exists only when something was found');
@@ -306,14 +345,14 @@ test('bake: a regional re-bake replaces its own cells and carries the rest throu
      carried-over rows, and drop any way nothing references any more — otherwise a few regional
      bakes would leave the file full of dead geometry. */
   const g = n => AC.encodeGeom([[47 + n / 100, -121], [47 + n / 100, -120.99]]);
-  const prev = { version: 3, generated: 'old', cap_m: 2000, provenance: { counts: {} },
-    ways: [['Old Road', null, 'unclassified', 0, 0], ['Dead Way', null, 'track', 2, 0]],
-    rows: [[10, 20, 100, 0, -1, -1, -1, -1, -1, -1, -1],
-           [10, 21, -1, -1, -1, 700, 1, -1, -1, -1, -1]] };
+  const prev = { version: 4, generated: 'old', cap_m: 2000, provenance: { counts: {} },
+    ways: [['Old Road', null, 'unclassified', 0, 0, null, 1], ['Dead Way', null, 'track', 2, 0, null, 1]],
+    rows: [[10, 20, 100, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+           [10, 21, -1, -1, -1, -1, 700, 1, -1, -1, -1, -1, -1, -1]] };
   const prevGeom = [g(1), g(2)];
-  const fresh = { version: 3, generated: 'new', cap_m: 2000, provenance: { counts: {} },
-    ways: [['New Trail', null, 'path', 1, 2]],
-    rows: [[10, 21, -1, -1, -1, 42, 0, 17, -1, -1, -1]] };
+  const fresh = { version: 4, generated: 'new', cap_m: 2000, provenance: { counts: {} },
+    ways: [['New Trail', null, 'path', 1, 2, 555, 1]],
+    rows: [[10, 21, -1, -1, -1, -1, 42, 0, 17, 120, -1, -1, -1, -1]] };
   const freshGeom = [g(3)];
   const { merged: m, geom: mg } = A.mergeInto(prev, fresh, prevGeom, freshGeom);
   assert.equal(m.rows.length, 2, 'no cell may be lost');
@@ -404,11 +443,11 @@ test('geometry: it is shared by way, not duplicated per cell', async () => {
   assert.ok(r.ways.length < rows.length / 4,
     `${r.ways.length} ways for ${rows.length} cells — geometry is being duplicated`);
   // every way index in a row must resolve
-  for (const row of r.rows) for (const n of [3, 6, 9]) {
+  for (const row of r.rows) for (const n of [3, 3 + AC.ROW_STRIDE, 3 + 2 * AC.ROW_STRIDE]) {
     if (row[n] >= 0) assert.ok(r.ways[row[n]], 'row points at way ' + row[n] + ' which does not exist');
   }
-  for (const w of r.ways) assert.equal(w.length, 5,
-    'a way entry carries name, ref, type, category and trailhead kind — geometry lives in its own file');
+  for (const w of r.ways) assert.equal(w.length, 7,
+    'a way entry carries name, ref, type, category, trailhead kind, OSM id and segment count');
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -425,13 +464,27 @@ test('geometry: simplification keeps the shape and drops the redundant points', 
   assert.ok(A.simplify(zigzag, 25).length > 10, 'real corners must be kept');
 });
 
-test('geometry: clipping keeps the stretch near the cells and drops the rest', () => {
-  // A way running far past the only cell that references it should not carry its whole length.
-  const long = [];
-  for (let i = 0; i < 200; i++) long.push([47.0 + i * 0.01, -121.5]);
-  const clipped = A.clipToCells(long, [[47.5, -121.5]], 2600);
-  assert.ok(clipped.length < long.length / 4, 'expected heavy clipping, kept ' + clipped.length);
-  assert.ok(clipped.some(([la]) => Math.abs(la - 47.5) < 0.03), 'the stretch by the cell must survive');
+test('geometry: full length is stored, because clipping truncated every tapped trail', async () => {
+  /* There used to be a clip here keeping only the stretch within 2.6 km of a referencing cell. It
+     removed 3.7% of points statewide — 621,072 to 598,127 — and truncated any tapped trail whose far
+     end ran past the cells, so it was costing the feature and buying almost nothing. The fixture's
+     track runs half a degree past the cells on purpose: with the clip back, this fails. */
+  const dir = tmpdir();
+  cellsFixture(dir);
+  const opts = A.parseArgs([`--cells=${path.join(dir, 'cells.json')}`,
+    `--out=${path.join(dir, 'a.json')}`, '--bbox=47,-123,49,-121', '--skip-usfs', '--skip-elevation']);
+  const r = await A.build(opts, fakeDeps());
+  assert.equal(r.provenance.geometry.clipped, false, 'the output must record that it is unclipped');
+  const g = JSON.parse(fs.readFileSync(path.join(dir, 'a-geom.json'), 'utf8')).geom;
+  let widest = 0;
+  for (const flat of g) {
+    const lons = AC.decodeGeom(flat).map(p => p[1]);
+    widest = Math.max(widest, Math.max(...lons) - Math.min(...lons));
+  }
+  assert.ok(widest > 0.4,
+    'the track running past the cells was shortened — is the clip back? widest span ' + widest.toFixed(3));
+  assert.equal(A.clipToCells, undefined, 'and the clip itself must be gone, not merely unused');
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 /* ===================== the walk ===================== */
@@ -532,4 +585,244 @@ test('split: a way can be named without its geometry being loaded', () => {
   assert.equal(det.wayName, 'Bear Creek Trail', 'the name is available with no geometry at all');
   assert.equal(det.wayIndex, 0, 'and the index, so the line can be fetched on demand');
   assert.equal(det.way.geom, null);
+});
+
+/* ===================== joining fragmented routes =====================
+
+   OSM splits a named way at every tag change and junction, so 14% of named routes in Washington
+   arrive as several separate ways — the PCT as 68 of them, US 101 as 71. Drawing only the segment
+   nearest a cell looks like a fragment of a trail because it is one, which is what "trails draw
+   truncated" actually was for long routes. */
+
+const seg = (id, name, geom, th = 0) => ({ wid: 'o' + id, name, ref: null, type: 'path',
+  cat: 'trail', th, osmId: id, segments: 1, geom });
+
+test('join: segments of one named route are chained into a single way', () => {
+  const j = A.joinRoutes([
+    seg(1, 'Bear Creek Trail', [[47.50, -121.5], [47.51, -121.5]], AC.TRAILHEAD_INFERRED),
+    seg(2, 'Bear Creek Trail', [[47.51, -121.5], [47.52, -121.5]]),
+    seg(3, 'Bear Creek Trail', [[47.52, -121.5], [47.53, -121.5]]),
+  ]);
+  assert.equal(j.length, 1, 'three chained segments are one route');
+  assert.equal(j[0].geom.length, 4, 'and one polyline with no doubled points at the joins');
+  assert.equal(j[0].segments, 3, 'the count is kept so the sheet can disclose the join');
+  assert.equal(j[0].th, AC.TRAILHEAD_INFERRED, 'a trailhead on any member belongs to the whole route');
+});
+
+test('join: the order and direction of the source segments do not matter', () => {
+  /* OSM hands them over in whatever order the query returns and in either direction. A join that
+     only works for pre-sorted, consistently-wound segments would fix almost nothing. */
+  const j = A.joinRoutes([
+    seg(21, 'Long Trail', [[47.52, -121.5], [47.53, -121.5]]),
+    seg(22, 'Long Trail', [[47.51, -121.5], [47.50, -121.5]]),      // wound the other way
+    seg(23, 'Long Trail', [[47.51, -121.5], [47.52, -121.5]]),
+  ]);
+  assert.equal(j.length, 1);
+  assert.equal(j[0].geom.length, 4, 'a doubled or dropped point means the reversal is inverted, got '
+    + j[0].geom.length);
+  const lats = j[0].geom.map(p => +p[0].toFixed(3));
+  const up = lats.every((v, i) => i === 0 || v > lats[i - 1]);
+  const down = lats.every((v, i) => i === 0 || v < lats[i - 1]);
+  assert.ok(up || down, 'the joined line must run in one direction: ' + lats.join(','));
+});
+
+test('join: a junction is not chained through', () => {
+  /* Guessing a path through a fork would invent a route nobody can walk. This is why the decision is
+     endpoint DEGREE over the whole group: asking "is exactly one candidate left?" as segments are
+     consumed gets the first seed right and then joins the fork anyway on the second. */
+  const j = A.joinRoutes([
+    seg(11, 'Fork Rd', [[47.50, -121.50], [47.51, -121.50]]),
+    seg(12, 'Fork Rd', [[47.51, -121.50], [47.52, -121.49]]),
+    seg(13, 'Fork Rd', [[47.51, -121.50], [47.52, -121.51]]),
+  ]);
+  assert.equal(j.length, 3, 'a three-way junction must leave all three pieces separate');
+});
+
+test('join: unnamed ways are never merged with each other', () => {
+  // There is nothing to group them by, so merging two adjacent tracks would fabricate a route.
+  const j = A.joinRoutes([
+    seg(31, null, [[47.50, -121.5], [47.51, -121.5]]),
+    seg(32, null, [[47.51, -121.5], [47.52, -121.5]]),
+  ]);
+  assert.equal(j.length, 2);
+  for (const e of j) assert.equal(e.segments, 1);
+});
+
+test('join: the same name in two different places stays two routes', () => {
+  const j = A.joinRoutes([
+    seg(41, 'Forest Road 23', [[47.50, -121.5], [47.51, -121.5]]),
+    seg(42, 'Forest Road 23', [[48.50, -119.0], [48.51, -119.0]]),
+  ]);
+  assert.equal(j.length, 2, 'a name shared across the state is not one route');
+});
+
+/* ===================== distance and climb to the spot ===================== */
+
+test('elevation: gain is cumulative climb, not the difference between endpoints', () => {
+  /* A rolling approach that climbs 300 m in four rises and gives most of it back is still a 300 m
+     climb to walk. Endpoint subtraction would call it nearly flat, which is the whole reason the
+     profile is sampled along the geometry rather than read at the two ends. */
+  const geom = [[47.500, -121.5], [47.501, -121.5], [47.502, -121.5], [47.503, -121.5], [47.504, -121.5]];
+  const elev = [100, 150, 120, 200, 180];
+  assert.equal(A.gainBetween(geom, elev, 0, 1e6), 130, 'the two rises are 50 and 80');
+  assert.notEqual(A.gainBetween(geom, elev, 0, 1e6), 80, 'endpoint difference would say 80');
+});
+
+test('elevation: a missing profile reports unavailable, not zero', () => {
+  const geom = [[47.5, -121.5], [47.51, -121.5]];
+  assert.equal(A.gainBetween(geom, null, 0, 1e6), -1);
+  assert.equal(A.gainBetween(geom, [100], 0, 1e6), -1, 'a profile of the wrong length is unusable');
+  assert.equal(AC.gainLabel(-1), null, 'and -1 must render as nothing rather than as "0 ft"');
+  assert.equal(AC.gainLabel(null), null);
+});
+
+test('elevation: only the stretch between the trailhead and the cell counts', () => {
+  const geom = [];
+  for (let i = 0; i < 11; i++) geom.push([47.5 + i * 0.001, -121.5]);
+  const elev = geom.map((_, i) => 100 + i * 10);            // a steady 10 m per vertex
+  const whole = A.gainBetween(geom, elev, 0, 1e6);
+  const part = A.gainBetween(geom, elev, 0, 300);
+  assert.ok(part > 0 && part < whole, 'a shorter stretch must climb less: ' + part + ' vs ' + whole);
+});
+
+test('elevation: the profile is sampled from the terrain tiles, at every vertex', async () => {
+  /* Same Terrarium tiles and same zoom the cell bake reads, so the climb figure and the elevation in
+     the sheet come from one source. The fake tile rises eastward, so an eastward route must gain. */
+  const deps = fakeDeps();
+  const geom = [];
+  for (let i = 0; i < 8; i++) geom.push([47.5, -121.5 + i * 0.002]);
+  const prof = await A.elevationProfile(geom, deps.tileFetch);
+  assert.equal(prof.length, geom.length, 'one elevation per vertex');
+  for (const v of prof) assert.ok(Number.isFinite(v), 'every sample must decode to a real height');
+  assert.ok(A.gainBetween(geom, prof, 0, 1e6) > 0, 'an eastward route on a rising tile must gain');
+});
+
+test('elevation: the label is rounded to the precision the data supports', () => {
+  /* The tiles are ~76 m per pixel at z10 and the geometry is simplified to 25 m, so a figure to the
+     nearest foot would be false precision. */
+  assert.equal(AC.gainLabel(0), 'negligible climb');
+  assert.equal(AC.gainLabel(10), 'negligible climb', '33 ft is not worth reporting as a climb');
+  assert.match(AC.gainLabel(300), /1,?000 ft of climb|950 ft of climb/);
+  assert.match(AC.gainLabel(300), /ft of climb$/);
+});
+
+/* ===================== the external link ===================== */
+
+test('links: AllTrails is deliberately absent, and the file says why', () => {
+  /* Checked, not assumed: a trail page, the explore map with bounds, the explore map with a centre
+     and their search all answer HTTP 403 to a programmatic request. None of it can be verified to
+     work, and their per-trail URLs need a slug this data does not contain — so linking their search
+     with a trail name would be exactly the "may land on the wrong trail" case to avoid. */
+  const src = fs.readFileSync(fileURLToPath(new URL('../src/access.mjs', import.meta.url)), 'utf8');
+  for (const w of [{ osmId: 123 }, { osmId: null }]) {
+    for (const l of AC.externalLinks(w, 47.5, -121.5)) {
+      assert.ok(!/alltrails/i.test(l.url), 'no AllTrails link may be emitted: ' + l.url);
+    }
+  }
+  assert.match(src, /AllTrails/, 'and the reason must be written down where the links are built');
+  assert.match(src, /403/, 'including the evidence');
+});
+
+test('links: an OSM way gets its own page; everything gets a topo map', () => {
+  const withOsm = AC.externalLinks({ osmId: 174583494 }, 47.5, -121.5);
+  assert.ok(withOsm.some(l => l.url === 'https://www.openstreetmap.org/way/174583494'),
+    'the exact way the sheet just named must be the thing linked, not a search for its name');
+  assert.ok(withOsm.some(l => /caltopo\.com/.test(l.url)));
+  // USFS features carry no OSM id, so they get the coordinate link only
+  const usfs = AC.externalLinks({ osmId: null }, 47.5, -121.5);
+  assert.equal(usfs.length, 1);
+  assert.match(usfs[0].url, /caltopo\.com.*47\.50000,-121\.50000/);
+  for (const l of usfs.concat(withOsm)) {
+    assert.match(l.url, /^https:\/\//, 'every link must be https');
+    assert.ok(l.label && l.note, 'and must say what it is and what it shows');
+  }
+});
+
+/* ===================== honesty, for the new figures ===================== */
+
+test('honesty: no trailhead means the figures are unavailable, not invented', () => {
+  /* Measuring from an arbitrary end of the way would produce a number that looks like an answer. */
+  const d = { trail: 400, trailWay: 0, trailWalk: -1, trailGain: -1,
+              road: -1, roadWay: -1, roadWalk: -1, roadGain: -1,
+              rough: -1, roughWay: -1, roughWalk: -1, roughGain: -1 };
+  const det = AC.accessDetail(d, [['Some Trail', null, 'path', 1, AC.TRAILHEAD_NONE, null, 1]]);
+  assert.equal(det.walk, null, 'no walk figure');
+  assert.equal(det.gain, null, 'and no climb figure');
+  assert.equal(det.straight, 400, 'only the straight line, which the sheet labels as such');
+  assert.match(AC.NO_TRAILHEAD_NOTE, /nowhere to measure a walk from/);
+  assert.match(AC.NO_TRAILHEAD_NOTE, /straight line/);
+});
+
+test('honesty: a climb figure never appears without a walk figure', () => {
+  // Both are measured from the trailhead, so a climb with no start point would mean nothing.
+  const d = { trail: 400, trailWay: 0, trailWalk: -1, trailGain: 250,
+              road: -1, roadWay: -1, roadWalk: -1, roadGain: -1,
+              rough: -1, roughWay: -1, roughWalk: -1, roughGain: -1 };
+  const det = AC.accessDetail(d, [['Some Trail', null, 'path', 1, AC.TRAILHEAD_INFERRED, null, 1]]);
+  assert.equal(det.walk, null, 'the walk is unavailable here');
+  assert.equal(det.gain, null, 'so a stray gain value must not surface on its own');
+});
+
+test('honesty: an inferred trailhead still says it was inferred', () => {
+  const d = { trail: 400, trailWay: 0, trailWalk: 1200, trailGain: 180,
+              road: -1, roadWay: -1, roadWalk: -1, roadGain: -1,
+              rough: -1, roughWay: -1, roughWalk: -1, roughGain: -1 };
+  const det = AC.accessDetail(d, [['Some Trail', null, 'path', 1, AC.TRAILHEAD_INFERRED, null, 1]]);
+  assert.equal(det.walk, 1200);
+  assert.equal(det.gain, 180);
+  assert.match(det.trailheadNote, /meets a drivable road/,
+    'the walk is only as good as the trailhead it was measured from');
+});
+
+test('honesty: a joined route discloses how many mapped segments it came from', () => {
+  const w = AC.decodeWay(['Pacific Crest Trail', null, 'path', 1, 1, 12345, 68]);
+  assert.equal(w.segments, 68, 'so the sheet can say the line is 68 mapped pieces joined');
+  assert.equal(AC.decodeWay(['X', null, 'path', 1, 0, null, undefined]).segments, 1,
+    'a way with no count recorded is one segment, not zero');
+  assert.equal(AC.decodeWay(['X', null, 'path', 1, 0, 0, 1]).osmId, null,
+    'a USFS feature has no OSM id and must not pretend to have way 0');
+});
+
+test('format: the bake stamps the version the app reads, from one constant', async () => {
+  /* The row stride and the way-entry width have each changed once. A file from the other side of
+     that change does not fail to parse — it decodes into confident nonsense, because a v4 reader
+     takes a v3 row's trail distance as a road gain and its way index as a distance. So the writer
+     and the reader take the version from the same constant, and the app refuses anything else. */
+  const dir = tmpdir();
+  cellsFixture(dir);
+  const opts = A.parseArgs([`--cells=${path.join(dir, 'cells.json')}`,
+    `--out=${path.join(dir, 'a.json')}`, '--bbox=47,-123,49,-121', '--skip-usfs', '--skip-elevation']);
+  await A.build(opts, fakeDeps());
+  const out = JSON.parse(fs.readFileSync(path.join(dir, 'a.json'), 'utf8'));
+  const geom = JSON.parse(fs.readFileSync(path.join(dir, 'a-geom.json'), 'utf8'));
+  assert.equal(out.version, AC.ACCESS_FORMAT, 'the bake must stamp the shared constant');
+  assert.equal(geom.version, AC.ACCESS_FORMAT, 'both files, or the geometry outlives its rows');
+
+  const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
+  assert.match(app, /j\.version!==ACCESS_FORMAT/,
+    'the app must refuse a version it does not know rather than misdecoding it');
+  assert.equal((app.match(/j\.version!==ACCESS_FORMAT/g) || []).length, 2,
+    'both access.json and access-geom.json need the check — a stale geometry file draws a wrong line');
+
+  /* And the width really does depend on the stride, so a future change cannot forget to bump it. */
+  assert.equal(out.rows[0].length, 2 + AC.CATS.length * AC.ROW_STRIDE);
+  assert.equal(out.ways[0].length, 7);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('honesty: with no access data the sheet says nothing, rather than "nothing is mapped"', () => {
+  /* "Nothing is mapped within about a mile" is a claim about a lookup. With no file — or one this
+     build cannot read — no lookup happened, so the section is omitted entirely. The unknown CLASS
+     is for a cell the bake really did examine and find nothing near. */
+  const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
+  const at = app.indexOf('<div class="sec">Getting there</div>');
+  assert.ok(at > 0, 'the Getting there section must still exist');
+  const before = app.slice(0, at);
+  const guard = before.lastIndexOf('if(STATIC.access){');
+  assert.ok(guard > 0, 'no if(STATIC.access) guard precedes the section at all');
+  const between = before.slice(guard);
+  assert.ok(between.length < 900 && !between.includes('<div class="sec">'),
+    'the guard must immediately enclose the section, or it renders a claim with no data behind it');
+  assert.match(AC.CLASSES.unknown.blurb, /may mean no way exists, or simply that nobody has mapped one/,
+    'and the unknown class keeps saying which of the two it cannot distinguish');
 });

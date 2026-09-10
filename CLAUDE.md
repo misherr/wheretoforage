@@ -86,6 +86,8 @@ while nothing throws.
 - **Access data says what is *mapped*, never what exists.** A cell with nothing
   mapped nearby reads as *unknown*, not as trailless — coverage on private
   timberland is patchy, and absence of a mapped way is not absence of a way.
+  The same applies to the walk and the climb: with no trailhead to measure from
+  they are reported as unavailable, never computed from an arbitrary point.
 
 ## Current phase
 
@@ -167,8 +169,14 @@ Baking data:
 node scripts/build-cells.mjs            # ~4 min: 305 terrain tiles, 579 LANDFIRE requests
 node scripts/build-cells.mjs --resume   # after a connect timeout
 node scripts/build-cells.mjs --region=coast
-node scripts/build-access.mjs           # ~316 Overpass tiles + USFS; --resume works
+node scripts/build-access.mjs           # ~10 h: ~316 Overpass tiles + USFS + terrain
+node scripts/build-access.mjs --resume  # re-assembles in 30 s, zero requests
 ```
+
+**The access checkpoint is kept on success and re-assembling from it is free.**
+Everything after the fetch — route joining, elevation, what gets stored, the row
+format — is assembly. Deleting the checkpoint once turned an assembly change
+into a ten-hour re-fetch. Do not "tidy up" by removing it.
 
 `data/weather.json` maintains itself — `weather.yml` runs two crons, one for both
 grids and one forecast-only. [docs/weather-archive.md](docs/weather-archive.md)

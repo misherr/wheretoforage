@@ -27,13 +27,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cellIndex } from '../src/grid.mjs';
-import { osmCategory, osmType, USFS_DRIVABLE_ML, CAP, CATS, encodeGeom,
+import { osmCategory, osmType, USFS_DRIVABLE_ML, CAP, CATS, encodeGeom, ROW_STRIDE, ACCESS_FORMAT,
          OSM_DRIVE, OSM_TRAIL, OSM_ROUGH,
          TRAILHEAD_NONE, TRAILHEAD_MAPPED, TRAILHEAD_INFERRED } from '../src/access.mjs';
-import { REGIONS } from './build-cells.mjs';
+import { REGIONS, decodePNG, terrariumMetres, tileXY, TERRAIN_SOURCE } from './build-cells.mjs';
 
 export const GENERATOR = 'scripts/build-access.mjs';
-export const GENERATOR_VERSION = '2.0.0';
+export const GENERATOR_VERSION = '3.0.0';
 
 const UA = 'king-bolete-forecast/1.0 (github.com/misherr/wheretoforage)';
 
@@ -53,7 +53,8 @@ const TILE = 0.25;            // degrees
 const PAD = 0.025;            // ~2.5 km, so a way just outside a tile still reaches cells inside it
 const STEP_M = 40;            // polyline densification; a cell is ~1600 m across
 const SIMPLIFY_M = 25;        // Douglas-Peucker tolerance for STORED geometry; ~2 px at zoom 14
-const CLIP_PAD_M = 600;       // keep this much of a way beyond the cells that reference it
+const JOIN_SNAP_M = 40;       // two segments of one named route whose ends are this close are one way
+const ELEV_Z = 10;            // same Terrarium zoom the cell bake uses, so the tiles are shared
 const TH_SNAP_M = 60;         // a trail end this close to a drivable road counts as a trailhead
 const TH_MAPPED_M = 150;      // a mapped trailhead node this close to a way belongs to it
 const MIRROR_TRIES = 3;       // per area, across mirrors, before asking for a smaller area instead
@@ -107,26 +108,19 @@ export function simplify(pts, tolM) {
   return pts.filter((_, i) => keep[i]);
 }
 
-/* Keep only the stretch of a way between the first and last vertex within padM of a referencing
-   cell. A state highway that happens to pass one cell should contribute the couple of kilometres you
-   can see on the map, not its whole length across the state. */
-export function clipToCells(pts, cells, padM) {
-  if (!cells.length || pts.length < 3) return pts.slice();
-  let lo = -1, hi = -1;
-  const p2 = padM * padM;
-  for (let i = 0; i < pts.length; i++) {
-    const [la, ln] = pts[i];
-    let near = false;
-    for (const [cLa, cLn] of cells) {
-      const dy = (la - cLa) * M_LAT, dx = (ln - cLn) * mLon(cLa);
-      if (dx * dx + dy * dy <= p2) { near = true; break; }
-    }
-    if (near) { if (lo < 0) lo = i; hi = i; }
-  }
-  if (lo < 0) return pts.slice();
-  return pts.slice(Math.max(0, lo - 1), Math.min(pts.length, hi + 2));
-}
-
+/* The clip that used to live here is gone.
+ *
+ * It kept only the stretch of a way between the first and last vertex within 2.6 km of a referencing
+ * cell, which truncated a tapped trail wherever cells stopped referencing it. Measured afterwards, it
+ * removed 3.7% of points — 621,072 to 598,127 — so it was costing the feature and buying almost
+ * nothing. Full geometry is stored for every way a cell references.
+ *
+ * Joining is what actually fixes a truncated-looking trail. OSM splits a named way at every tag
+ * change and junction, so 14% of named routes in Washington arrive as several separate ways — the
+ * PCT as 68 of them, US 101 as 71 — and drawing only the segment nearest a cell looks like a
+ * fragment of a trail because it is one. Segments of the same name/ref/type whose ends meet are
+ * chained into a single way here, so the drawn line, the walk and the climb all describe the route
+ * rather than one piece of it. */
 /* Arc length at each vertex, so a point partway along a segment becomes a distance along the way —
    which is what a walk from a trailhead actually is. */
 function cumulative(pts) {
@@ -271,7 +265,7 @@ async function arcgis(base, s, w, n, e, fields) {
 /* ===================== enumeration ===================== */
 export function parseArgs(argv) {
   const o = { region: 'state', bbox: null, out: 'data/access.json', cells: 'data/cells.json',
-              checkpoint: null, resume: false, dryRun: false, skipUsfs: false };
+              checkpoint: null, resume: false, dryRun: false, skipUsfs: false, skipElevation: false };
   for (const a of argv) {
     let m;
     if ((m = /^--region=(.+)$/.exec(a))) o.region = m[1];
@@ -287,6 +281,7 @@ export function parseArgs(argv) {
     else if (a === '--resume') o.resume = true;
     else if (a === '--dry-run') o.dryRun = true;
     else if (a === '--skip-usfs') o.skipUsfs = true;
+    else if (a === '--skip-elevation') o.skipElevation = true;
     else throw new Error('unknown argument ' + a);
   }
   if (!o.bbox) {
@@ -372,6 +367,148 @@ export function stampWay(state, coords, cat, wid) {
     }
     arc += seg;
   }
+}
+
+/* ===================== joining fragmented routes =====================
+
+   Chain segments of one named route end to end. Only unambiguous chains are joined: if an endpoint
+   matches more than one other segment the route branches (a highway through a junction, a trail
+   network) and the pieces are left alone, because guessing a path through a fork would invent a
+   route nobody can walk. */
+export function joinRoutes(entries, snapM = JOIN_SNAP_M) {
+  const dist = (a, b) => Math.hypot((a[1] - b[1]) * mLon(a[0]), (a[0] - b[0]) * M_LAT);
+  const out = [];
+  const groups = new Map();
+  for (const e of entries) {
+    if (!e.name && !e.ref) { out.push(e); continue; }        // nothing to group an unnamed way by
+    const key = e.cat + '|' + e.type + '|' + (e.name || '') + '|' + (e.ref || '');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(e);
+  }
+
+  for (const [, list] of groups) {
+    if (list.length === 1) { out.push(list[0]); continue; }
+
+    /* Endpoint DEGREE decides what may be chained, computed once over the whole group.
+       Consuming segments as we go and then asking "is there exactly one match left?" is not the same
+       question: at a three-way junction the first seed correctly refuses to join, but by the time the
+       second seed looks, the first is already marked used and the fork looks unambiguous. Degree is a
+       property of the group, not of how far the loop has got. A point where exactly two segment ends
+       meet is a join; three or more is a junction and the pieces stay separate. */
+    const ends = list.flatMap((e, k) => [
+      { k, at: 0, pt: e.geom[0] },
+      { k, at: 1, pt: e.geom[e.geom.length - 1] },
+    ]);
+    const degree = pt => ends.filter(x => dist(x.pt, pt) <= snapM).length;
+    const matchAt = (pt, exclude) => {
+      const hits = ends.filter(x => !exclude.has(x.k) && dist(x.pt, pt) <= snapM);
+      return hits.length === 1 ? hits[0] : null;
+    };
+
+    const used = new Set();
+    for (let i = 0; i < list.length; i++) {
+      if (used.has(i)) continue;
+      used.add(i);
+      let chain = list[i].geom.slice();
+      const members = [list[i]];
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const end of ['tail', 'head']) {
+          const pt = end === 'tail' ? chain[chain.length - 1] : chain[0];
+          if (degree(pt) !== 2) continue;              // a junction, or a dead end
+          const hit = matchAt(pt, new Set(members.map(m => list.indexOf(m))));
+          if (!hit) continue;
+          const seg = list[hit.k];
+          /* The incoming segment has to run INTO the join, whichever end of the chain we are at:
+             appending at the tail needs a segment that starts at the point, prepending at the head
+             needs one that ends there. Reversing on hit.at alone is right for one case and backwards
+             for the other, which silently produced a chain with a doubled point and a lost segment. */
+          const flip = end === 'tail' ? hit.at === 1 : hit.at === 0;
+          const g = flip ? seg.geom.slice().reverse() : seg.geom.slice();
+          if (end === 'tail') chain = chain.concat(g.slice(1));
+          else chain = g.slice(0, -1).concat(chain);
+          used.add(hit.k); members.push(seg); grew = true;
+          break;
+        }
+      }
+      // keep the strongest trailhead found on any member, and the longest constituent OSM id
+      const th = members.reduce((a, m) => Math.max(a, m.th), TRAILHEAD_NONE);
+      const osm = members.filter(m => m.osmId).sort((a, b) => b.geom.length - a.geom.length)[0];
+      out.push({ ...list[i], geom: chain, th, segments: members.length,
+                 osmId: osm ? osm.osmId : null });
+    }
+  }
+  return out;
+}
+
+/* ===================== elevation along a way =====================
+
+   Sampled from the same Terrarium tiles the cell bake reads, at every vertex of the stored geometry.
+   Cumulative POSITIVE difference, not the difference between endpoints: a rolling approach that
+   climbs 300 m in four rises and drops most of it again is a 300 m climb to walk, and endpoint
+   subtraction would call it flat. */
+const tileCache = new Map();
+let elevTiles = 0, elevTileFails = 0;
+
+async function terrainTile(z, x, y, loader) {
+  const k = z + '/' + x + '/' + y;
+  if (tileCache.has(k)) return tileCache.get(k);
+  const p = (async () => {
+    const url = TERRAIN_SOURCE.url.replace('{z}', z).replace('{x}', x).replace('{y}', y);
+    for (let a = 0; a < 5; a++) {
+      try {
+        const r = await (loader || fetch)(url, { signal: AbortSignal.timeout(REQ_TIMEOUT) });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        elevTiles++;
+        return decodePNG(Buffer.from(await r.arrayBuffer()));
+      } catch { await sleep(1200 * (a + 1)); }
+    }
+    elevTileFails++;
+    return null;
+  })();
+  tileCache.set(k, p);
+  return p;
+}
+
+export async function elevationProfile(geom, loader) {
+  const out = new Array(geom.length).fill(null);
+  const byTile = new Map();
+  geom.forEach(([la, ln], i) => {
+    const t = tileXY(la, ln, ELEV_Z), tx = Math.floor(t.x), ty = Math.floor(t.y);
+    const k = tx + ',' + ty;
+    if (!byTile.has(k)) byTile.set(k, { tx, ty, pts: [] });
+    byTile.get(k).pts.push({ i, px: Math.min(255, Math.floor((t.x - tx) * 256)),
+                                py: Math.min(255, Math.floor((t.y - ty) * 256)) });
+  });
+  for (const t of byTile.values()) {
+    const img = await terrainTile(ELEV_Z, t.tx, t.ty, loader);
+    if (!img) continue;
+    for (const q of t.pts) {
+      const at = (q.py * img.width + q.px) * img.channels;
+      out[q.i] = terrariumMetres(img.data[at], img.data[at + 1], img.data[at + 2]);
+    }
+  }
+  return out;
+}
+
+/* Cumulative climb between two positions along a way, given its per-vertex elevations. */
+export function gainBetween(geom, elev, arcA, arcB) {
+  if (!elev || elev.length !== geom.length) return -1;
+  const lo = Math.min(arcA, arcB), hi = Math.max(arcA, arcB);
+  let arc = 0, gain = 0, prev = null, any = false;
+  for (let i = 0; i < geom.length; i++) {
+    if (i > 0) {
+      const [aLa, aLn] = geom[i - 1], [bLa, bLn] = geom[i];
+      arc += Math.hypot((bLn - aLn) * mLon(aLa), (bLa - aLa) * M_LAT);
+    }
+    if (arc < lo - 1 || arc > hi + 1) { prev = null; continue; }
+    const e = elev[i];
+    if (e == null) { prev = null; continue; }
+    if (prev != null && e > prev) gain += e - prev;
+    prev = e; any = true;
+  }
+  return any ? Math.round(gain) : -1;
 }
 
 /* ===================== the bake ===================== */
@@ -540,56 +677,83 @@ export async function build(opts, deps = {}) {
   const referenced = new Set();
   for (const rec of state.nearest.values()) for (const c of CATS) if (rec[c]) referenced.add(rec[c].wid);
 
-  // Where each way is referenced from, so its geometry can be clipped to the stretch you can see.
-  const refCells = new Map();
-  for (const [k, rec] of state.nearest) {
-    const c0 = cells.get(k); if (!c0) continue;
-    for (const c of CATS) if (rec[c]) {
-      let list = refCells.get(rec[c].wid);
-      if (!list) refCells.set(rec[c].wid, list = []);
-      list.push(c0);
-    }
-  }
-
-  const wayIndex = new Map();
-  const outWays = [], outGeom = [];
-  const clippedGeom = new Map();
-  let ptsBefore = 0, ptsAfter = 0, named = 0, withTh = 0;
+  /* Join fragmented named routes, then keep FULL geometry. Every referenced way becomes one entry;
+     a way that was chained into another disappears and its cells are re-pointed at the joined
+     route, because a cell should name and draw the route rather than one segment of it. */
+  const entries = [];
   for (const wid of referenced) {
     const w = ways.get(wid);
     if (!w) continue;
-    ptsBefore += w.geom.length;
-    const clipped = clipToCells(w.geom, refCells.get(wid) || [], CAP + CLIP_PAD_M);
-    ptsAfter += clipped.length;
-    clippedGeom.set(wid, clipped);
-    if (w.name || w.ref) named++;
-    if (w.th) withTh++;
-    wayIndex.set(wid, outWays.length);
-    outWays.push([w.name, w.ref, w.type, CATS.indexOf(w.cat), w.th]);
-    outGeom.push(encodeGeom(clipped));
+    entries.push({ wid, name: w.name, ref: w.ref, type: w.type, cat: w.cat, th: w.th,
+                   osmId: /^o(\d+)$/.test(wid) ? Number(wid.slice(1)) : null,
+                   segments: 1, geom: w.geom });
+  }
+  const joined = joinRoutes(entries);
+  log('join       ' + entries.length.toLocaleString() + ' referenced ways -> '
+    + joined.length.toLocaleString() + ' routes ('
+    + joined.filter(j => j.segments > 1).length.toLocaleString() + ' were fragmented)');
+
+  /* Which joined route each original way ended up in. joinRoutes keeps the seed entry's wid, and a
+     chained member's cells have to follow it there. */
+  const routeOf = new Map();
+  for (let n = 0; n < joined.length; n++) routeOf.set(joined[n].wid, n);
+  // members that were absorbed: find them by geometry containment of their first point
+  for (const e of entries) {
+    if (routeOf.has(e.wid)) continue;
+    let best = -1, bestD = Infinity;
+    for (let n = 0; n < joined.length; n++) {
+      const j = joined[n];
+      if (j.cat !== e.cat || j.type !== e.type || (j.name || '') !== (e.name || '') || (j.ref || '') !== (e.ref || '')) continue;
+      const r = nearestOnWay(j.geom, e.geom[0][0], e.geom[0][1]);
+      if (r.d < bestD) { bestD = r.d; best = n; }
+    }
+    if (best >= 0 && bestD <= JOIN_SNAP_M * 2) routeOf.set(e.wid, best);
   }
 
-  /* The trailhead's position along each way, so a per-cell walk distance is a subtraction. Measured
-     on the CLIPPED geometry the app will draw, so the number shown matches the line shown. */
-  const thArc = new Map();
-  for (const wid of referenced) {
-    const w = ways.get(wid);
-    const geom = clippedGeom.get(wid);
-    if (!w || !w.th || !geom || !geom.length) continue;
+  /* Elevation along every stored route, from the same Terrarium tiles the cell bake reads. */
+  log('elevation  sampling ' + joined.reduce((a, j) => a + j.geom.length, 0).toLocaleString()
+    + ' points along ' + joined.length.toLocaleString() + ' routes');
+  const profiles = new Array(joined.length).fill(null);
+  if (!opts.skipElevation) {
+    for (let n = 0; n < joined.length; n++) {
+      profiles[n] = await elevationProfile(joined[n].geom, deps.tileFetch);
+      if ((n + 1) % 5000 === 0) log('elevation  ' + (n + 1).toLocaleString() + '/' + joined.length.toLocaleString()
+        + ' routes, ' + elevTiles + ' terrain tiles');
+    }
+  }
+
+  const outWays = [], outGeom = [];
+  let pts = 0, named = 0, withTh = 0;
+  for (let n = 0; n < joined.length; n++) {
+    const j = joined[n];
+    pts += j.geom.length;
+    if (j.name || j.ref) named++;
+    if (j.th) withTh++;
+    outWays.push([j.name, j.ref, j.type, CATS.indexOf(j.cat), j.th, j.osmId, j.segments]);
+    outGeom.push(encodeGeom(j.geom));
+  }
+
+  /* The trailhead's position along each route, so a per-cell walk is a subtraction. Measured on the
+     stored geometry, so the figures and the drawn line agree. An inferred trailhead is an END of the
+     route; a mapped one is projected onto it. */
+  const thArc = new Array(joined.length).fill(-1);
+  for (let n = 0; n < joined.length; n++) {
+    const j = joined[n];
+    if (!j.th || !j.geom.length) continue;
     let arc = 0;
-    if (w.th === TRAILHEAD_MAPPED) {
+    if (j.th === TRAILHEAD_MAPPED) {
       let best = Infinity;
       for (const [tLa, tLn] of trailheadNodes) {
-        const r = nearestOnWay(geom, tLa, tLn);
+        const r = nearestOnWay(j.geom, tLa, tLn);
         if (r.d <= TH_MAPPED_M && r.d < best) { best = r.d; arc = r.arc; }
       }
       if (best === Infinity) arc = 0;
     }
-    thArc.set(wid, arc);
+    thArc[n] = arc;
   }
 
   const rows = [];
-  let withWalk = 0;
+  let withWalk = 0, withGain = 0;
   for (const [k, rec] of state.nearest) {
     const c0 = cells.get(k);
     if (!c0 || !inBbox(c0[0], c0[1], opts.bbox)) continue;
@@ -598,19 +762,21 @@ export async function build(opts, deps = {}) {
     let any = false;
     for (const c of CATS) {
       const r = rec[c];
-      if (!r || !wayIndex.has(r.wid)) { row.push(-1, -1, -1); continue; }
+      const n = r ? routeOf.get(r.wid) : undefined;
+      if (!r || n === undefined) { row.push(-1, -1, -1, -1); continue; }
       any = true;
-      const w = ways.get(r.wid);
-      let walk = -1;
-      if (w.th && thArc.has(r.wid)) {
-        // r.arc was measured on full geometry; re-project onto the stored line so the figure and the
-        // drawn line agree.
-        const g = clippedGeom.get(r.wid);
-        const proj = nearestOnWay(g, c0[0], c0[1]);
-        walk = Math.round(Math.abs(proj.arc - thArc.get(r.wid)));
+      const route = joined[n];
+      let walk = -1, gain = -1;
+      if (route.th && thArc[n] >= 0) {
+        /* r.arc was measured on the pre-join geometry, so re-project the cell onto the route: the
+           number shown has to describe the line shown. */
+        const proj = nearestOnWay(route.geom, c0[0], c0[1]);
+        walk = Math.round(Math.abs(proj.arc - thArc[n]));
         withWalk++;
+        gain = gainBetween(route.geom, profiles[n], thArc[n], proj.arc);
+        if (gain >= 0) withGain++;
       }
-      row.push(Math.round(r.d), wayIndex.get(r.wid), walk);
+      row.push(Math.round(r.d), n, walk, gain);
     }
     if (any) rows.push(row);
   }
@@ -621,8 +787,11 @@ export async function build(opts, deps = {}) {
     region: opts.region, bbox: opts.bbox,
     sources: SOURCES,
     cells_generated: cellsFile.generated,
-    geometry: { simplify_m: SIMPLIFY_M, clip_pad_m: CAP + CLIP_PAD_M, encoding: 'delta int 1e5',
-                points_before_clip: ptsBefore, points_stored: ptsAfter },
+    geometry: { simplify_m: SIMPLIFY_M, clipped: false, encoding: 'delta int 1e5',
+                points_stored: pts, join_snap_m: JOIN_SNAP_M,
+                routes_joined: outWays.filter(w => w[6] > 1).length },
+    elevation: { source: TERRAIN_SOURCE.name, zoom: ELEV_Z, tiles: elevTiles,
+                 tile_failures: elevTileFails, method: 'cumulative positive difference at every vertex' },
     trailheads: { mapped_nodes: trailheadNodes.length, snap_m: TH_SNAP_M, mapped_m: TH_MAPPED_M,
                   ways_with_trailhead: withTh },
     tiles: tiles.length,
@@ -630,19 +799,20 @@ export async function build(opts, deps = {}) {
                 overpass_mb: +(osmBytes / 1e6).toFixed(1),
                 usfs: usfsRequests, usfs_retries: usfsRetries, areas_abandoned: osmGaveUp },
     counts: { cells: rows.length, ways: outWays.length, ways_seen: ways.size,
-              ways_named: named, cell_walks: withWalk },
+              ways_named: named, ways_with_trailhead: withTh,
+              cell_walks: withWalk, cell_gains: withGain },
     seconds: Math.round((Date.now() - t0) / 1000),
   };
   const generated = new Date().toISOString();
-  let out = { version: 3, generated, cap_m: CAP, provenance, ways: outWays, rows };
-  let geomOut = { version: 3, generated, geom: outGeom };
+  let out = { version: ACCESS_FORMAT, generated, cap_m: CAP, provenance, ways: outWays, rows };
+  let geomOut = { version: ACCESS_FORMAT, generated, geom: outGeom };
 
   if (opts.region !== 'state' && fs.existsSync(opts.out)) {
     const prev = JSON.parse(fs.readFileSync(opts.out, 'utf8'));
     const pg = opts.out.replace(/\.json$/, '') + '-geom.json';
     const prevGeom = fs.existsSync(pg) ? (JSON.parse(fs.readFileSync(pg, 'utf8')).geom || []) : [];
     const m = mergeInto(prev, out, prevGeom, outGeom);
-    out = m.merged; geomOut = { version: 3, generated, geom: m.geom };
+    out = m.merged; geomOut = { version: ACCESS_FORMAT, generated, geom: m.geom };
     log('merge      ' + out.provenance.counts.replaced.toLocaleString() + ' rebaked, '
       + out.provenance.counts.carried_over.toLocaleString() + ' carried over');
   }
@@ -657,7 +827,11 @@ export async function build(opts, deps = {}) {
       + out.ways.length.toLocaleString() + ' ways, ' + (fs.statSync(opts.out).size / 1e6).toFixed(2) + ' MB');
     log('wrote ' + geomPath + ' - geometry only, ' + (fs.statSync(geomPath).size / 1e6).toFixed(2)
       + ' MB, fetched by the app only on the first "show the approach"');
-    if (fs.existsSync(opts.checkpoint)) fs.unlinkSync(opts.checkpoint);
+    /* The checkpoint is NOT deleted on success. It holds the fetched, unclipped geometry, and
+       everything after the fetch — joining, elevation, clipping decisions, the row format — is
+       assembly. Deleting it last time meant a change to any of that cost a ten-hour re-fetch, which
+       is exactly what happened. Re-run with --resume to re-assemble for free. */
+    log('kept ' + opts.checkpoint + ' — re-run with --resume to re-assemble without re-fetching');
   }
   log('done in ' + Math.round((Date.now() - t0) / 1000) + 's - ' + osmRequests + ' Overpass ('
     + osmRetries + ' retries, ' + (osmBytes / 1e6).toFixed(0) + ' MB), ' + usfsRequests + ' USFS'
@@ -679,18 +853,18 @@ export function mergeInto(prev, fresh, prevGeom, freshGeom) {
   for (const g of (prevGeom || [])) geom.push(g);
   const carried = (prev.rows || []).filter(r => !mine.has(r[0] + ':' + r[1])).map(r => {
     const row = r.slice();
-    for (let n = 0; n < CATS.length; n++) { const at = 3 + n * 3; if (row[at] >= 0) row[at] += shift; }
+    for (let n = 0; n < CATS.length; n++) { const at = 3 + n * ROW_STRIDE; if (row[at] >= 0) row[at] += shift; }
     return row;
   });
   const rows = [...carried, ...fresh.rows].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
   const used = new Set();
-  for (const r of rows) for (let n = 0; n < CATS.length; n++) { const w = r[3 + n * 3]; if (w >= 0) used.add(w); }
+  for (const r of rows) for (let n = 0; n < CATS.length; n++) { const w = r[3 + n * ROW_STRIDE]; if (w >= 0) used.add(w); }
   const remap = new Map(); const kept = [], keptGeom = [];
   [...used].sort((a, b) => a - b).forEach(old => {
     remap.set(old, kept.length); kept.push(ways[old]); keptGeom.push(geom[old]);
   });
   for (const r of rows) for (let n = 0; n < CATS.length; n++) {
-    const at = 3 + n * 3;
+    const at = 3 + n * ROW_STRIDE;
     if (r[at] >= 0) r[at] = remap.get(r[at]);
   }
   return { merged: { ...fresh, ways: kept, rows,
