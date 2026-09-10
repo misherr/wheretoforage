@@ -83,6 +83,18 @@ while nothing throws.
   scored as though their trees were ideal, for days, invisibly.
 - **The model is deterministic and takes `doy` as an argument.** Nothing under
   `src/model/` may read the clock, the DOM or the network.
+- **Every entry gets its access from the cell that contains it, in one place.**
+  `withAccess()` in `index.html` wraps every `makeEntry` call — baked cells, the
+  sub-mile refine, a live block score, an exact point. It cannot live in
+  `makeEntry` itself, which is in `src/model/` and may not know how reachable a
+  cell is. Three of those four paths once lacked the lookup, so tapping the map
+  and opening the same cell from Top spots disagreed, and the tap read as
+  "nothing is mapped" — a false negative wearing the honest answer's clothes.
+  [docs/access.md](docs/access.md#a-tap-and-a-top-spots-row-must-be-the-same-cell)
+- **"Examined and found nothing" and "never examined" are different answers.**
+  The access bake covers the cells in `cells.json`; a point outside that set —
+  31.5% of in-state taps — was never looked at, and says so. Only a cell the bake
+  actually walked may read as *unknown*.
 - **Access data says what is *mapped*, never what exists.** A cell with nothing
   mapped nearby reads as *unknown*, not as trailless — coverage on private
   timberland is patchy, and absence of a mapped way is not absence of a way.

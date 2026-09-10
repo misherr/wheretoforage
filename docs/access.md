@@ -527,3 +527,95 @@ exactly that case.
 
 Cells are a regular lattice, so the candidates for any point are a small fixed
 box of cell indices rather than a spatial search.
+
+## A tap and a Top spots row must be the same cell
+
+Reported: access appeared when opening a cell from Top spots and not when
+tapping the map, including on cells next to ones that worked. Both paths read the
+same per-cell data, so this was a join bug, and it turned out to be two of them.
+
+### The lookup lived in one path instead of all of them
+
+`e.access` was assigned in exactly one place — the loop that loads baked cells.
+Four places build an entry:
+
+| path | builds | had access |
+| --- | --- | --- |
+| the baked-cell loader | every cell in `cells.json` | yes |
+| `pointEntry` | an exact point | **no** |
+| `buildCells` → `refine()` | sub-mile cells when zoomed in | **no** |
+| `scoreBlocks` | cells on the live (non-public) load | **no** |
+
+Top spots hands `showPoint` a baked cell, so it always worked. A map tap resolves
+`cells.get(cellKey(lat,lon))` and **falls through to `pointEntry` whenever that
+misses** — which it does for every point outside the 48,032 baked cells.
+
+The keying was never the problem, though it looks like the obvious suspect:
+`STATIC.access.byCell` is keyed `i:j` from the row's own first two fields, and
+`cellKey(lat,lon)` produces exactly that string. Both paths agreed about the key.
+One of them simply never asked.
+
+**What made it dangerous rather than merely missing.** An entry with no access is
+`undefined`, `classifyAccess(undefined)` is `unknown`, and the sheet renders that
+as *"No mapped access — Nothing is mapped within about a mile. That may mean no
+way exists, or simply that nobody has mapped one."* Careful, hedged, and false:
+the row was in the index the whole time. Measured on the same coordinates,
+46.49425,-121.4343:
+
+| path | Access |
+| --- | --- |
+| tap | **PCNST Trail** (9 mapped segments joined), 68.5 mi walk, "Also nearby: unnamed trail 0.3 mi" |
+| the same point, exact | **No mapped access** |
+
+A false negative dressed as a careful one is worse than a blank, because nothing
+about it invites a second look.
+
+The fix is a wrapper, `withAccess()`, around every `makeEntry` call. It cannot go
+inside `makeEntry`: that lives in `src/model/`, and the model may not know how
+reachable a cell is — two tests enforce that, in both directions. A wrapper at the
+one shared constructor is what makes a fifth path get access for free instead of
+silently reading as trailless.
+
+### And a cell the bake never examined was told that nothing is mapped
+
+The first fix does nothing for a point with no row at all, and that is the more
+common case. The bake walks the cells in `cells.json` and writes a row where it
+found something:
+
+- 46,373 rows, **all** of them for baked cells (0 fall outside it)
+- 1,659 baked cells with no row — examined, nothing within `CAP`. Honestly unknown.
+- everything else in the state — **never examined**, because `cells.json` holds
+  48,032 of roughly 69,600 in-state lattice cells and the rest were gated out as
+  non-habitat.
+
+**31.5% of taps that land inside Washington land outside the baked set.** A tap
+goes wherever a finger goes; the bake only covers plausible habitat. Those places
+are shrub-steppe, farmland, water and town — full of roads — so "nothing is
+mapped within about a mile" there is not just unproven, it is usually flatly
+wrong. Verified at 46.8628,-119.7086 near Othello.
+
+So coverage is now tracked separately from content. `STATIC.access.examined` is
+the set of cells the bake walked, and a point outside it reads *"Access not
+checked here — this point is outside the cells the access bake covers, so no way
+was looked for near it. That is not the same as nothing being mapped."* With no
+examined set (an older `access.json`, or `cells.json` missing) the app assumes
+examined, which is the previous behaviour rather than a map that says "not
+checked" everywhere.
+
+This is the same rule the file-level guard already applied — with no access file
+the section is omitted rather than rendered as "nothing is mapped" — applied per
+cell instead of per file.
+
+### An exact point says whose access it is
+
+An exact point and a sub-mile refine cell are both smaller than the square mile
+access is measured for, and the distances are from the **cell centre**, up to
+about half a mile from the tap. Both now carry: *"Access is for the square-mile
+cell containing this point, not for the exact coordinate — distances are measured
+from the cell centre."*
+
+One edge worth knowing: `exactPoint` rounds the tap to 4 dp before building the
+entry, which can move it by ~5 m, so a tap within 5 m of a cell boundary can be
+attributed to the neighbour. On a 1.6 km cell that is the right trade, and the
+sheet describes the cell it actually resolved. The parity test's containment
+assertion is what surfaced it — it caught a bad fixture of mine on the first run.

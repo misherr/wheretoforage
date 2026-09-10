@@ -12,6 +12,10 @@
    never as "trailless". Naming a way does not upgrade that: a named way is still only mapped, not
    confirmed passable, gated, or open this season. */
 
+/* The lattice, so that "which cell contains this point" has exactly one answer. Importing grid.mjs
+   is allowed and importing anything from src/model/ is not — a test enforces both directions. */
+import { cellKey } from './grid.mjs';
+
 /* Distances are metres from the cell centre. A cell is roughly 1.6 km across, so NEAR is about "in
    this cell" and REACH is about "a short walk from it". */
 export const NEAR = 800;
@@ -289,6 +293,48 @@ export function gainLabel(m) {
   if (ft < 50) return 'negligible climb';
   return Math.round(ft / 50) * 50 + ' ft of climb';
 }
+
+/* Access is a property of a LATTICE CELL, not of a point, and every path that builds an entry has
+   to resolve it the same way: from the cell that contains the point. That was the bug this function
+   exists to prevent. The lookup lived inline in the one path that loads baked cells, so tapping the
+   map and opening the same place from Top spots disagreed — and they disagreed in the worst possible
+   direction, because an entry with no access reads as the `unknown` class, which the sheet renders
+   as "No mapped access — nothing is mapped within about a mile". That is indistinguishable from the
+   honest answer, and it was wrong: the row was sitting in the index the whole time. A false negative
+   dressed as a careful one is worse than a blank.
+
+   Undefined still means unknown, which is right when there genuinely is no row for the cell — 1,659
+   of 48,032 — or no file at all. What must not happen is unknown by omission. */
+export function accessAt(byCell, lat, lon) {
+  if (!byCell || !Number.isFinite(lat) || !Number.isFinite(lon)) return undefined;
+  return byCell.get(cellKey(lat, lon));
+}
+
+/* "Nothing is mapped near this cell" and "nobody looked near this cell" are different answers, and
+   only one of them is about the ground. The bake walks the cells in cells.json — 48,032 of the
+   ~69,600 in-state lattice cells, the rest having been gated out as non-habitat — and writes a row
+   for the 46,373 where it found something. So a missing row means one of two things:
+
+     the cell IS in cells.json  -> examined, nothing found within CAP. `unknown` is the honest answer.
+     the cell is NOT            -> never examined. `unknown` would be a claim about a lookup that
+                                   never happened, which is the overclaim this whole module exists
+                                   to avoid.
+
+   The second case is not rare: 31.5% of taps that land inside the state land outside the baked set,
+   because a tap goes wherever a finger goes and the bake only covers plausible habitat. Those places
+   are shrub-steppe, farmland, water and town — full of roads — so "nothing is mapped within about a
+   mile" there is not merely unproven, it is usually false. */
+export const NOT_EXAMINED_LABEL = 'Access not checked here';
+export const NOT_EXAMINED_NOTE =
+  'This point is outside the cells the access bake covers, so no way was looked for near it. That is '
+  + 'not the same as nothing being mapped — it means nobody asked. Tap a scored cell for access.';
+
+/* An exact point and a sub-mile refine cell are both smaller than the cell access is measured for,
+   so the sheet has to say whose access it is showing. The distances are from the cell centre, which
+   can be up to about half a mile from where the user actually tapped. */
+export const CELL_SCOPE_NOTE =
+  'Access is for the square-mile cell containing this point, not for the exact coordinate — '
+  + 'distances are measured from the cell centre.';
 
 /* Past this, a walk figure stops describing a walk and starts describing the data. The figure is
    real — it is the distance along the route from the only trailhead mapped on it — but at this

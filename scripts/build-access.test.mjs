@@ -821,8 +821,18 @@ test('honesty: with no access data the sheet says nothing, rather than "nothing 
   const guard = before.lastIndexOf('if(STATIC.access){');
   assert.ok(guard > 0, 'no if(STATIC.access) guard precedes the section at all');
   const between = before.slice(guard);
-  assert.ok(between.length < 900 && !between.includes('<div class="sec">'),
-    'the guard must immediately enclose the section, or it renders a claim with no data behind it');
+  /* Does the guard still ENCLOSE the section? This used to be a byte budget, which was a proxy for
+     the same question and broke the first time a comment was added inside the guard while the
+     invariant held perfectly. So: strip comments and template literals — `${t}` braces live in
+     those — and assert the block has not closed before the section is emitted. */
+  const code = between
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '')
+    .replace(/`(?:[^`\\]|\\.)*`/g, '``');
+  assert.ok(!code.includes('}'),
+    'the if(STATIC.access) block closes before the section — it renders a claim with no data behind it');
+  assert.ok(!between.includes('<div class="sec">'),
+    'and no other section may be emitted between the guard and this one');
   assert.match(AC.CLASSES.unknown.blurb, /may mean no way exists, or simply that nobody has mapped one/,
     'and the unknown class keeps saying which of the two it cannot distinguish');
 });
@@ -1042,4 +1052,138 @@ test('walk: the sheet renders the caveat where the figure is', () => {
   assert.match(block, /ac\.walkDoubt/, 'the caveat has to be rendered, not just computed');
   assert.match(block, /accessDistance\(ac\.walk\)/, 'and the number stays on the line above it');
   assert.match(app, /\.caveat\{/, 'with a style of its own, so it reads as a caveat');
+});
+
+/* ===================== a tap and Top spots are the same cell =====================
+   The invariant that was missing. Access is per lattice cell, so the two paths into the sheet have
+   to produce the same answer for the same cell -- and for a long time they did not: the lookup lived
+   inline in the baked-cell loader, so an exact point (any tap that cannot resolve to a scored baked
+   cell, which is 32% of in-state taps) got no access at all and read as "No mapped access, nothing
+   is mapped within about a mile". The row was in the index the whole time. A false negative wearing
+   the honest answer's clothes is worse than a blank. */
+
+const parityIndex = () => {
+  const [i, j] = cellIndex(47.5, -121.5);
+  /* one real row: a trail 200 m out, way 0, a 3 km walk with 400 m of climb */
+  const row = [i, j, 200, 0, 3000, 400, -1, -1, -1, -1, -1, -1, -1, -1];
+  const byCell = new Map([[i + ':' + j, AC.decodeRow(row)]]);
+  const ways = [['Cold Creek Trail', null, 'path', 1, AC.TRAILHEAD_MAPPED, 987, 2]];
+  return { i, j, byCell, ways };
+};
+
+test('parity: a tap anywhere in a cell and that cell from Top spots give identical access', () => {
+  const { i, j, byCell, ways } = parityIndex();
+  const [clat, clon] = cellCenter(i, j);
+
+  // Top spots hands showPoint the baked cell itself, so its access is the cell-centre lookup.
+  const fromTop = AC.accessAt(byCell, clat, clon);
+  assert.ok(fromTop, 'the fixture cell must resolve, or this test proves nothing');
+  const expected = AC.accessDetail(fromTop, ways);
+  assert.equal(expected.wayName, 'Cold Creek Trail');
+
+  /* A tap lands wherever the finger lands. Every one of these is inside the same cell -- the cell
+     is 0.0145 x 0.0214 degrees, so half-widths are 0.00725 and 0.0107 -- and they run close to each
+     edge without touching it. Close matters: exactPoint rounds the tap to 4 dp before building the
+     entry, which can shift it by up to 0.00005 degrees, about 5 m. A tap within 5 m of a cell edge
+     can therefore be attributed to the neighbour, and the containment assertion below is what caught
+     that while I was writing the fixture. On a 1.6 km cell it is the right trade: the sheet then
+     describes the cell it actually resolved, and says that it is describing a cell. */
+  const offsets = [[0, 0], [0.004, 0.006], [-0.004, -0.006], [0.0070, 0.0104], [-0.0070, -0.0104],
+                   [0.0001, -0.0103], [-0.0069, 0.0002]];
+  for (const [dla, dlo] of offsets) {
+    const tapLat = +(clat + dla).toFixed(4), tapLon = +(clon + dlo).toFixed(4);
+    assert.deepEqual(cellIndex(tapLat, tapLon), [i, j], `${tapLat},${tapLon} left the cell — bad fixture`);
+    const tapped = AC.accessAt(byCell, tapLat, tapLon);
+    assert.deepEqual(AC.accessDetail(tapped, ways), expected,
+      `a tap at ${tapLat},${tapLon} must show the same access as the cell from Top spots`);
+  }
+});
+
+test('parity: the next cell over is genuinely different, so the test above is not vacuous', () => {
+  const { i, j, byCell, ways } = parityIndex();
+  const [nlat, nlon] = cellCenter(i, j + 1);
+  const neighbour = AC.accessAt(byCell, nlat, nlon);
+  assert.equal(neighbour, undefined, 'the fixture only holds one cell');
+  assert.notDeepEqual(AC.accessDetail(neighbour, ways),
+    AC.accessDetail(AC.accessAt(byCell, ...cellCenter(i, j)), ways),
+    'if every point resolved the same way the parity test would pass on a broken lookup');
+});
+
+test('parity: a missing row is unknown, but a missing lookup must not be', () => {
+  /* Both read as the unknown class, which is exactly why the bug was invisible. The distinction the
+     app has to preserve: undefined because the bake found nothing near this cell (honest), never
+     undefined because nobody asked (a false negative). */
+  const { byCell, ways } = parityIndex();
+  assert.equal(AC.accessAt(null, 47.5, -121.5), undefined, 'no index at all is unknown');
+  assert.equal(AC.accessAt(byCell, 46.0, -120.0), undefined, 'a cell with no row is unknown');
+  assert.equal(AC.classifyAccess(AC.accessAt(byCell, 46.0, -120.0)), 'unknown');
+  // and the guard against a NaN coordinate silently keying "NaN:NaN"
+  assert.equal(AC.accessAt(byCell, NaN, -121.5), undefined);
+  assert.equal(AC.accessAt(byCell, 47.5, undefined), undefined);
+});
+
+test('parity: every path that builds an entry attaches access', () => {
+  /* The structural half of the invariant, and the one that would have caught the original bug.
+     There are four makeEntry call sites in the app -- baked cells, the sub-mile refine, a live block
+     score, and an exact point -- and only the first attached access. makeEntry itself cannot do it:
+     it lives in src/model/, which may not know how reachable a cell is. So the wrapper is the seam,
+     and every call site has to go through it. */
+  const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
+  const lines = app.split('\n');
+  const sites = lines.filter(l => /makeEntry\(/.test(l) && !/^\s*(\/\/|\*|import )/.test(l));
+  assert.ok(sites.length >= 4, `expected at least 4 makeEntry call sites, found ${sites.length}`);
+  for (const l of sites) {
+    assert.match(l, /withAccess\(makeEntry\(/,
+      'a makeEntry call that is not wrapped in withAccess builds an entry whose access reads as '
+      + '"nothing is mapped": ' + l.trim().slice(0, 120));
+  }
+  // and the wrapper must actually do the lookup, keyed on the entry's own coordinates
+  assert.match(app, /const withAccess=e=>\{[^\n]*accessAt\(STATIC\.access&&STATIC\.access\.byCell,e\.lat,e\.lon\)/,
+    'withAccess must resolve access from the containing cell of the entry it is given');
+});
+
+test('parity: an exact point says whose access it is showing', () => {
+  /* A point sheet shows distances measured from the cell centre, up to about half a mile from the
+     tap. Showing them without saying so would be a different overclaim from the one above. */
+  assert.match(AC.CELL_SCOPE_NOTE, /square-mile cell containing this point/);
+  assert.match(AC.CELL_SCOPE_NOTE, /not for the exact coordinate/);
+  assert.match(AC.CELL_SCOPE_NOTE, /cell centre/);
+  const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
+  const at = app.indexOf('<div class="sec">Getting there</div>');
+  const block = app.slice(at - 700, at + 400);
+  assert.match(block, /CELL_SCOPE_NOTE/, 'the note has to be rendered on the point sheet');
+  assert.match(block, /e\.exact\|\|\(e\.size&&e\.size<DLAT\)/,
+    'and on a sub-mile refine cell too, which is smaller than the cell access describes');
+});
+
+test('honesty: a cell the bake never examined is not told that nothing is mapped', () => {
+  /* The second half of the tap bug, and a distinct overclaim. The bake walks the cells in
+     cells.json and writes a row where it found something, so a missing row means either "examined,
+     found nothing" (honest unknown, 1,659 cells) or "never examined" — and 31.5% of taps that land
+     inside the state land outside the baked set, where roads are everywhere. Saying "nothing is
+     mapped within about a mile" there is a claim about a lookup that never happened.
+
+     The distinction is app-side because it is about coverage, not about a row, so this checks the
+     vocabulary and that the sheet branches on it. */
+  assert.match(AC.NOT_EXAMINED_NOTE, /not the same as nothing being mapped/);
+  assert.ok(!/nothing is mapped within/i.test(AC.NOT_EXAMINED_NOTE),
+    'the not-examined note must not borrow the unknown class blurb');
+  assert.ok(!/trailless|roadless|no way exists/i.test(AC.NOT_EXAMINED_LABEL + AC.NOT_EXAMINED_NOTE),
+    'and must not assert tracklessness either');
+
+  const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
+  assert.match(app, /const accessExamined=\(lat,lon\)=>[^\n]*examined\.has\(cellKey\(lat,lon\)\)/,
+    'coverage has to be decided by the containing cell, the same key access itself uses');
+  assert.match(app, /STATIC\.access\.examined=new Set\(STATIC\.cells\.rows\.map\(r=>cellKey\(r\[0\],r\[1\]\)\)\)/,
+    'the examined set is the cells.json cell set — what the bake actually walked');
+  const at = app.indexOf('<div class="sec">Getting there</div>');
+  const block = app.slice(at, at + 1400);
+  assert.match(block, /if\(!e\.access&&!accessExamined\(e\.lat,e\.lon\)\)/,
+    'the sheet must branch on coverage before rendering the unknown class');
+  assert.match(block, /NOT_EXAMINED_LABEL/, 'and say so in the Access row');
+  /* Fall back to the old behaviour when there is no examined set, rather than telling every cell it
+     was not examined — an older access.json or a missing cells.json must not turn the whole map
+     into "not checked". */
+  assert.match(app, /!STATIC\.access\.examined\|\|STATIC\.access\.examined\.has/,
+    'with no examined set, assume examined');
 });

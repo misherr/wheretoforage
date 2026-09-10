@@ -210,7 +210,8 @@ import { DLAT, DLON, BLK, BLAT, BLON, inWA, cellCenter, cellKey,
 // Access is a separate axis from suitability and never touches a score — see src/access.mjs.
 import { classifyAccess, accessDetail, accessRank, accessDistance, gainLabel, externalLinks,
          NO_TRAILHEAD_NOTE, decodeRow as decodeAccessRow, decodeWay as decodeAccessWay,
-         CLASSES as ACCESS_CLASSES, ACCESS_FORMAT } from './src/access.mjs';
+         CLASSES as ACCESS_CLASSES, ACCESS_FORMAT, accessAt, CELL_SCOPE_NOTE,
+         NOT_EXAMINED_LABEL, NOT_EXAMINED_NOTE } from './src/access.mjs';
 /* ===================== CONFIG ===================== */
 const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
 const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400; // local refine below 1 mi when zoomed way in
@@ -466,7 +467,7 @@ async function buildCells(pts,size,anchorSp,onProgress){
   const needSet=new Map();
   pts.forEach((p,i)=>{ if(habs[i].score>0.08&&!anchorHit(p[0],p[1]).w){ const a=anchorSp?snapAnchor(p[0],p[1],anchorSp):p; needSet.set(key(a[0],a[1]),a); } });
   if(needSet.size){ lastFailed=0; await getWeather([...needSet.values()],onProgress); }
-  const entries=pts.map((p,i)=>{ const terr=terrainAt(getE,p[0],p[1],size); const e=makeEntry(p[0],p[1],size,el[i],terr,anchorHit(p[0],p[1]).w,DOY); e.lonsize=size; return e; });
+  const entries=pts.map((p,i)=>{ const terr=terrainAt(getE,p[0],p[1],size); const e=withAccess(makeEntry(p[0],p[1],size,el[i],terr,anchorHit(p[0],p[1]).w,DOY)); e.lonsize=size; return e; });
   await vegFor(entries.filter(e=>everHabitat(e.lat,e.lon,e.elev,DOY)>0.08),1);
   return entries;
 }
@@ -480,7 +481,7 @@ async function pointEntry(lat,lon,onProgress){
   let w=null;
   if(PUBLIC_MODE||weatherAsOf){ w=anchorHit(lat,lon).w; }
   else if(hab.score>0.08){ lastFailed=0; [w]=await getWeather([[lat,lon]],onProgress); }
-  const e=makeEntry(lat,lon,DLAT/3,el[0],terr,w,DOY); e.lonsize=DLON/3;
+  const e=withAccess(makeEntry(lat,lon,DLAT/3,el[0],terr,w,DOY)); e.lonsize=DLON/3;
   await vegFor([e],4);
   return e;
 }
@@ -559,6 +560,18 @@ function setStatus(t){ $('status').textContent=t; }
 
 /* ===================== STATIC DATA (baked cells + daily weather file) ===================== */
 const STATIC={cells:null,weather:null,access:null,tried:false}; let weatherAsOf=null, weatherSource='local', accessAsOf=null;
+/* Every entry gets its access from the cell that contains it, and this is the only place that
+   happens. It is a wrapper rather than part of makeEntry because makeEntry lives in src/model/, and
+   the model may not know how reachable a cell is (hard rule 8; two tests enforce it). Four call
+   sites build entries — baked cells, the sub-mile refine, a live block score, and an exact point —
+   and for a long time only the first attached access, so a tap and a Top spots row on the same cell
+   disagreed. Wrapping the constructor is what makes a fifth path get it for free instead of
+   silently reading as "nothing mapped". */
+const withAccess=e=>{ if(e) e.access=accessAt(STATIC.access&&STATIC.access.byCell,e.lat,e.lon); return e; };
+/* Did the bake look near this point at all? Unknown by omission is not the same answer as unknown
+   by inspection, and the sheet has to be able to tell them apart. With no examined set — an older
+   access.json, or cells.json missing — assume it did, which is the pre-existing behaviour. */
+const accessExamined=(lat,lon)=>!STATIC.access||!STATIC.access.examined||STATIC.access.examined.has(cellKey(lat,lon));
 /* The dev-branch staging site has no weather job of its own — a second scheduled fetch would double
    the Open-Meteo spend — so it borrows production's file, which GitHub Pages serves with
    Access-Control-Allow-Origin: *. Its own committed data/weather.json is whatever dev last merged and
@@ -615,8 +628,13 @@ async function tryStatic(){
       /* Geometry is shared by way rather than duplicated per cell — the difference between an 8 MB
          file and a 47 MB one. Rows carry indices into j.ways; decoding is deferred to the tap so
          48,000 polylines are never built up front. */
-      STATIC.access={ways:j.ways||[],byCell:new Map(),geom:null};
+      STATIC.access={ways:j.ways||[],byCell:new Map(),geom:null,examined:null};
       for(const row of j.rows) STATIC.access.byCell.set(row[0]+':'+row[1],decodeAccessRow(row));
+      /* Which cells the bake actually walked, so a missing row can be told from a missing lookup.
+         Every access row belongs to a cells.json cell (verified: 0 of 46,373 fall outside it), and
+         the 1,659 baked cells with no row were examined and had nothing — those are honestly
+         unknown. A point outside this set was never examined at all. */
+      if(STATIC.cells) STATIC.access.examined=new Set(STATIC.cells.rows.map(r=>cellKey(r[0],r[1])));
       accessAsOf=j.generated||null;
       if(j.provenance&&j.provenance.cells_generated&&STATIC.cells&&j.provenance.cells_generated!==STATIC.cells.generated)
         console.warn('access.json was baked against a different cells.json — some cells may read as unknown');
@@ -775,7 +793,7 @@ async function loadFromStatic(gen){
     const [lat,lon,elev,slope,aspect,vg]=r; ecache.set(key(lat,lon),elev);
     const terr={slope,aspect:aspect<0?null:aspect};
     const w=anchorHit(lat,lon).w;
-    const e=makeEntry(lat,lon,DLAT,elev,terr,w,DOY); e.lonsize=DLON;
+    const e=withAccess(makeEntry(lat,lon,DLAT,elev,terr,w,DOY)); e.lonsize=DLON;
     if(vg){
       /* Format 2 carries the four per-sample vegetation types and a tree-class bitmask, so host
          quality is recomputed here from the rules currently in src/model/ rather than read back as a
@@ -788,7 +806,6 @@ async function loadFromStatic(gen){
       else { host=vg[3]<0?null:vg[3]; top=(vg[4]||[]).map(([ni,sh])=>({name:names[ni],share:sh,host:hostOf(names[ni])})); }
       const v={treeFrac:vg[0],canopy:vg[1],height:vg[2],host,top}; v.mult=vegMult(v); e.veg=v; vcache.set(key(lat,lon),v); applyVeg(e,DOY);
       if(v.treeFrac>0){ vegged++; if(v.host==null||!v.top.length) noType++; } }
-    if(STATIC.access){ const a=STATIC.access.byCell.get(cellKey(lat,lon)); if(a) e.access=a; }
     cells.set(cellKey(lat,lon),e);
     if(++i%4000===0){ progress(`Loading baked cells… ${i.toLocaleString()}`,0.2+0.8*i/j.rows.length); renderAll(); await sleep(0); }
   }
@@ -879,7 +896,7 @@ async function scoreBlocks(blocks,w){
     const habs=pts.map((p,i)=>habitat(p[0],p[1],el[i],DOY));
     const made=[];
     pts.forEach((p,i)=>{ if(everHabitat(p[0],p[1],el[i],DOY)<=0.08) return;
-      const terr=terrainAt(getE,p[0],p[1],DLAT,DLON); const e=makeEntry(p[0],p[1],DLAT,el[i],terr,w,DOY); e.lonsize=DLON; cells.set(cellKey(p[0],p[1]),e); made.push(e); });
+      const terr=terrainAt(getE,p[0],p[1],DLAT,DLON); const e=withAccess(makeEntry(p[0],p[1],DLAT,el[i],terr,w,DOY)); e.lonsize=DLON; cells.set(cellKey(p[0],p[1]),e); made.push(e); });
     if(made.length) vegQueue.push(made);
   }catch(err){ console.warn('block scoring failed',err); }
 }
@@ -1024,33 +1041,49 @@ function showPoint(e,t){
     /* Name the route rather than only classifying it: "Forest Road 2703, 0.4 mi" is actionable and
        "trail mapped" is not. Naming it changes nothing about the honesty framing — a named way is
        still only MAPPED here, not confirmed passable, gated, or open this season. */
-    h+=`<div class="sec">Getting there</div><dl><dt>Access</dt><dd>`
-      +(ac.wayName?`<b>${ac.wayName}</b>`:ac.label)
-      +(ac.way&&ac.way.segments>1?' '+dim('('+ac.way.segments+' mapped segments joined)'):'')
-      +`<br>${dim(ac.blurb)}`
-      +(ac.wayIndex>=0?` <a href="#" class="drawway">Show the approach on the map</a>`:'')+`</dd>`;
-    /* The walk. Where there is no trailhead to measure from, say so rather than computing a distance
-       from an arbitrary end of the way — an invented start point would look like an answer. */
-    if(ac.walk!=null){
-      const climb = ac.gain!=null ? gainLabel(ac.gain) : null;
-      h+=`<dt>Walk from the trailhead</dt><dd>${accessDistance(ac.walk)}`
-        +(climb?` · ${climb}`:'')
-        +`<br>${dim(ac.trailheadNote)}`
-        +(climb?'':`<br>${dim('Elevation gain unavailable for this stretch.')}`)
-        /* An implausibly long walk is still shown, with the number intact, and told what it is.
-           Capping it would replace a measurement with an invention; hiding it would imply nothing
-           is known about reaching this cell. */
-        +(ac.walkDoubt?`<br><span class="caveat">${ac.walkDoubt}</span>`:'')+`</dd>`;
-    } else if(ac.straight!=null){
-      h+=`<dt>Distance</dt><dd>${accessDistance(ac.straight)} ${dim('in a straight line')}<br>${dim(NO_TRAILHEAD_NOTE)}</dd>`;
+    /* Whose access this is. An exact point and a sub-mile refine cell are both smaller than the
+       square mile access is measured for, so say so rather than letting a cell-centre distance read
+       as a distance from the tapped coordinate. */
+    const cellScoped=e.exact||(e.size&&e.size<DLAT);
+    h+=`<div class="sec">Getting there</div>`
+      +(cellScoped?`<div style="margin:-2px 0 6px">${dim(CELL_SCOPE_NOTE)}</div>`:'')
+      +`<dl>`;
+    /* A point the bake never walked gets said so, rather than borrowing the unknown class's
+       "nothing is mapped within about a mile" — which would be a claim about a lookup that never
+       happened. It is reachable: a tap goes wherever a finger goes, and 31.5% of in-state taps land
+       outside the baked cell set. */
+    if(!e.access&&!accessExamined(e.lat,e.lon)){
+      h+=`<dt>Access</dt><dd>${NOT_EXAMINED_LABEL}<br>${dim(NOT_EXAMINED_NOTE)}</dd></dl>`;
+      pendingWay=-1;
+    } else {
+      h+=`<dt>Access</dt><dd>`
+        +(ac.wayName?`<b>${ac.wayName}</b>`:ac.label)
+        +(ac.way&&ac.way.segments>1?' '+dim('('+ac.way.segments+' mapped segments joined)'):'')
+        +`<br>${dim(ac.blurb)}`
+        +(ac.wayIndex>=0?` <a href="#" class="drawway">Show the approach on the map</a>`:'')+`</dd>`;
+      /* The walk. Where there is no trailhead to measure from, say so rather than computing a distance
+         from an arbitrary end of the way — an invented start point would look like an answer. */
+      if(ac.walk!=null){
+        const climb = ac.gain!=null ? gainLabel(ac.gain) : null;
+        h+=`<dt>Walk from the trailhead</dt><dd>${accessDistance(ac.walk)}`
+          +(climb?` · ${climb}`:'')
+          +`<br>${dim(ac.trailheadNote)}`
+          +(climb?'':`<br>${dim('Elevation gain unavailable for this stretch.')}`)
+          /* An implausibly long walk is still shown, with the number intact, and told what it is.
+             Capping it would replace a measurement with an invention; hiding it would imply nothing
+             is known about reaching this cell. */
+          +(ac.walkDoubt?`<br><span class="caveat">${ac.walkDoubt}</span>`:'')+`</dd>`;
+      } else if(ac.straight!=null){
+        h+=`<dt>Distance</dt><dd>${accessDistance(ac.straight)} ${dim('in a straight line')}<br>${dim(NO_TRAILHEAD_NOTE)}</dd>`;
+      }
+      if(ac.others.length) h+=`<dt>Also nearby</dt><dd>${ac.others.map(o=>`${o.name||o.cat} ${accessDistance(o.m)}`).join('<br>')}</dd>`;
+      if(ac.way){
+        const links=externalLinks(ac.way,e.lat,e.lon);
+        h+=`<dt>Elsewhere</dt><dd>${links.map(l=>`<a href="${l.url}" target="_blank" rel="noopener">${l.label}</a> ${dim('— '+l.note)}`).join('<br>')}</dd>`;
+      }
+      h+=`<dt>Sources</dt><dd>${dim('OpenStreetMap and USFS roads and trails. A way shown here is mapped, which is not the same as passable, open, or legal to use — coverage on private timberland is especially uneven. It never affects the score.')}</dd></dl>`;
+      pendingWay = ac.wayIndex;
     }
-    if(ac.others.length) h+=`<dt>Also nearby</dt><dd>${ac.others.map(o=>`${o.name||o.cat} ${accessDistance(o.m)}`).join('<br>')}</dd>`;
-    if(ac.way){
-      const links=externalLinks(ac.way,e.lat,e.lon);
-      h+=`<dt>Elsewhere</dt><dd>${links.map(l=>`<a href="${l.url}" target="_blank" rel="noopener">${l.label}</a> ${dim('— '+l.note)}`).join('<br>')}</dd>`;
-    }
-    h+=`<dt>Sources</dt><dd>${dim('OpenStreetMap and USFS roads and trails. A way shown here is mapped, which is not the same as passable, open, or legal to use — coverage on private timberland is especially uneven. It never affects the score.')}</dd></dl>`;
-    pendingWay = ac.wayIndex;
   } else pendingWay = -1;     // nothing to draw, and nothing left over from the last cell
   if(e.w){
     const w=e.w,i=w.today; const days=[]; for(let d=Math.max(0,i-20);d<=i;d++) days.push(d); const mxp=Math.max(5,...days.map(d=>w.p[d]));

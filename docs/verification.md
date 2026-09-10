@@ -186,3 +186,38 @@ document.querySelector('#sheet-body .caveat').textContent
 The assertion in `build-access.test.mjs` proves the caveat is *rendered*; only
 opening it shows that it reads as a caveat and not as an error, and that the
 number above it is still 68.5 mi.
+
+## A tap and Top spots on the same cell
+
+The invariant that was missing, and the reason it was missing is that no test
+compared the two paths. Two halves, and both are needed:
+
+```js
+// behavioural: any point inside a cell resolves to that cell's row
+accessDetail(accessAt(byCell, tapLat, tapLon), ways)
+  === accessDetail(accessAt(byCell, centreLat, centreLon), ways)
+```
+
+```js
+// structural: every makeEntry call site is wrapped, so a fifth path cannot skip it
+lines.filter(l => /makeEntry\(/.test(l)).forEach(l => assert.match(l, /withAccess\(makeEntry\(/))
+```
+
+The behavioural half alone would have passed on the broken app — the lookup it
+tests was always correct. The structural half is the one that would have caught
+the bug, because the bug was that three of four call sites never called it.
+
+By hand, with the app open, the three cases that must agree:
+
+```js
+// 1. tap a baked cell    2. the same point as an exact point    3. a point outside the baked set
+const e = [...cells.values()].find(c => Math.abs(c.lat-46.49425)<1e-6 && Math.abs(c.lon+121.4343)<1e-6);
+leafletMap.fire('click', {latlng: L.latLng(e.lat, e.lon)});     // -> PCNST Trail, 68.5 mi
+document.getElementById('btn-exact').click();                   // -> identical, plus the scope note
+leafletMap.fire('click', {latlng: L.latLng(46.8628, -119.7086)}); // -> "Access not checked here"
+```
+
+Case 3 is the one to keep an eye on: before the fix it read "No mapped access —
+nothing is mapped within about a mile", which is a claim about a lookup that
+never happened. It is reachable from a third of in-state taps, and no assertion
+about `cells.json` cells would ever have exercised it.
