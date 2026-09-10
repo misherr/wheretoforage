@@ -5,6 +5,8 @@
 // "a Sitka spruce stand outscores a Douglas-fir plantation" only means something if the weather,
 // terrain, elevation and date are provably identical between the two.
 
+import { hostOf } from '../../src/model/vegetation.mjs';
+
 /* ===================== weather ===================== */
 // 34 days: 26 of history, today, and 7 of forecast — the same shape the real archive uses, because
 // analyze() indexes backwards from `today` by up to 30 days and fullAnalysis() walks 7 forward.
@@ -71,6 +73,32 @@ export const VEG = {
 
   // the regression itself: EVT did not resolve, so there is no host figure and no types at all
   missing:    { treeFrac: 1, canopy: 70, height: 25, host: null, top: [] },
+  // LANDFIRE named a type we have no rule for. A different situation from `missing`, and it must not
+  // score below it — knowing the type is strictly more information than not knowing it.
+  unrecognised: { treeFrac: 1, canopy: 70, height: 25, host: hostOf('Some Type Nobody Has A Rule For').sc,
+                  top: topOf('Some Type Nobody Has A Rule For') },
+
+  /* Compound host types — the rule-ordering bug. Cover and height are held at the same mature values
+     as the ladder above so only the host figure differs. The figures come from hostOf() rather than
+     being written in by hand: a fixture hard-coding 0.8 would keep passing if the rule that produces
+     0.8 were deleted tomorrow. */
+  pureSilverFir:    { treeFrac: 1, canopy: 70, height: 25, host: hostOf('North Pacific Mesic Silver Fir Forest').sc,
+                      top: topOf('North Pacific Mesic Silver Fir Forest') },
+  hemlockSilverFir: { treeFrac: 1, canopy: 70, height: 25, host: hostOf('North Pacific Mesic Western Hemlock-Silver Fir Forest').sc,
+                      top: topOf('North Pacific Mesic Western Hemlock-Silver Fir Forest') },
+  pureHemlock:      { treeFrac: 1, canopy: 70, height: 25, host: hostOf('North Pacific Western Hemlock Forest').sc,
+                      top: topOf('North Pacific Western Hemlock Forest') },
+  redcedarHemlock:  { treeFrac: 1, canopy: 70, height: 25, host: hostOf('North Pacific Hypermaritime Western Red-cedar-Western Hemlock Forest').sc,
+                      top: topOf('North Pacific Hypermaritime Western Red-cedar-Western Hemlock Forest') },
+  subalpineRock:    { treeFrac: 1, canopy: 70, height: 25, host: hostOf('North Pacific Alpine and Subalpine Bedrock and Scree').sc,
+                      top: topOf('North Pacific Alpine and Subalpine Bedrock and Scree') },
+
+  /* Stand structure — host held at 1.0 throughout so only canopy and height move. Heights are metres,
+     chosen against the real EVH range rather than an imagined one: p10 13, median 20, p90 27, max 40. */
+  tallModerate:  { treeFrac: 1, canopy: 45, height: 33, host: 1.0, top: topOf('North Pacific Mesic Silver Fir Forest') },
+  shortModerate: { treeFrac: 1, canopy: 50, height: 10, host: 1.0, top: topOf('North Pacific Mesic Silver Fir Forest') },
+  tallDense:     { treeFrac: 1, canopy: 84, height: 33, host: 1.0, top: topOf('North Pacific Mesic Silver Fir Forest') },
+  shortOpen:     { treeFrac: 1, canopy: 15, height: 4,  host: 1.0, top: topOf('North Pacific Mesic Silver Fir Forest') },
 };
 
 /* ===================== sites ===================== */
@@ -157,6 +185,20 @@ export const FIXTURES = {
   missingVegData: fixture('missingVegData', { veg: VEG.missing, w: { rain: SOAK } }),
   youngPlantation: fixture('youngPlantation', { veg: VEG.youngStand, w: { rain: SOAK } }),
   sparseCanopy: fixture('sparseCanopy', { veg: VEG.sparse, w: { rain: SOAK } }),
+  unrecognisedVegType: fixture('unrecognisedVegType', { veg: VEG.unrecognised, w: { rain: SOAK } }),
+
+  // compound host types — identical weather and terrain, only the host figure differs
+  pureSilverFirHost:    fixture('pureSilverFirHost',    { veg: VEG.pureSilverFir,    w: { rain: SOAK } }),
+  hemlockSilverFirHost: fixture('hemlockSilverFirHost', { veg: VEG.hemlockSilverFir, w: { rain: SOAK } }),
+  pureHemlockHost:      fixture('pureHemlockHost',      { veg: VEG.pureHemlock,      w: { rain: SOAK } }),
+  redcedarHemlockHost:  fixture('redcedarHemlockHost',  { veg: VEG.redcedarHemlock,  w: { rain: SOAK } }),
+  subalpineRockHost:    fixture('subalpineRockHost',    { veg: VEG.subalpineRock,    w: { rain: SOAK } }),
+
+  // stand structure — host held at 1.0, only cover and height differ
+  tallModerateStand:  fixture('tallModerateStand',  { veg: VEG.tallModerate,  w: { rain: SOAK } }),
+  shortModerateStand: fixture('shortModerateStand', { veg: VEG.shortModerate, w: { rain: SOAK } }),
+  tallDenseStand:     fixture('tallDenseStand',     { veg: VEG.tallDense,     w: { rain: SOAK } }),
+  shortOpenStand:     fixture('shortOpenStand',     { veg: VEG.shortOpen,     w: { rain: SOAK } }),
 };
 
 export { SOAK };

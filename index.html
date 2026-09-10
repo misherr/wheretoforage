@@ -194,7 +194,7 @@ import { clamp, trap, ft, f, inch, fmtDay, bandOf, labelOf } from './src/model/u
 import { habitat, everHabitat } from './src/model/habitat.mjs';
 import { LAPSE, adjustWeather, analyze, fullAnalysis, verdict } from './src/model/weather-score.mjs';
 import { STAGE_KEYS, STAGE_LABELS, stageBreakdown, stageOf } from './src/model/phenology.mjs';
-import { hostOf, HOST_UNKNOWN, vegMult, vegSummary } from './src/model/vegetation.mjs';
+import { hostOf, HOST_NO_INFO, vegMult, vegSummary, hostFromSamples } from './src/model/vegetation.mjs';
 import { makeEntry, applyVeg } from './src/model/cell.mjs';
 // The cell lattice, the state outline and terrainAt() are shared with scripts/build-cells.mjs, which
 // bakes data/cells.json. A second copy of this geometry would drift, and the symptom is a blank map.
@@ -744,7 +744,17 @@ async function loadFromStatic(gen){
     const terr={slope,aspect:aspect<0?null:aspect};
     const w=anchorHit(lat,lon).w;
     const e=makeEntry(lat,lon,DLAT,elev,terr,w,DOY); e.lonsize=DLON;
-    if(vg){ const top=(vg[4]||[]).map(([ni,sh])=>({name:names[ni],share:sh,host:hostOf(names[ni])})); const v={treeFrac:vg[0],canopy:vg[1],height:vg[2],host:vg[3]<0?null:vg[3],top}; v.mult=vegMult(v); e.veg=v; vcache.set(key(lat,lon),v); applyVeg(e,DOY);
+    if(vg){
+      /* Format 2 carries the four per-sample vegetation types and a tree-class bitmask, so host
+         quality is recomputed here from the rules currently in src/model/ rather than read back as a
+         number frozen at bake time. That is what lets a host-rule change ship without re-baking
+         48,032 cells. It also drops the old 3-name truncation: 18.5% of forested cells hold a fourth
+         type that vg[4] recorded nowhere, and in the worst case the dropped type was Sitka spruce.
+         Format 1 files (or a stale cached copy) still work — fall back to the baked vg[3]/vg[4]. */
+      let host, top;
+      if(vg[5]){ const t=vg[5].map(ni=>ni<0?null:names[ni]); const r=hostFromSamples(t,vg[6]||0); host=r.host; top=r.top; }
+      else { host=vg[3]<0?null:vg[3]; top=(vg[4]||[]).map(([ni,sh])=>({name:names[ni],share:sh,host:hostOf(names[ni])})); }
+      const v={treeFrac:vg[0],canopy:vg[1],height:vg[2],host,top}; v.mult=vegMult(v); e.veg=v; vcache.set(key(lat,lon),v); applyVeg(e,DOY);
       if(v.treeFrac>0){ vegged++; if(v.host==null||!v.top.length) noType++; } }
     cells.set(cellKey(lat,lon),e);
     if(++i%4000===0){ progress(`Loading baked cells… ${i.toLocaleString()}`,0.2+0.8*i/j.rows.length); renderAll(); await sleep(0); }
@@ -752,10 +762,10 @@ async function loadFromStatic(gen){
   /* In PUBLIC_MODE loadEvtNames() is never reached — this function returns before it — so vegNote was
      always empty in the deployed app and a bake with no vegetation type looked identical to a good
      one. The baked file is the reachable signal: say plainly how many forested cells have no type,
-     since every one of them is being scored on the HOST_UNKNOWN penalty rather than on its trees. */
+     since every one of them is being scored on the HOST_NO_INFO penalty rather than on its trees. */
   if(vegged&&noType>vegged*0.02){
     const pct=Math.round(100*noType/vegged);
-    vegNote=`vegetation type missing for ${pct}% of forested cells in data/cells.json — those are scored at a flat ${Math.round(HOST_UNKNOWN*100)}/100 host quality; re-bake with EVT working`;
+    vegNote=`vegetation type missing for ${pct}% of forested cells in data/cells.json — those are scored at a flat ${Math.round(HOST_NO_INFO*100)}/100 host quality; re-bake with EVT working`;
     console.warn('cells.json:',noType,'of',vegged,'forested cells have no EVT type');
   } else if(vegged) console.log('cells.json: vegetation type present for',(vegged-noType).toLocaleString(),'of',vegged.toLocaleString(),'forested cells');
 }
@@ -955,15 +965,15 @@ function showPoint(e,t){
     // Two different gaps, and they must not be described as the same thing. No types at all means
     // LANDFIRE EVT did not resolve. Types but no host figure means the type is known but no sample
     // qualified to score it — which is normal on cells with no tree cover. Either way the cell is
-    // being scored on the HOST_UNKNOWN penalty, so neither may pass silently.
+    // being scored on the HOST_NO_INFO penalty, so neither may pass silently.
     const noType=!v.top||!v.top.length, noHost=v.host==null;
     const dim=t=>`<span style="color:var(--pore-dim)">${t}</span>`;
     const hostBit=v.host!=null
       ? ' · host quality '+Math.round(v.host*100)+'/100'
-      : ' · '+dim('host quality unavailable — scored at '+Math.round(HOST_UNKNOWN*100)+'/100');
+      : ' · '+dim('host quality unavailable — scored at '+Math.round(HOST_NO_INFO*100)+'/100');
     vegH=`<dt>Forest (LANDFIRE 2024)</dt><dd>${Math.round(v.treeFrac*100)}% tree-covered · canopy ${Math.round(v.canopy)}% · stand height ${Math.round(v.height*3.28)} ft${hostBit}</dd>`
       +(noType
-        ? `<dt>Types</dt><dd>${dim('Vegetation type unavailable — LANDFIRE EVT did not resolve here, so this cell is scored at '+Math.round(HOST_UNKNOWN*100)+'/100 host quality: a penalty for missing data, not a measurement. Cover and height above are real.')}</dd>`
+        ? `<dt>Types</dt><dd>${dim('Vegetation type unavailable — LANDFIRE EVT did not resolve here, so this cell is scored at '+Math.round(HOST_NO_INFO*100)+'/100 host quality: a penalty for missing data, not a measurement. Cover and height above are real.')}</dd>`
         : `<dt>Types</dt><dd>${v.top.map(t=>`${Math.round(t.share*100)}% ${t.name}${t.host?' '+dim('('+t.host.lab+')'):''}`).join('<br>')}${noHost?'<br>'+dim('No sample qualified for a host-quality score here.'):''}</dd>`); }
   else if(!vegBroken&&hab.score>0.08) vegH=`<dt>Forest</dt><dd style="color:var(--pore-dim)">Vegetation check pending</dd>`;
   h+=`<div class="sec">Ecology</div><dl>${vegH}<dt>Hosts</dt><dd>${hab.hosts}</dd><dt>Season</dt><dd>${hab.seasonNote}</dd>${hab.elevNote?`<dt>Elevation</dt><dd>${hab.elevNote}</dd>`:''}</dl>`;

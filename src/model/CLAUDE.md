@@ -72,7 +72,7 @@ caught by a wasted field trip, which is what this suite exists to replace.
 | `habitat.mjs` | Where and when boletes can grow, from position, elevation and day of year — terrain and calendar only. |
 | `weather-score.mjs` | How favourable a cell's weather is: flush trigger, soil bucket, temperature window, humidity, kill switches — plus `adjustWeather`, which moves an anchor's series to the cell's own elevation and aspect. |
 | `phenology.mjs` | What is standing right now: which past rain events produced cohorts and how far through emerging → buttons → prime → past → rotten each one is. |
-| `vegetation.mjs` | How good the host trees are, from LANDFIRE cover, height and vegetation type. |
+| `vegetation.mjs` | How good the host trees are: land-cover caps, host species identity, and one joint stand-structure factor. |
 | `cell.mjs` | The composition root: `makeEntry` and `applyVeg` multiply the four together into one scored cell. |
 
 `util.mjs` is shared on purpose. `trap`, `bell` and `interp` are the shapes the
@@ -88,12 +88,104 @@ util  <-  weather-score  <-  cell
 util  <-  vegetation
 ```
 
-## Two things that look like bugs and are not
+## How a vegetation type becomes a host score
 
-- **`HOST_UNKNOWN = 0.4`** sits *below* Douglas-fir at 0.45. That is
-  deliberate: unknown must never outrank known-mediocre. It is a penalty for
-  absent data, not an estimate of anything.
-- **`hostOf()` returns `{sc: 0.3}` for an unrecognised name**, but
-  `vegMult()` uses `HOST_UNKNOWN` when there is no name at all. Those are
-  different situations — "LANDFIRE says something we have no rule for" versus
-  "LANDFIRE said nothing" — and they are scored differently on purpose.
+Three mechanisms, deliberately kept apart, because they answer different
+questions and no ordering of one list can serve all three:
+
+1. **`NON_HOST_COVER`** — what the ground *is*. A cap, never a host. Bare rock,
+   grassland, marsh, developed land and everything above treeline cap at 0.
+   Open woodland and parkland cap at `OPEN_CANOPY_CAP` (0.3), but only when the
+   name does not also say "forest" — `Ponderosa Pine Forest and Woodland` is a
+   mosaic whose forest half is real habitat, `Subalpine Woodland and Parkland`
+   is not.
+2. **`HOST_SPECIES`** — which trees are named. A type naming several hosts
+   scores the **mean** of them, which is a co-dominance assumption: the name
+   says which species are present, not in what proportion, so absent better
+   information each gets an equal share.
+3. **`HOST_FALLBACK`** — "some kind of conifer forest", 0.5, used only when no
+   species is recognised.
+
+Every pattern is word-bounded. That is load-bearing, not tidiness: substring
+matching made "Northern Rocky Mountain …" match `/rock/` and "Subalpine …"
+match `/alpine/` across 63 LANDFIRE names, including most of the state's
+genuine montane conifer forest. Those false matches were harmless only for as
+long as an earlier rule happened to win first. Watch the inflections when
+editing: `Quarries-Strip Mines-Gravel Pits` contains neither the word "quarry"
+nor the word "mine".
+
+**Western red-cedar scores 0.** *Thuja plicata* is arbuscular-mycorrhizal — it
+forms no ectomycorrhiza and cannot host *Boletus edulis* at all, so those stems
+are dead space. A redcedar-hemlock type therefore comes out at (0 + 0.6)/2 =
+0.3, i.e. hemlock scaled by the ectomycorrhizal fraction of the stand. This is
+the one host figure that comes from mycorrhizal biology rather than from field
+tuning, and it is why that type must sit below pure hemlock rather than equal
+to it.
+
+**`HOST_NO_INFO` is one constant for two situations** — LANDFIRE said nothing,
+and LANDFIRE said something we have no rule for. They used to be two numbers,
+0.4 and 0.3, which had drifted into the wrong order so that knowing nothing
+outranked knowing something uninterpretable. One constant cannot drift.
+
+## What the vegetation data cannot say
+
+Two hard limits, both discovered by trying to calibrate past them. Neither is
+fixable in the model, and both bound how fine the discrimination can get.
+
+**LANDFIRE EVH tops out at 40 m.** Across all 39,981 forested cells in
+Washington the maximum stand height is 40 m, the 99th percentile is 33 m, and
+only 0.47% exceed 35 m. Real old-growth Douglas-fir and western hemlock in this
+state reach well beyond that, so *the stands the structure factor most wants to
+reward cannot be expressed in the input at all.* `HEIGHT_QUALITY` therefore
+reaches 1.0 at 33 m — the data's own p99 — rather than at a true old-growth
+height. Anchoring it higher would put the top of the scale somewhere no cell
+can reach. If a future EVH release resolves tall stands properly, this is the
+constant to revisit, and the discrimination gets better for free.
+
+**LANDFIRE does not name four of the strongest hosts.** `subalpine fir`,
+`grand fir`, `noble fir` and `Engelmann spruce` appear in no LF2024 class name.
+Those stands are called "Spruce-Fir" (6 names) or "Mixed Conifer" (10 names)
+instead, so the 1.0 tier is reached through those plus silver fir, mountain
+hemlock and Sitka spruce. The four patterns are kept because they are correct
+about the species and would apply the moment a release names one;
+`scripts/evt-names.test.mjs` lists them explicitly and fails if that changes in
+either direction.
+
+## Stand structure is one joint factor, not two independent ones
+
+`structureFactor(canopy, height)` replaced an `fCanopy(c) * fHeight(h)`
+product whose two flat tops overlapped into a plateau at 1.0 covering
+everything from 49 ft and 25% cover upward. **76.7% of forested cells sat on
+that plateau**, which is why stand structure was doing almost no work: 57 ft
+second growth at 61% cover scored exactly what 200 ft old growth at 55% did.
+
+The parts that matter if you retune it:
+
+- nothing under 5 m at any cover — boletes fruit from established
+  ectomycorrhizal root systems, and a stand that short has none;
+- the height reward keeps climbing to 33 m instead of saturating at 15 m
+  (see the EVH limit above for why 33 and not higher);
+- moderate cover beats both extremes, and the preferred cover **falls and
+  broadens as stands get taller** — 44% at 33 m against 60% at 8 m — because
+  wide spacing in old growth means large crowns, while the same cover in a
+  short stand is a failed plantation;
+- `COVER_FLOOR` (0.55) lets cover modulate rather than gate, because EVC is a
+  30 m average over a square mile and one number cannot tell an even 60% from a
+  mosaic of gaps and closed patches;
+- `LOW_COVER` is a separate ramp for the genuinely open end. Without it the
+  floor made a 25 m stand at 12% cover score *higher* than the old function
+  gave it, which is the wrong direction. Its shape is the old `fCanopy`'s,
+  preserved rather than re-tuned.
+
+## Host quality is recomputed at load time
+
+`data/cells.json` format 2 carries the four per-sample vegetation types and a
+tree-class bitmask per cell, and `hostFromSamples()` rebuilds host quality from
+them when the app loads. **A host-rule change no longer needs a re-bake.** It
+also removed a truncation: the old baked `top` kept three names, and 18.5% of
+forested cells hold a fourth type it recorded nowhere — in the worst case the
+dropped type was Sitka spruce, contributing a quarter of that cell's host
+average and unreconstructible from the file.
+
+Keep `hostFromSamples()` and the loop in `vegSummary()` doing the same
+arithmetic; `scripts/build-cells.test.mjs` asserts they agree.

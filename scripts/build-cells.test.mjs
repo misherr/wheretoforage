@@ -259,9 +259,10 @@ const fakeProvenance = () => ({
 });
 
 test('provenance: the encoded file records generator, sources and timestamp', () => {
-  const out = B.encode([[47, -122, 500, 3.2, 180]], [[0.75, 60, 25, 0.8, [['Silver Fir Forest', 0.75]]]],
+  const out = B.encode([[47, -122, 500, 3.2, 180]],
+    [[0.75, 60, 25, 0.8, [['Silver Fir Forest', 0.75]], ['Silver Fir Forest', 'Silver Fir Forest', 'Silver Fir Forest', null], 7]],
     { generated: '2026-09-09T00:00:00.000Z', provenance: fakeProvenance() });
-  assert.equal(out.version, 1);
+  assert.equal(out.version, 2);
   assert.equal(out.generated, '2026-09-09T00:00:00.000Z');
   const p = out.provenance;
   assert.equal(p.generator, 'scripts/build-cells.mjs');
@@ -285,9 +286,9 @@ test('provenance: the app\'s own fields survive, in the format it reads', () => 
 test('encode: name indices are assigned in row order, so the file is canonical', () => {
   const staged = [[47, -122, 1, 0, -1], [47.1, -122, 2, 0, -1], [47.2, -122, 3, 0, -1]];
   const veg = [
-    [1, 60, 30, 1.0, [['Silver Fir', 0.5], ['Hemlock', 0.5]]],
-    [1, 60, 30, 0.6, [['Hemlock', 1.0]]],
-    [1, 60, 30, 1.0, [['Silver Fir', 1.0]]]];
+    [1, 60, 30, 1.0, [['Silver Fir', 0.5], ['Hemlock', 0.5]], ['Silver Fir', 'Silver Fir', 'Hemlock', 'Hemlock'], 15],
+    [1, 60, 30, 0.6, [['Hemlock', 1.0]], ['Hemlock', 'Hemlock', 'Hemlock', 'Hemlock'], 15],
+    [1, 60, 30, 1.0, [['Silver Fir', 1.0]], ['Silver Fir', 'Silver Fir', 'Silver Fir', 'Silver Fir'], 15]];
   const out = B.encode(staged, veg, { generated: 'x', provenance: fakeProvenance() });
   assert.deepEqual(out.names, ['Silver Fir', 'Hemlock']);
   assert.deepEqual(out.rows[0][5][4], [[0, 0.5], [1, 0.5]]);
@@ -301,11 +302,12 @@ test('merge: cells outside the region are carried through untouched', () => {
   const prov = fakeProvenance();
   const prev = B.encode(
     [[47.0, -122, 100, 1, 10], [47.1, -122, 200, 2, 20], [47.2, -122, 300, 3, 30]],
-    [[1, 50, 20, 0.6, [['Hemlock', 1]]], [1, 55, 22, 1.0, [['Silver Fir', 1]]], null],
+    [[1, 50, 20, 0.6, [['Hemlock', 1]], ['Hemlock', 'Hemlock', 'Hemlock', 'Hemlock'], 15],
+     [1, 55, 22, 1.0, [['Silver Fir', 1]], ['Silver Fir', 'Silver Fir', 'Silver Fir', 'Silver Fir'], 15], null],
     { generated: 'old', provenance: prov });
   const fresh = B.encode(
     [[47.1, -122, 999, 9, 90]],
-    [[1, 77, 44, 0.25, [['Harvested', 1]]]],
+    [[1, 77, 44, 0.25, [['Harvested', 1]], ['Harvested', 'Harvested', 'Harvested', 'Harvested'], 15]],
     { generated: 'new', provenance: { ...prov, region: 'bbox' } });
 
   const m = B.mergeInto(prev, fresh);
@@ -321,9 +323,11 @@ test('merge: cells outside the region are carried through untouched', () => {
 test('merge: carried-over type names survive re-indexing', () => {
   const prov = fakeProvenance();
   const prev = B.encode([[47.0, -122, 100, 1, 10], [47.1, -122, 200, 2, 20]],
-    [[1, 50, 20, 0.6, [['Hemlock', 1]]], [1, 55, 22, 1.0, [['Silver Fir', 1]]]],
+    [[1, 50, 20, 0.6, [['Hemlock', 1]], ['Hemlock', 'Hemlock', 'Hemlock', 'Hemlock'], 15],
+     [1, 55, 22, 1.0, [['Silver Fir', 1]], ['Silver Fir', 'Silver Fir', 'Silver Fir', 'Silver Fir'], 15]],
     { generated: 'old', provenance: prov });
-  const fresh = B.encode([[47.1, -122, 200, 2, 20]], [[1, 55, 22, 0.25, [['Harvested', 1]]]],
+  const fresh = B.encode([[47.1, -122, 200, 2, 20]],
+    [[1, 55, 22, 0.25, [['Harvested', 1]], ['Harvested', 'Harvested', 'Harvested', 'Harvested'], 15]],
     { generated: 'new', provenance: prov });
   const m = B.mergeInto(prev, fresh);
   const name = r => m.names[r[5][4][0][0]];
@@ -487,4 +491,50 @@ test('region: two abutting bboxes agree with one bbox covering both', async () =
   }
   assert.ok(checked > 700, `expected to check plenty of cells, only saw ${checked}`);
   fs.rmSync(d, { recursive: true, force: true });
+});
+
+/* ===================== per-sample types (format 2) ===================== */
+
+test('format 2: per-sample types and the tree mask survive encoding', () => {
+  const out = B.encode([[47, -122, 900, 4, 90]],
+    [[0.75, 62, 24, 0.7, [['Silver Fir', 0.5], ['Hemlock', 0.25]],
+      ['Silver Fir', 'Silver Fir', 'Hemlock', null], 0b0111]],
+    { generated: 'x', provenance: fakeProvenance() });
+  const vg = out.rows[0][5];
+  assert.deepEqual(vg[5].map(i => (i < 0 ? null : out.names[i])),
+    ['Silver Fir', 'Silver Fir', 'Hemlock', null], 'the four sample types must round-trip in order');
+  assert.equal(vg[6], 0b0111, 'the tree mask must round-trip');
+  assert.equal(vg[5].filter(i => i >= 0).length, 3, 'an unnamed sample is recorded as -1, not dropped');
+});
+
+test('format 2: host recomputed from samples equals what vegSummary computed', async () => {
+  // The whole point of baking per-sample types: a host-rule change must not need a re-bake. That
+  // only holds if the load-time recomputation is the same arithmetic as the bake-time one.
+  const { vegSummary, hostFromSamples } = await import('../src/model/vegetation.mjs');
+  const evtNames = new Map([[7036, 'North Pacific Seasonal Sitka Spruce Forest'],
+    [7039, 'North Pacific Maritime Mesic-Wet Douglas-fir-Western Hemlock Forest'],
+    [7084, 'North Pacific Montane Shrubland'], [7292, 'Open Water'],
+    [7156, 'North Pacific Lowland Riparian Forest']]);
+  const cases = [
+    [[7036, 7039, 7084, 7292], [155, 170, 239, 11], [113, 119, 206, 11]],
+    [[7156, 7084, 7292, 7036], [181, 239, 11, 155], [127, 206, 11, 113]],
+    [[7039, 7039, 7039, 7039], [170, 170, 170, 170], [119, 119, 119, 119]],
+    [[7084, 7292, 7084, 7292], [239, 11, 239, 11], [206, 11, 206, 11]],
+    [[null, 7036, null, 7039], [155, 155, 170, 170], [113, 113, 119, 119]],
+  ];
+  for (const [evt, evc, evh] of cases) {
+    const v = vegSummary(evt, evc, evh, evtNames);
+    const again = hostFromSamples(v.types, v.treeMask);
+    assert.equal(again.host, v.host, 'recomputed host diverged for ' + JSON.stringify(evt));
+  }
+});
+
+test('format 2: the tree mask agrees with treeFrac', async () => {
+  const { vegSummary } = await import('../src/model/vegetation.mjs');
+  const evtNames = new Map([[7036, 'North Pacific Seasonal Sitka Spruce Forest']]);
+  const v = vegSummary([7036, 7036, 7036, 7036], [155, 155, 50, 40], [113, 113, 50, 40], evtNames);
+  let bits = 0;
+  for (let k = 0; k < 4; k++) if (v.treeMask >> k & 1) bits++;
+  assert.equal(bits / 4, v.treeFrac, 'popcount of the mask must equal treeFrac');
+  assert.equal(v.treeMask, 0b0011, 'only the first two samples are tree-class EVC');
 });

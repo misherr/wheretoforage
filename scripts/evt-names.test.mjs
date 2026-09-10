@@ -15,11 +15,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-/* hostOf, HOST_RULES and HOST_UNKNOWN are imported from the model itself, never copied in here. A
-   second copy of the tuned scoring constants would keep passing after the real ones changed, which
-   is the failure this file exists to catch. Until the model was extracted into src/model/ these were
-   scraped out of index.html by regex to get the same guarantee; the import replaces that. */
-import { hostOf, HOST_RULES, HOST_UNKNOWN } from '../src/model/vegetation.mjs';
+/* Everything here is imported from the model itself, never copied in. A second copy of the tuned
+   scoring constants would keep passing after the real ones changed, which is the failure this file
+   exists to catch. Until the model was extracted into src/model/ these were scraped out of
+   index.html by regex to get the same guarantee; the import replaces that. */
+import { hostOf, speciesIn, HOST_SPECIES, NON_HOST_COVER, HOST_NO_INFO, OPEN_CANOPY_CAP }
+  from '../src/model/vegetation.mjs';
 
 const TABLE = new URL('../data/evt-names.json', import.meta.url);
 
@@ -53,33 +54,92 @@ test('chain: code -> name -> host score behaves for the types that actually matt
 
   // 7036 is the coastal Sitka spruce type — the best king bolete habitat in the state
   assert.equal(host(7036).sc, 1.0, 'Sitka spruce must score full host quality');
-  // 7039 is Douglas-fir/western hemlock — decent, not prime, and must rank below Sitka spruce
-  assert.equal(host(7039).sc, 0.6, 'Douglas-fir - western hemlock should be moderate');
+  /* 7039 is Douglas-fir/western hemlock — decent, not prime. Asserted relationally rather than as
+     an exact number: it is a two-species type, so its value is the mean of its members and moves
+     whenever either of them is retuned. What must stay true is that it sits between them. */
+  const df = hostOf('North Pacific Douglas-fir Forest').sc;
+  const hem = hostOf('North Pacific Western Hemlock Forest').sc;
+  assert.ok(host(7039).sc > df && host(7039).sc < hem,
+    `Douglas-fir-hemlock (${host(7039).sc}) must sit between Douglas-fir (${df}) and hemlock (${hem})`);
   assert.ok(host(7039).sc < host(7036).sc, 'Douglas-fir-hemlock must rank below Sitka spruce');
   // 9826 is grassland — not forest at all
   assert.equal(host(9826).sc, 0, 'ruderal grassland is not forest');
 });
 
-test('rules: every host rule still matches a real vegetation type', () => {
+test('rules: every host species is reachable from a real vegetation type', () => {
   // A rule that matches nothing is a rule that silently stopped applying — a renamed LANDFIRE class,
   // or a regex edited past the names it was written for. Nothing else here would notice: hostOf()
-  // would fall through to a lower-scoring rule and every cell of that type would quietly lose host
-  // quality. Reachability is what is checked, not just matching, because an earlier broad rule can
-  // shadow a later specific one and leave it dead while it still 'matches' names on its own.
+  // would quietly fall through and every cell of that type would lose host quality.
+  //
+  // Host identity is no longer first-match-wins, so reachability means "some name where this taxon
+  // actually contributes to the average" rather than "some name this pattern wins on".
+  /* LANDFIRE does not name these four anywhere in LF2024. It calls those stands "Spruce-Fir" (6
+     names) or "Mixed Conifer" (10 names) instead, so the 1.0 tier is reached through those and
+     through silver fir / mountain hemlock / Sitka spruce. The patterns are kept because they are
+     correct about the species and would apply the moment a LANDFIRE release names one — but they
+     are listed here so the gap is recorded rather than mistaken for coverage. This is the same
+     class of limitation as the EVH height ceiling: the model can discriminate only as finely as
+     the vegetation data names things. See CLAUDE.md, "What the vegetation data cannot say". */
+  const NOT_NAMED_BY_LF2024 = ['subalpine fir', 'noble fir', 'Engelmann spruce', 'grand fir'];
+
   const names = Object.values(load());
-  HOST_RULES.forEach(([re, sc, label], i) => {
-    const reached = names.filter(n => HOST_RULES.findIndex(([r]) => r.test(n)) === i).length;
-    assert.ok(reached > 0,
-      `host rule ${i} (${label}, ${sc}) is unreachable — ${re} is either shadowed by an earlier ` +
-      `rule or no longer matches any LANDFIRE type name`);
-  });
+  const dead = [];
+  for (const [taxon] of HOST_SPECIES) {
+    const reached = names.filter(n => speciesIn(n).some(sp => sp.taxon === taxon)).length;
+    if (!reached && !NOT_NAMED_BY_LF2024.includes(taxon)) dead.push(taxon);
+  }
+  assert.deepEqual(dead, [],
+    'these host species match no LANDFIRE type name any more: ' + dead.join(', '));
+
+  // and the other direction: a name that starts appearing must be noticed, not silently absorbed
+  const nowNamed = NOT_NAMED_BY_LF2024.filter(t =>
+    names.some(n => speciesIn(n).some(sp => sp.taxon === t)));
+  assert.deepEqual(nowNamed, [],
+    'LANDFIRE now names ' + nowNamed.join(', ') + ' — drop it from NOT_NAMED_BY_LF2024 and re-check ' +
+    'whether those stands are still reaching the model through the spruce-fir and mixed-conifer rules');
 });
 
+test('rules: every land-cover cap is reachable, and none of them swallows a forest', () => {
+  const names = Object.values(load());
+  for (const [re, label] of NON_HOST_COVER) {
+    const hit = names.filter(n => re.test(n));
+    assert.ok(hit.length > 0, `land-cover cap "${label}" (${re}) matches no LANDFIRE type name`);
+  }
+  // The reason every pattern is word-bounded: substring matching put most of the state's montane
+  // conifer forest into the not-forest rule via "Rocky" containing "rock".
+  const falsePositives = names.filter(n => {
+    const spp = speciesIn(n);
+    return hostOf(n).sc === 0 && spp.some(sp => sp.sc >= 0.8) && /\bforest\b/i.test(n);
+  });
+  assert.deepEqual(falsePositives.filter(n => /^(?:North Pacific|Northern Rocky|East Cascades|Rocky Mountain|Columbia)/.test(n)), [],
+    'a Washington forest type naming a strong host must not be capped to zero: ' + falsePositives.join(' | '));
+});
+
+test('rules: the three mechanisms stay separate', () => {
+  // The bug being prevented: one ordered list conflated land cover, host identity and the generic
+  // fallback, so /subalpine/ in the true-fir rule scored bare rock at 1.0 and /silver fir/ scored a
+  // hemlock mix as pure silver fir. Reordering cannot fix both — they answer different questions.
+  assert.equal(hostOf('North Pacific Alpine and Subalpine Bedrock and Scree').sc, 0,
+    'land cover must cap regardless of what host words appear in the name');
+  const mix = hostOf('North Pacific Mesic Western Hemlock-Silver Fir Forest').sc;
+  const pure = hostOf('North Pacific Mesic Silver Fir Forest').sc;
+  assert.ok(mix < pure, 'a mixed type must score below its strongest member');
+  assert.ok(mix > hostOf('North Pacific Western Hemlock Forest').sc,
+    'and above its weakest — the mean of the species named, not the min');
+  assert.equal(hostOf('Some Type With No Recognised Words').sc, HOST_NO_INFO,
+    'an unrecognised name falls through to the no-information penalty');
+  assert.ok(hostOf('North Pacific Maritime Mesic Subalpine Parkland').sc <= OPEN_CANOPY_CAP,
+    'open parkland is capped at the open-canopy value');
+});
 test('chain: unknown never outranks known-mediocre', () => {
-  // The whole point of HOST_UNKNOWN. Before it existed, a missing type multiplied by 1.0, so an
-  // unmapped cell beat every real forest type in the state including Sitka spruce.
-  const unknown = HOST_UNKNOWN;
-  assert.equal(typeof unknown, 'number', 'HOST_UNKNOWN must be a number');
+  // The whole point of HOST_NO_INFO. Before it existed, a missing type multiplied by 1.0, so an
+  // unmapped cell beat every real forest type in the state including Sitka spruce. It is also the
+  // single constant for both absence cases now: an unrecognised name and a missing one score the
+  // same, so they cannot drift back out of order the way 0.3 and 0.4 did.
+  const unknown = HOST_NO_INFO;
+  assert.equal(typeof unknown, 'number', 'HOST_NO_INFO must be a number');
+  assert.equal(hostOf('A Type We Have No Rule For').sc, unknown,
+    'an unrecognised name must score exactly the no-information penalty, not something else');
   assert.ok(unknown < 1, 'a missing vegetation type must never score as ideal habitat');
 
   const m = load();

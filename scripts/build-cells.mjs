@@ -348,9 +348,10 @@ export function encode(staged, veg, meta) {
   const rows = staged.map((r, i) => {
     const v = veg[i];
     return [r[0], r[1], r[2], r[3], r[4],
-      v ? [v[0], v[1], v[2], v[3], v[4].map(t => [idx(t[0]), t[1]])] : null];
+      v ? [v[0], v[1], v[2], v[3], v[4].map(t => [idx(t[0]), t[1]]),
+           v[5].map(n => n == null ? -1 : idx(n)), v[6]] : null];
   });
-  return { version: 1, generated: meta.generated, dlat: DLAT, dlon: DLON, anchor: 0.2,
+  return { version: 2, generated: meta.generated, dlat: DLAT, dlon: DLON, anchor: 0.2,
            provenance: meta.provenance, names, rows };
 }
 
@@ -360,7 +361,8 @@ export function encode(staged, veg, meta) {
 export function mergeInto(prev, fresh) {
   const mine = new Set(fresh.rows.map(r => r[0] + ',' + r[1]));
   const withNames = (rows, names) => rows.map(r => [r[0], r[1], r[2], r[3], r[4],
-    r[5] ? [r[5][0], r[5][1], r[5][2], r[5][3], (r[5][4] || []).map(([ni, s]) => [names[ni], s])] : null]);
+    r[5] ? [r[5][0], r[5][1], r[5][2], r[5][3], (r[5][4] || []).map(([ni, s]) => [names[ni], s]),
+            (r[5][5] || []).map(ni => ni < 0 ? null : names[ni]), r[5][6] || 0] : null]);
   const carried = withNames(prev.rows, prev.names).filter(r => !mine.has(r[0] + ',' + r[1]));
   const rebaked = withNames(fresh.rows, fresh.names);
   const all = [...carried, ...rebaked].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
@@ -461,9 +463,13 @@ export async function build(opts, deps = {}) {
         sample('evt', pts), sample('evc', pts), sample('evh', pts)]);
       slice.forEach((r, i) => {
         const v = vegSummary(evt.slice(i * 4, i * 4 + 4), evc.slice(i * 4, i * 4 + 4), evh.slice(i * 4, i * 4 + 4), evtNames);
+        /* types[] and treeMask are what make host recomputable at load time: they are everything
+           the host average depends on, so a host-rule change no longer needs a re-bake. host and
+           top stay at positions 3-4 so an older cached page still reads the file. */
         veg.push(v ? [+v.treeFrac.toFixed(2), Math.round(v.canopy), +v.height.toFixed(1),
-                      v.host == null ? -1 : +v.host.toFixed(2),
-                      v.top.map(t => [t.name, +t.share.toFixed(2)])] : null);
+                      v.host == null ? -1 : +v.host.toFixed(4),
+                      v.top.map(t => [t.name, +t.share.toFixed(2)]),
+                      v.types, v.treeMask] : null);
       });
       batchNo++;
       const perCell = (Date.now() - t0) / 1000 / Math.max(1, veg.length);

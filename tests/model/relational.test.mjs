@@ -247,15 +247,15 @@ test('host: the full host ladder is monotonic under identical weather', () => {
 });
 
 test('host: missing host data scores below known-mediocre host data', () => {
-  // HOST_UNKNOWN is a penalty for absent data, not an estimate. Unknown must never outrank a stand
+  // HOST_NO_INFO is a penalty for absent data, not an estimate. Unknown must never outrank a stand
   // whose type we actually know and which we know to be only fair.
   const missing = scoreOf(F.missingVegData);
   assert.ok(missing < scoreOf(F.douglasFirHost),
     `missing veg ${missing} must score below known Douglas-fir ${scoreOf(F.douglasFirHost)}`);
   assert.ok(missing < scoreOf(F.mediumHost), 'missing veg must score below known Douglas-fir/hemlock');
   assert.ok(missing < scoreOf(F.strongHost), 'missing veg must score below known Sitka spruce');
-  assert.ok(M.HOST_UNKNOWN < M.hostOf('North Pacific Douglas-fir Forest').sc,
-    'HOST_UNKNOWN must sit below the Douglas-fir host score');
+  assert.ok(M.HOST_NO_INFO < M.hostOf('North Pacific Douglas-fir Forest').sc,
+    'HOST_NO_INFO must sit below the Douglas-fir host score');
 });
 
 test('host: a cell with zero tree cover scores zero regardless of weather', () => {
@@ -270,8 +270,8 @@ test('vegetation: stand structure matters independently of host species', () => 
   const mature = scoreOf(F.strongHost);
   assert.ok(scoreOf(F.youngPlantation) < mature, 'a young regenerating stand should score below a mature one');
   assert.ok(scoreOf(F.sparseCanopy) < mature, 'a sparse canopy should score below a well-stocked one');
-  assert.ok(M.fHeight(5) < M.fHeight(25), 'height response must be increasing');
-  assert.ok(M.fCanopy(12) < M.fCanopy(70), 'canopy response must be increasing over the open range');
+  assert.ok(M.structureFactor(50, 10) < M.structureFactor(50, 33), 'height response must be increasing');
+  assert.ok(M.structureFactor(12, 25) < M.structureFactor(50, 25), 'cover response must rise off the open end');
 });
 
 test('vegetation: the multiplier is bounded and zero only when there are no trees', () => {
@@ -280,6 +280,125 @@ test('vegetation: the multiplier is bounded and zero only when there are no tree
     assert.ok(m >= 0 && m <= 1, `${name} multiplier ${m} out of 0..1`);
     if (v.treeFrac > 0 && v.host !== 0) assert.ok(m > 0, `${name} should not zero out a forested cell`);
   }
+});
+
+/* ===================== compound host types ===================== */
+
+test('host: a mixed hemlock-silver fir type scores below pure silver fir', () => {
+  // The bug this is named for: the rule list tested /silver fir/ before /western hemlock/, so any
+  // type merely containing "Silver Fir" scored 1.0 and a hemlock-silver fir MIX was indistinguishable
+  // from pure silver fir. Two field negatives were walked in stands of exactly this type.
+  const mix = scoreOf(F.hemlockSilverFirHost), pure = scoreOf(F.pureSilverFirHost);
+  assert.ok(mix < pure, `hemlock-silver fir mix ${mix} must score below pure silver fir ${pure}`);
+  assert.ok(mix > scoreOf(F.pureHemlockHost),
+    'and above pure hemlock — a mix scores toward its weaker member, not down to it');
+});
+
+test('host: redcedar drags a mixed type below pure hemlock', () => {
+  // Thuja plicata is arbuscular-mycorrhizal: it forms no ectomycorrhiza and cannot host B. edulis at
+  // all, so those stems are dead space and the type is worth the ECM fraction of the stand. This is
+  // the one host figure that comes from mycorrhizal biology rather than from field tuning.
+  const rc = scoreOf(F.redcedarHemlockHost), hem = scoreOf(F.pureHemlockHost);
+  assert.ok(rc < hem, `redcedar-hemlock ${rc} must score below pure hemlock ${hem}`);
+  assert.equal(M.hostOf('North Pacific Hypermaritime Western Red-cedar-Western Hemlock Forest').sc,
+    M.hostOf('North Pacific Western Hemlock Forest').sc / 2,
+    'a two-species type, half of which cannot host at all, should be worth half the host value');
+});
+
+test('host: land cover caps rather than competing with host identity', () => {
+  // "North Pacific Alpine and Subalpine Bedrock and Scree" scored 1.0 — the model's maximum host
+  // quality — because /subalpine/ sits in the true-fir rule and won before /scree/ was reached. Bare
+  // rock must not inherit a host score from a word sitting next to it, whatever the tree fraction says.
+  assert.equal(M.hostOf('North Pacific Alpine and Subalpine Bedrock and Scree').sc, 0);
+  assert.equal(M.hostOf('North Pacific Alpine and Subalpine Dry Grassland').sc, 0);
+  assert.equal(M.hostOf('Rocky Mountain Subalpine-Montane Mesic Meadow').sc, 0);
+  assert.ok(M.hostOf('North Pacific Maritime Mesic Subalpine Parkland').sc <= M.OPEN_CANOPY_CAP,
+    'open parkland must be capped, not scored as closed forest');
+  assert.ok(scoreOf(F.subalpineRockHost) < scoreOf(F.weakHost),
+    'a bare-rock type must score below even the weakest real forest type');
+});
+
+test('host: word boundaries — "Rocky Mountain" is not the word "rock"', () => {
+  // Substring matching made 63 LANDFIRE names collide with the not-forest rule, including most of
+  // the state's genuine montane conifer forest. Those false matches were harmless only for as long
+  // as an earlier rule happened to win first, which is not a property worth relying on.
+  assert.equal(M.hostOf('Northern Rocky Mountain Dry-Mesic Montane Mixed Conifer Forest').sc, 0.8,
+    'a Rocky Mountain mixed-conifer forest must keep its host score');
+  assert.equal(M.hostOf('Northern Rocky Mountain Mesic Montane Mixed Conifer Forest').sc, 0.8);
+  assert.equal(M.hostOf('North Pacific Active Volcanic Rock and Cinder Land').sc, 0,
+    'but genuine rock must still be caught');
+  assert.ok(M.hostOf('North Pacific Broadleaf Landslide Forest').sc > 0,
+    '"Broadleaf" must not match the word "road"');
+  assert.equal(M.hostOf('Quarries-Strip Mines-Gravel Pits-Well and Wind Pads').sc, 0,
+    'plurals matter: neither "quarry" nor "mine" appears as a whole word in that name');
+});
+
+test('host: unrecognised and missing are both penalties, and neither beats known-mediocre', () => {
+  // These used to be two constants that had drifted out of order: an unrecognised name scored 0.3
+  // while a missing one scored 0.4, so "LANDFIRE said nothing" outranked "LANDFIRE said something we
+  // cannot interpret" — backwards. One constant now serves both, so they cannot drift apart again.
+  const missing = scoreOf(F.missingVegData), unrec = scoreOf(F.unrecognisedVegType);
+  assert.equal(missing, unrec, 'missing and unrecognised must score identically');
+  for (const known of ['douglasFirHost', 'mediumHost', 'strongHost']) {
+    assert.ok(missing <= scoreOf(F[known]),
+      `absent host information (${missing}) must not outrank known ${known} (${scoreOf(F[known])})`);
+  }
+  assert.ok(M.HOST_NO_INFO < M.hostOf('North Pacific Douglas-fir Forest').sc,
+    'the no-information penalty must sit below the Douglas-fir host score');
+});
+
+/* ===================== stand structure ===================== */
+
+test('structure: a tall moderate-cover stand beats a short one', () => {
+  // fHeight saturated at 15 m, so 57 ft second growth and 200 ft old growth scored identically.
+  // 76.7% of forested cells sat on the resulting 1.0 plateau, which is why structure did no work.
+  const tall = scoreOf(F.tallModerateStand), short = scoreOf(F.shortModerateStand);
+  assert.ok(tall > short, `tall+moderate ${tall} must beat short+moderate ${short}`);
+});
+
+test('structure: a tall moderate-cover stand beats a tall dense one', () => {
+  // Kings favour light reaching the floor. fCanopy treated 25-75% as uniformly ideal, so an even
+  // 84% canopy and an open 45% produced the same number.
+  const mod = scoreOf(F.tallModerateStand), dense = scoreOf(F.tallDenseStand);
+  assert.ok(mod > dense, `tall+moderate ${mod} must beat tall+dense ${dense}`);
+});
+
+test('structure: a short open stand scores near zero', () => {
+  // Regenerating clearcut. B. edulis fruits from established ectomycorrhizal root systems, and a
+  // stand at 13 ft has none worth driving to.
+  assert.ok(scoreOf(F.shortOpenStand) < 0.05 * scoreOf(F.tallModerateStand),
+    'a 4 m stand at 15% cover must be a rounding error next to a mature one');
+  // Tied to the constant rather than to a number picked here: HEIGHT_QUALITY puts 0.06 at exactly
+  // 5 m, so nothing shorter can exceed that at any cover. Raising the 5 m knee fails this.
+  const kneeAt5 = M.HEIGHT_QUALITY.find(([h]) => h === 5)[1];
+  assert.ok(kneeAt5 < 0.1, `the 5 m knee (${kneeAt5}) is not "near zero" any more`);
+  let worst = 0;
+  for (let c = 0; c <= 100; c++) worst = Math.max(worst, M.structureFactor(c, 4.9));
+  assert.ok(worst <= kneeAt5 + 1e-9,
+    `under 5 m must stay at or below the 5 m knee at every cover, got ${worst.toFixed(4)}`);
+});
+
+test('structure: taller stands tolerate lower cover than short ones', () => {
+  // Wide spacing in old growth means large crowns and an extensive root network; the same cover in a
+  // short stand is a failed plantation. So the preferred cover falls as height rises.
+  const tallAdv = M.structureFactor(35, 33) / M.structureFactor(60, 33);
+  const shortAdv = M.structureFactor(35, 10) / M.structureFactor(60, 10);
+  assert.ok(tallAdv > shortAdv,
+    `low cover must cost a tall stand less than a short one (${tallAdv.toFixed(2)} vs ${shortAdv.toFixed(2)})`);
+});
+
+test('structure: the height reward keeps climbing past 15 m, to the data\'s own limit', () => {
+  // Not to an imagined 200 ft: LANDFIRE EVH tops out at 40 m statewide with p99 at 33 m, so the real
+  // old growth this ought to reward cannot be expressed in the input at all. Calibrating past the
+  // data would put the top of the scale somewhere no cell can reach.
+  let prev = -1;
+  for (const h of [8, 12, 15, 18, 22, 25, 29, 33]) {
+    const v = M.structureFactor(50, h);
+    assert.ok(v > prev, `structure must still be rising at ${h} m (${v.toFixed(3)} vs ${prev.toFixed(3)})`);
+    prev = v;
+  }
+  assert.equal(M.structureFactor(44, 33), M.structureFactor(44, 40),
+    'and flat above the range the data can express, rather than extrapolating past it');
 });
 
 /* ===================== region, elevation, season ===================== */

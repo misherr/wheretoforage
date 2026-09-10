@@ -14,8 +14,9 @@ Screen."
   was exactly one copy of this geometry by construction, and with a separate bake
   script there would be two. See "The script must agree with the app" — that
   mistake has already cost this repo 5,844 mismatched cells once and 74 orphaned
-  anchors another time. It also carries `pointKey`, the elevation-cache key,
-  whose 4-decimal truncation is load-bearing and documented there.
+  anchors another time. It also carries `pointKey`, the elevation-cache key, which
+  now matches `cellCenter`'s five decimals — it truncated to four, and that
+  quietly cost 77 of every 300 cells a two-sided north-south gradient.
 - **`src/model/`** — the ecological model, extracted from `index.html` so that
   changing the science does not mean reading the whole application: `util.mjs`
   (numeric curves, unit conversions, score bands), `habitat.mjs` (region,
@@ -45,12 +46,15 @@ Screen."
       gets deployed (GitHub Pages).
 - **`data/cells.json`** — baked per-cell elevation, slope, aspect, and
   LANDFIRE 2024 vegetation (tree fraction, canopy %, stand height,
-  host-quality score, top vegetation types), plus a `provenance` block recording
-  the generator and version, the LANDFIRE product year, the terrain tile source
-  and when it ran. Produced by `scripts/build-cells.mjs`. **Do not regenerate or
+  host-quality score, top vegetation types), **plus the four per-sample
+  vegetation types and a tree-class bitmask per cell** (format 2), which is what
+  lets host quality be recomputed at load time instead of frozen at bake time —
+  a host-rule change no longer needs a re-bake. Also a `provenance` block
+  recording the generator and version, the LANDFIRE product year, the terrain
+  tile source and when it ran. Produced by `scripts/build-cells.mjs`. **Do not regenerate or
   overwrite unless asked** — the checked-in copy is the real data the user
   produced, and a rebuild moves slope and aspect for ~7,000 cells, which moves
-  scores. See "Rebaking moves slope and aspect, and why that is not a bug".
+  scores. See "Slope and aspect: why the checked-in values changed".
 - **`data/evt-names.json`** — LANDFIRE EVT code → class name, 1,069 entries,
   checked in because the service no longer publishes the mapping anywhere. See
   "LANDFIRE EVT: the mapping is checked in, and why" before touching it.
@@ -96,8 +100,10 @@ Screen."
   Guards the checked-in EVT table: not truncated, the three live-verified codes
   still resolve, every type name `cells.json` uses is producible from it, no
   forested cell is missing a type, and unknown never outranks known-mediocre.
-  Lifts `HOST_RULES`/`hostOf` out of `index.html` rather than copying them, so
-  it cannot drift from the tuned constants it checks.
+  Imports `hostOf`, `HOST_SPECIES` and `NON_HOST_COVER` from the model rather
+  than copying them, so it cannot drift from the tuned constants it checks. It
+  also records the four host species LF2024 never names — see
+  `src/model/CLAUDE.md`, "What the vegetation data cannot say".
 - **`tests/model/`** — regression fixtures for the ecological model, run by `npm test`.
   See "Model regression suite" below before changing anything in there; the two halves
   have opposite rules about when they may be updated. `purity.test.mjs` additionally
@@ -623,7 +629,7 @@ guaranteed stable across LANDFIRE releases:
 is not truncated, checks every name `cells.json` references is producible from
 it, and asserts no forested cell is missing a type.
 
-## Rebaking moves slope and aspect, and why that is not a bug
+## Slope and aspect: why the checked-in values changed
 
 `scripts/build-cells.mjs` was built to reproduce the checked-in `data/cells.json`
 exactly, as the proof that it is a faithful replacement for the button rather than
@@ -653,19 +659,13 @@ to a one-sided gradient. Two measurements confirm it:
   same effect where the withheld neighbour is a gated-out cell whose elevation is
   not in the file, so it cannot be reconstructed from the file alone.
 
-So the script's values are the better ones — it samples every cell of every
-retained block before computing any terrain, which makes the answer independent of
-visit order — and the old values are an artifact of a viewport. **That does not
-make overwriting them a tidy-up.** Aspect drives the model's north/south
-adjustment (~1 °C cooler, ~18% less ET on north slopes), and 6,069 of the 39,981
-forested cells have different terrain, so a rebuild moves scores: slope shifts by
-a median 1.2° (p90 6.2°, max 32.9°), aspect by a median 17°, and 803 cells flip
-between flat and not-flat. Re-baking is therefore a **scoring change and needs
-the user's sign-off**, exactly like editing a constant.
+The script's values are the correct ones — it samples every cell of every retained
+block before computing any terrain, so the answer does not depend on visit order —
+and the old values were an artifact of a viewport. **They were adopted with the
+user's sign-off**, as a correction rather than a tuning choice. Do not "fix" this
+by making the script reproduce the artifact.
 
-Do not "fix" this by making the script reproduce the artifact.
-
-### The related bug in `pointKey`, deliberately left alone
+### The `pointKey` truncation, fixed at the same time
 
 While reproducing the file, a second and independent defect turned up.
 `cellCenter()` returns a 5-decimal coordinate, but the elevation cache is keyed by
@@ -675,11 +675,18 @@ strings. **77 of every 300 cells in latitude** (0 in longitude) therefore take a
 one-sided north-south gradient even though the neighbour's elevation is sitting in
 the cache.
 
-It is deterministic, so the script reproduces it faithfully and the numbers above
-are unaffected by it. Widening the key would move slope and aspect again, on top
-of the rebuild difference — another scoring change, and one worth doing on its own
-so its effect can be measured separately. Left as it is, and written down in
-`src/grid.mjs` beside the function.
+At five decimals the neighbour lookup hits 300 of 300 and distinct cells still
+never collide. It was fixed in the same re-bake, and its effect measured
+separately because it is much the larger of the two terrain changes:
+
+| change | cells whose slope or aspect moved |
+| --- | --- |
+| order-independent terrain (browser → script) | 7,092 |
+| `pointKey` 4 dp → 5 dp | **23,396** |
+
+Elevation is identical across all three bakes (48,032 of 48,032), which is what
+makes both attributions clean: the inputs to `terrainAt()` never changed, only
+which neighbours it could see.
 
 ## Re-baking cells.json for vegetation only
 
@@ -703,48 +710,57 @@ and the host scores built on it are wrong too; do not ship the result.
 The full run is ~193 batches of 250 cells (1,000 sample points per request per
 layer) and takes about **70 seconds**.
 
-## Missing host is penalised, not rewarded
+## Host quality: absent data is penalised, and land cover caps
 
-`vegMult()` used to multiply by **1.0** when `v.host` was null. Combined with
-the EVT failure that meant every one of 39,981 forested cells was scored as
+`vegMult()` once multiplied by **1.0** when `v.host` was null. Combined with a
+broken EVT lookup that meant every one of 39,981 forested cells was scored as
 though its host trees were ideal — a logged Douglas-fir plantation ranked
-identically to a Sitka spruce stand, and the model's entire species
-discrimination was inert while still producing confident numbers.
+identically to a Sitka spruce stand, and the entire species discrimination was
+inert while still producing confident numbers. It shipped, survived days of
+people looking at the map, and was caught by a wasted field trip.
 
-`HOST_UNKNOWN = 0.4` replaces it. It sits below Douglas-fir (0.45) deliberately:
-**unknown must never outrank known-mediocre.** It is a penalty for absent data,
-not an estimate of anything, and the tap sheet says so in as many words.
+`HOST_NO_INFO = 0.3` is the penalty now, and it is **one constant for two
+situations**: LANDFIRE said nothing, and LANDFIRE said something we have no rule
+for. Those used to be 0.4 and 0.3 respectively, which had drifted into the wrong
+order — knowing nothing outranked knowing something uninterpretable. One
+constant cannot drift. It sits below dry pine (0.4) and Douglas-fir (0.45):
+absent information must never outrank known-mediocre.
 
-### What the fix did to the scores
+Two field negatives in September 2026 — both in stands typed
+`North Pacific Mesic Western Hemlock-Silver Fir Forest`, both actually western
+hemlock and western redcedar on the ground — exposed a second and larger family
+of errors, fixed together in the same commit. See `src/model/CLAUDE.md`,
+"How a vegetation type becomes a host score", for the mechanism. In summary:
 
-Measured over all 48,032 cells at the same date, comparing the shipped state
-(no EVT, missing host = 1.0) with the re-bake:
+- **land cover now caps rather than competing.** `Alpine and Subalpine Bedrock
+  and Scree` scored **1.0** — the model's maximum — because `/subalpine/` sat in
+  the true-fir rule and won before `/scree/` was reached. So did alpine
+  grassland, two subalpine meadows and a deciduous shrubland;
+- **a compound type scores the mean of the hosts it names**, not the strongest.
+  A hemlock-silver fir mix was indistinguishable from pure silver fir;
+- **western red-cedar scores 0**, because *Thuja plicata* is
+  arbuscular-mycorrhizal and cannot host boletes at all;
+- **every pattern is word-bounded**, because "Northern Rocky Mountain" was
+  matching `/rock/` and "Subalpine" was matching `/alpine/` across 63 names.
 
-| | before | after |
-| --- | --- | --- |
-| mean habitat score | 0.300 | **0.226** |
-| median | 0.155 | **0.064** |
-| 90th percentile | 0.821 | **0.701** |
-| cells scoring 0.7+ | 7,466 | **4,814** |
-| "medium+" on the status line | 307 sq mi | **217 sq mi** |
+### What that did to host quality
 
-35,071 forested cells fell, 4,910 were unchanged (their host really is 1.0), and
-**none rose** — the old default was the maximum, so nothing could. The median
-cell lost 40% of its score; the shape is a squeeze of the middle, not a uniform
-scaling. The 8,051 cells with no tree cover are untouched at zero.
+Over all 39,981 forested cells, recomputed from the same per-sample LANDFIRE
+types so nothing but the rules changed:
 
-The distribution of the host factor itself is the useful summary — this is the
-discrimination that was previously absent entirely:
+| host factor | before | after |     | host factor | before | after |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0.0 | 1,333 | 1,620 | | 0.6 | 3,910 | 5,210 |
+| 0.1 | 2,799 | 3,652 | | 0.7 | 3,432 | 3,980 |
+| 0.2 | 3,616 | 4,437 | | 0.8 | 7,275 | 6,264 |
+| 0.3 | 3,372 | 4,244 | | 0.9 | 2,077 | 1,340 |
+| 0.4 | 3,062 | 4,590 | | 1.0 | 5,166 | 561 |
+| 0.5 | 3,939 | 4,083 | | | | |
 
-| host | cells | | host | cells |
-| --- | --- | --- | --- | --- |
-| 0.0 | 1,333 | | 0.6 | 3,902 |
-| 0.1 | 2,799 | | 0.7 | 3,448 |
-| 0.2 | 3,613 | | 0.8 | 7,275 |
-| 0.3 | 3,375 | | 0.9 | 2,077 |
-| 0.4 | 3,062 | | 1.0 | 5,166 |
-| 0.5 | 3,931 | | | |
-
+Mean 0.562 → 0.470, median 0.600 → 0.475, p90 1.000 → 0.800. **28,443 cells
+fell, none rose**, 11,538 unchanged. Cells sitting at exactly 1.0 went from
+4,910 to 324 — that collapse is the fix: the old rule list handed the maximum
+host score to anything whose name happened to contain "subalpine".
 ## Scoring model (hand-tuned — do not refactor or "clean up" without asking)
 
 `score = habitat × trigger rain × soil moisture × temperature window × humidity`,
@@ -760,11 +776,22 @@ with kill switches for frost, snow, and heat.
   (or ~30°C max / -3°C min triggers in `analyze()`), and fresh snow
   are kill switches that zero or heavily discount the score.
 - **Humidity**: 3-day mean relative humidity; ≥70% ideal, <40% penalized.
-- **Host quality** (`HOST_RULES` / `hostOf` / `HOST_UNKNOWN`): the named
-  LANDFIRE vegetation type sets a multiplier from 0 (not forest) to 1.0 (Sitka
-  spruce, true fir, mountain hemlock). **A missing type scores `HOST_UNKNOWN`
-  = 0.4, not 1.0** — below Douglas-fir at 0.45, because unknown must never
-  outrank known-mediocre. See "Missing host is penalised, not rewarded".
+- **Host quality** (`NON_HOST_COVER` / `HOST_SPECIES` / `hostOf` /
+  `HOST_NO_INFO`): three separate mechanisms, not one ordered list. Land cover
+  caps (bare rock, grass, marsh, developed, above treeline → 0; open woodland
+  and parkland → 0.3), host species set the value as the **mean of every
+  species the type names**, and a generic "conifer forest" fallback scores 0.5.
+  Western red-cedar is 0 — it is arbuscular-mycorrhizal and cannot host boletes.
+  **A missing *or* unrecognised type scores `HOST_NO_INFO` = 0.3**, below dry
+  pine (0.4) and Douglas-fir (0.45), because absent information must never
+  outrank known-mediocre. See "Host quality: absent data is penalised, and land
+  cover caps".
+- **Stand structure** (`structureFactor`): one joint function of canopy cover
+  and stand height, replacing an `fCanopy × fHeight` product whose overlapping
+  flat tops put 76.7% of forested cells on a plateau at 1.0. Nothing under 5 m;
+  the height reward climbs to 33 m (the EVH p99 — the data cannot express real
+  old growth, see `src/model/CLAUDE.md`); moderate cover beats dense or sparse,
+  and the preferred cover falls and broadens as stands get taller.
 - **Habitat** (`function habitat`): four regions, each with
   its own season window and an elevation band that drifts downslope through
   fall:

@@ -1,11 +1,11 @@
 {
   "note": "Recorded model output. Regenerate deliberately with `npm run snapshots:update` after tuning, then read the diff. See tests/model/snapshot.test.mjs.",
-  "updated": "2026-09-08",
+  "updated": "2026-09-10",
   "fixtures": {
     "dry": {
       "score": 0,
-      "habitat": 0.955628,
-      "vegMult": 1,
+      "habitat": 0.760125,
+      "vegMult": 0.79542,
       "F": 0,
       "M": 0,
       "X": 1,
@@ -16,9 +16,9 @@
       "best": 0
     },
     "recentHeavyRain": {
-      "score": 31.354299,
-      "habitat": 0.955628,
-      "vegMult": 1,
+      "score": 24.939827,
+      "habitat": 0.760125,
+      "vegMult": 0.79542,
       "F": 0.166667,
       "M": 0.90625,
       "X": 1,
@@ -26,12 +26,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 82.261708
+      "best": 65.432582
     },
     "midFlush": {
-      "score": 75.578219,
-      "habitat": 0.955628,
-      "vegMult": 1,
+      "score": 60.116403,
+      "habitat": 0.760125,
+      "vegMult": 0.79542,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -39,12 +39,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 75.578219
+      "best": 60.116403
     },
     "postFlushDecay": {
-      "score": 54.136383,
-      "habitat": 0.955628,
-      "vegMult": 1,
+      "score": 43.061144,
+      "habitat": 0.760125,
+      "vegMult": 0.79542,
       "F": 0.666667,
       "M": 0.44375,
       "X": 1,
@@ -52,12 +52,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 54.136383
+      "best": 43.061144
     },
     "hardFrost": {
-      "score": 9.069386,
-      "habitat": 0.955628,
-      "vegMult": 1,
+      "score": 7.213968,
+      "habitat": 0.760125,
+      "vegMult": 0.79542,
       "F": 1,
       "M": 0.55625,
       "X": 0.8,
@@ -65,12 +65,12 @@
       "K": 0.15,
       "C": 0,
       "kill": "frost",
-      "best": 61.886818
+      "best": 49.225993
     },
     "freshSnow": {
-      "score": 3.778911,
-      "habitat": 0.955628,
-      "vegMult": 1,
+      "score": 3.00582,
+      "habitat": 0.760125,
+      "vegMult": 0.79542,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -78,12 +78,12 @@
       "K": 0.05,
       "C": 0,
       "kill": "snow",
-      "best": 61.886818
+      "best": 49.225993
     },
     "heatOnFlush": {
       "score": 0,
-      "habitat": 0.955628,
-      "vegMult": 1,
+      "habitat": 0.760125,
+      "vegMult": 0.79542,
       "F": 1,
       "M": 0.55625,
       "X": 0,
@@ -94,9 +94,9 @@
       "best": 0
     },
     "humid": {
-      "score": 75.578219,
-      "habitat": 0.955628,
-      "vegMult": 1,
+      "score": 60.116403,
+      "habitat": 0.760125,
+      "vegMult": 0.79542,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -104,12 +104,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 75.578219
+      "best": 60.116403
     },
     "arid": {
-      "score": 33.799607,
-      "habitat": 0.955628,
-      "vegMult": 1,
+      "score": 26.884873,
+      "habitat": 0.760125,
+      "vegMult": 0.79542,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -117,12 +117,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 33.799607
+      "best": 26.884873
     },
     "coastalFall": {
-      "score": 79.08753,
-      "habitat": 1,
-      "vegMult": 1,
+      "score": 62.907777,
+      "habitat": 0.79542,
+      "vegMult": 0.79542,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -130,12 +130,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 79.08753
+      "best": 62.907777
     },
     "lowlandFall": {
-      "score": 10.676816,
-      "habitat": 0.135,
-      "vegMult": 0.45,
+      "score": 8.49255,
+      "habitat": 0.107382,
+      "vegMult": 0.357939,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -143,12 +143,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 10.676816
+      "best": 8.49255
     },
     "eastsideFall": {
-      "score": 60.927526,
-      "habitat": 0.770381,
-      "vegMult": 0.8,
+      "score": 48.462953,
+      "habitat": 0.612776,
+      "vegMult": 0.636336,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -156,12 +156,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 60.927526
+      "best": 48.462953
     },
     "highElevation": {
-      "score": 26.618573,
-      "habitat": 0.336571,
-      "vegMult": 1,
+      "score": 21.172937,
+      "habitat": 0.267715,
+      "vegMult": 0.79542,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -169,12 +169,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 26.618573
+      "best": 21.172937
     },
     "lowElevation": {
-      "score": 34.871112,
-      "habitat": 0.440918,
-      "vegMult": 1,
+      "score": 27.737169,
+      "habitat": 0.350715,
+      "vegMult": 0.79542,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -182,12 +182,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 34.871112
+      "best": 27.737169
     },
     "sweetSpot": {
-      "score": 78.964641,
-      "habitat": 0.998446,
-      "vegMult": 1,
+      "score": 62.810029,
+      "habitat": 0.794184,
+      "vegMult": 0.79542,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -195,12 +195,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 78.964641
+      "best": 62.810029
     },
     "northAspect": {
-      "score": 80.861897,
-      "habitat": 0.955628,
-      "vegMult": 1,
+      "score": 64.319144,
+      "habitat": 0.760125,
+      "vegMult": 0.79542,
       "F": 1,
       "M": 0.658625,
       "X": 1,
@@ -208,12 +208,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 80.861897
+      "best": 64.319144
     },
     "southAspect": {
-      "score": 69.672781,
-      "habitat": 0.955628,
-      "vegMult": 1,
+      "score": 55.419101,
+      "habitat": 0.760125,
+      "vegMult": 0.79542,
       "F": 1,
       "M": 0.453875,
       "X": 1,
@@ -221,12 +221,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 69.672781
+      "best": 55.419101
     },
     "strongHost": {
-      "score": 75.578219,
-      "habitat": 0.955628,
-      "vegMult": 1,
+      "score": 60.116403,
+      "habitat": 0.760125,
+      "vegMult": 0.79542,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -234,12 +234,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 75.578219
+      "best": 60.116403
     },
     "mediumHost": {
-      "score": 45.346931,
-      "habitat": 0.573377,
-      "vegMult": 0.6,
+      "score": 36.069842,
+      "habitat": 0.456075,
+      "vegMult": 0.477252,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -247,12 +247,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 45.346931
+      "best": 36.069842
     },
     "weakHost": {
-      "score": 7.557822,
-      "habitat": 0.095563,
-      "vegMult": 0.1,
+      "score": 6.01164,
+      "habitat": 0.076012,
+      "vegMult": 0.079542,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -260,12 +260,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 7.557822
+      "best": 6.01164
     },
     "douglasFirHost": {
-      "score": 34.010198,
-      "habitat": 0.430032,
-      "vegMult": 0.45,
+      "score": 27.052381,
+      "habitat": 0.342056,
+      "vegMult": 0.357939,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -273,12 +273,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 34.010198
+      "best": 27.052381
     },
     "missingVegData": {
-      "score": 30.231288,
-      "habitat": 0.382251,
-      "vegMult": 0.4,
+      "score": 18.034921,
+      "habitat": 0.228037,
+      "vegMult": 0.238626,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -286,7 +286,7 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 30.231288
+      "best": 18.034921
     },
     "noTreeCover": {
       "score": 0,
@@ -302,9 +302,9 @@
       "best": 0
     },
     "youngPlantation": {
-      "score": 17.38299,
-      "habitat": 0.219794,
-      "vegMult": 0.23,
+      "score": 4.210499,
+      "habitat": 0.053238,
+      "vegMult": 0.05571,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -312,12 +312,12 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 17.38299
+      "best": 4.210499
     },
     "sparseCanopy": {
-      "score": 19.902264,
-      "habitat": 0.251649,
-      "vegMult": 0.263333,
+      "score": 13.229889,
+      "habitat": 0.167282,
+      "vegMult": 0.175049,
       "F": 1,
       "M": 0.55625,
       "X": 1,
@@ -325,7 +325,7 @@
       "K": 1,
       "C": 0,
       "kill": null,
-      "best": 19.902264
+      "best": 13.229889
     }
   }
 }

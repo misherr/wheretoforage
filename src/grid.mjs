@@ -60,15 +60,13 @@ export function terrainAt(getE,lat,lon,d,dl){
 
 /* The elevation/weather cache key, shared by the app and the bake script.
 
-   Four decimal places, while cell centres carry five. That is load-bearing and NOT a rounding
-   nicety: cellCenter() returns a 5dp value, but terrainAt() looks up its neighbour as `lat + DLAT`,
-   and that sum lands a hair *below* the neighbour's own 5dp value often enough that the two round to
-   different strings — 77 of every 300 cells in latitude, 0 in longitude. Those cells fall back to a
-   one-sided north-south gradient even though the neighbour's elevation is sitting in the cache.
+   Five decimal places, matching what cellCenter() returns. It used to truncate to four, and that
+   was a bug rather than a rounding nicety: terrainAt() looks up its neighbour as `lat + DLAT`, and
+   that sum lands a hair *below* the neighbour's own 5dp value often enough that the two rounded to
+   different strings — 77 of every 300 cells in latitude, 0 in longitude. Those cells silently took a
+   one-sided north-south gradient with the neighbour's elevation already sitting in the cache.
 
-   It is deterministic, it is baked into data/cells.json, and it is therefore reproducible — the bake
-   script gets the same answer the app did. It is also a bug: slope and aspect feed the model's aspect
-   adjustment, so widening this key would move scores, which makes it a scientific change needing
-   sign-off rather than a tidy-up. Left exactly as it is, and written down here so the next person
-   finds the explanation instead of the surprise. */
-export const pointKey = (lat,lon) => lat.toFixed(4)+','+lon.toFixed(4);
+   At five decimals the neighbour lookup hits 300 of 300, and distinct cells still never collide
+   (verified across the state at both 4 and 5 dp). Weather anchors are unaffected: snapLattice()
+   already rounds them to 4 dp, and a 4dp value formatted to 5 is stable. */
+export const pointKey = (lat,lon) => lat.toFixed(5)+','+lon.toFixed(5);
