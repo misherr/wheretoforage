@@ -10,7 +10,7 @@ name: Tests
 # staging-pages.yml. The staging mirror is a full copy of this tree, so an unguarded workflow runs
 # twice; weather.yml was unguarded once and duly spent a second day's Open-Meteo quota. Tests are
 # cheap rather than metered, but the guard also keeps a red X off the mirror where nobody is looking.
-# See CLAUDE.md, "Both workflows are repository-guarded, in opposite directions".
+# See docs/deploys.md, "Both workflows are repository-guarded, in opposite directions".
 
 on:
   push:

@@ -79,7 +79,7 @@ test('rules: every host species is reachable from a real vegetation type', () =>
      correct about the species and would apply the moment a LANDFIRE release names one — but they
      are listed here so the gap is recorded rather than mistaken for coverage. This is the same
      class of limitation as the EVH height ceiling: the model can discriminate only as finely as
-     the vegetation data names things. See CLAUDE.md, "What the vegetation data cannot say". */
+     the vegetation data names things. See src/model/CLAUDE.md, "What the vegetation data cannot say". */
   const NOT_NAMED_BY_LF2024 = ['subalpine fir', 'noble fir', 'Engelmann spruce', 'grand fir'];
 
   const names = Object.values(load());

@@ -9,7 +9,7 @@
      - the quarter-point geometry, because vegSummary() averages over exactly those four points and
        the whole vegetation half of cells.json is wrong if they move;
      - the lattice, because a bake script that disagrees with the app about where cells are renders
-       a blank map while every tap still works (CLAUDE.md, "The script must agree with the app");
+       a blank map while every tap still works (docs/cell-anchor-join.md, "The script must agree with the app");
      - checkpoint/resume, because a full bake is ~580 requests and losing one to a connect timeout
        must cost minutes rather than the whole run. */
 import { test } from 'node:test';

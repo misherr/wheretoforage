@@ -45,7 +45,7 @@ No dependencies. `npm run test:model` covers the ecological model (fixtures in `
 The status line will say so — "vegetation type missing for N% of forested cells in data/cells.json". Those cells are being scored at a flat 40/100 host quality, which is a deliberate penalty for absent data, not a measurement. The tap sheet says the same thing per cell. Causes, in order of likelihood:
 
 - **`data/evt-names.json` missing or truncated** — the app says which. Run `node --test scripts/evt-names.test.mjs`.
-- **`cells.json` was baked while EVT was broken** — re-bake vegetation only; see CLAUDE.md.
+- **`cells.json` was baked while EVT was broken** — re-bake vegetation only; see [docs/landfire-vegetation.md](docs/landfire-vegetation.md).
 - **The LANDFIRE service changed shape again** — it has once before, silently. The checked-in table means this no longer takes vegetation down with it.
 
 ## If the weather job fails

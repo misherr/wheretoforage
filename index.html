@@ -1049,7 +1049,7 @@ $('btn-base').onclick=()=>{ bases[baseOrder[baseIdx]].remove(); baseIdx=(baseIdx
 $('btn-loc').onclick=()=>{ if(!navigator.geolocation){setStatus('Location not available');return;} setStatus('Finding you…'); navigator.geolocation.getCurrentPosition(pos=>{ userLoc=[pos.coords.latitude,pos.coords.longitude]; L.circleMarker(userLoc,{radius:6,color:'#fff',weight:2,fillColor:'#4a90d9',fillOpacity:1}).addTo(map); map.setView(userLoc,9); setStatus('Centered on your location'); },()=>setStatus('Location permission denied'),{enableHighAccuracy:false,timeout:10000}); };
 
 loadState();
-/* Module scope is not the global scope. The verification snippets in CLAUDE.md — the ones under
+/* Module scope is not the global scope. The verification snippets in docs/verification.md — the ones under
    "Verification that has actually caught bugs", which are run by hand in the browser console — refer
    to these by name, so expose them deliberately rather than letting the move quietly break them. */
 Object.assign(window,{anchorHit,snapLattice,key,cells,wcache,STATIC,habitat,analyze,fullAnalysis,vegMult});

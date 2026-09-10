@@ -80,7 +80,7 @@ export const DAILY_CEILING = Number(process.env.DAILY_CALL_CEILING || 9500);
 //
 // Known conservatism, left alone on purpose: GitHub-hosted runners get a fresh IP per job, so two CI
 // runs are not really sharing a quota either. Carrying the count between them spends less than the
-// cap allows rather than more, which is the safe direction, and the whole budget model in CLAUDE.md
+// cap allows rather than more, which is the safe direction, and the budget model in docs/weather-archive.md
 // is written around one shared daily figure. Do not "fix" that without re-costing the schedule.
 export function envKey(env = process.env) {
   if (env.WEATHER_BUDGET_KEY) return env.WEATHER_BUDGET_KEY;          // explicit override

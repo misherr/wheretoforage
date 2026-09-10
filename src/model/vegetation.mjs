@@ -48,7 +48,7 @@ export const NON_HOST_COVER = [
    `Ponderosa Pine Woodland and Savanna` describe genuinely open ground; `Ponderosa Pine Forest and
    Woodland` and `Spruce-Fir Forest and Woodland` are forest/woodland mosaics whose forest half is
    real habitat, and capping those at 0.3 would throw away the host information in the name. Eight
-   in-state types are mosaics, ten are open — see the table in CLAUDE.md. */
+   in-state types are mosaics, ten are open — see docs/landfire-vegetation.md. */
 export const OPEN_CANOPY = /\b(?:woodland|savanna|parkland|krummholz)\b/i;
 export const IS_FOREST = /\bforest\b/i;
 export const OPEN_CANOPY_CAP = 0.3;
@@ -174,7 +174,7 @@ export function hostOf(name) {
    - The height reward keeps climbing to 33 m instead of saturating at 15 m. 33 m is not a guess and
      not the height of real old growth: it is the 99th percentile of LANDFIRE EVH across Washington.
      The dataset tops out at 40 m, so the genuine 60 m Douglas-fir and hemlock this ought to reward
-     cannot be expressed in the input at all — see the limitation noted in CLAUDE.md. Calibrating to
+     cannot be expressed in the input at all — see src/model/CLAUDE.md. Calibrating to
      the data's real range is the only honest option; anchoring at 60 m would put the top of the
      scale somewhere no cell can reach.
    - Moderate cover beats both extremes. Kings favour stands with light reaching the floor — road

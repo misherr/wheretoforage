@@ -12,7 +12,7 @@
    vegSummary() turns LANDFIRE samples into host quality, both straight out of src/model/. The cell
    lattice and terrainAt() come from src/grid.mjs, which index.html imports too. That is the whole
    reason the model was extracted first — a second copy of either would drift, and this repo has
-   already paid for that twice (see CLAUDE.md, "The script must agree with the app").
+   already paid for that twice (see docs/cell-anchor-join.md, "The script must agree with the app").
 
    Usage:
      node scripts/build-cells.mjs                      # the whole state
@@ -49,7 +49,7 @@ export const LANDFIRE_SOURCE = { product: 'LF2024', year: 2024, layers: { ...LFL
 /* ---- knobs ---- */
 const HAB_GATE = 0.08;              // everHabitat must exceed this, the same threshold the app uses
 const REQ_TIMEOUT = 45000;          // ms per attempt
-const ATTEMPTS = 8;                 // UND_ERR_CONNECT_TIMEOUT is normal here; see CLAUDE.md
+const ATTEMPTS = 8;                 // UND_ERR_CONNECT_TIMEOUT is normal here; see docs/verification.md
 const TILE_WORKERS = 6;
 const LF_CELLS_PER_BATCH = 250;     // x4 quarter points = 1000 sample points per request
 const CHECKPOINT_EVERY = Number(process.env.CHECKPOINT_EVERY || 5);   // LANDFIRE batches between writes

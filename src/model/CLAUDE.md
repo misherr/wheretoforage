@@ -56,8 +56,8 @@ fixture suite stops running, and the next regression ships unmeasured.
   the diff* — every changed number should be one you intended.
 
 Tuning the constants also needs the user's explicit sign-off. They were set by
-hand against field experience, not derived from a spec; see the root
-`CLAUDE.md` under "Scoring model".
+hand against field experience, not derived from a spec; see
+[`docs/scoring-model.md`](../../docs/scoring-model.md).
 
 Add a fixture for anything you change. A model bug here is invisible from the
 map: when LANDFIRE host quality silently became `1.0` everywhere, 39,981 cells
