@@ -33,7 +33,7 @@ import { osmCategory, osmType, USFS_DRIVABLE_ML, CAP, CATS, encodeGeom, ROW_STRI
 import { REGIONS, decodePNG, terrariumMetres, tileXY, TERRAIN_SOURCE } from './build-cells.mjs';
 
 export const GENERATOR = 'scripts/build-access.mjs';
-export const GENERATOR_VERSION = '3.0.0';
+export const GENERATOR_VERSION = '4.0.0';
 
 const UA = 'king-bolete-forecast/1.0 (github.com/misherr/wheretoforage)';
 
@@ -138,14 +138,17 @@ function cumulative(pts) {
   return cum;
 }
 
-/* Nearest point on a polyline to a coordinate, as {d, arc}. */
+/* Nearest point on a polyline to a coordinate, as {d, arc, pt}. The point matters as much as the
+   distance now: it is where the on-trail leg of an approach ends and the off-trail leg begins, and
+   both legs have to meet at the same coordinate or the parts will not add up to the total. */
 export function nearestOnWay(pts, lat, lon) {
   if (!pts || !pts.length) return { d: Infinity, arc: 0 };
   if (pts.length === 1) {
-    return { d: Math.hypot((lon - pts[0][1]) * mLon(pts[0][0]), (lat - pts[0][0]) * M_LAT), arc: 0 };
+    return { d: Math.hypot((lon - pts[0][1]) * mLon(pts[0][0]), (lat - pts[0][0]) * M_LAT),
+             arc: 0, pt: pts[0] };
   }
   const cum = cumulative(pts);
-  let best = Infinity, arc = 0;
+  let best = Infinity, arc = 0, pt = pts[0];
   for (let i = 1; i < pts.length; i++) {
     const [aLa, aLn] = pts[i - 1], [bLa, bLn] = pts[i];
     const k = mLon(aLa);
@@ -155,9 +158,12 @@ export function nearestOnWay(pts, lat, lon) {
     let t = len2 === 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / len2;
     t = Math.max(0, Math.min(1, t));
     const d = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
-    if (d < best) { best = d; arc = cum[i - 1] + t * Math.sqrt(len2); }
+    if (d < best) {
+      best = d; arc = cum[i - 1] + t * Math.sqrt(len2);
+      pt = [aLa + (bLa - aLa) * t, aLn + (bLn - aLn) * t];
+    }
   }
-  return { d: best, arc };
+  return { d: best, arc, pt };
 }
 
 /* ===================== the query ===================== */
@@ -450,11 +456,17 @@ export function joinRoutes(entries, snapM = JOIN_SNAP_M) {
           break;
         }
       }
-      // keep the strongest trailhead found on any member, and the longest constituent OSM id
+      /* Keep the strongest trailhead found on any member, its POINT, and the longest constituent
+         OSM id. Carrying the point is what makes the walk right on a joined route: the trailhead can
+         be on any member and at either of its ends, and the chain may have reversed that member on
+         the way in. A flag cannot express that; a coordinate projected back onto the finished chain
+         can. */
       const th = members.reduce((a, m) => Math.max(a, m.th), TRAILHEAD_NONE);
+      const thMember = members.filter(m => m.th === th && m.thPt)
+                              .sort((a, b) => b.geom.length - a.geom.length)[0];
       const osm = members.filter(m => m.osmId).sort((a, b) => b.geom.length - a.geom.length)[0];
-      out.push({ ...list[i], geom: chain, th, segments: members.length,
-                 osmId: osm ? osm.osmId : null });
+      out.push({ ...list[i], geom: chain, th, thPt: thMember ? thMember.thPt : null,
+                 segments: members.length, osmId: osm ? osm.osmId : null });
     }
   }
   return out;
@@ -546,6 +558,34 @@ export function despike(elev) {
     out[i] = a < b ? (b < c ? b : (a < c ? c : a)) : (a < c ? a : (b < c ? c : b));   // median of three
   }
   return out;
+}
+
+/* The climb on the OFF-TRAIL leg: from the nearest point on the route straight to the cell centre.
+
+   Same method as the on-trail figure — sampled from the same Terrarium tiles at the same zoom, run
+   through the same 3-point median, accumulated as positive difference with the same gradient gate —
+   because two numbers shown side by side and added together must not be measured two different
+   ways. The only difference is the line: this one is a straight segment nobody has walked, which is
+   what OFF_TRAIL_NOTE in src/access.mjs exists to say.
+
+   Sampled every OFF_STEP_M so the profile follows the ground rather than jumping between endpoints;
+   a 2 km leg is about 20 samples, and at z10 (103 m per pixel) that is roughly one sample per pixel,
+   which is as much resolution as the data has. */
+export const OFF_STEP_M = 100;
+
+export async function offTrailGain(from, to, loader) {
+  if (!from || !to) return -1;
+  const dy = (to[0] - from[0]) * M_LAT, dx = (to[1] - from[1]) * mLon(from[0]);
+  const len = Math.hypot(dx, dy);
+  if (!(len > 0)) return 0;                       // the route runs through the cell centre
+  const steps = Math.max(1, Math.round(len / OFF_STEP_M));
+  const line = [];
+  for (let s = 0; s <= steps; s++) {
+    const t = s / steps;
+    line.push([from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t]);
+  }
+  const elev = despike(await elevationProfile(line, loader));
+  return gainBetween(line, elev, 0, len);
 }
 
 /* Cumulative climb between two positions along a way, given its per-vertex elevations. */
@@ -699,14 +739,24 @@ export async function build(opts, deps = {}) {
          dataset in EDW and OSM's highway=trailhead tag is sparse — 13 nodes across six sample tiles
          — so relying on it alone would leave a walk figure for almost nobody. Where a trail meets a
          road is where you leave the car; it is derivable from data already fetched; and it is
-         labelled as an inference rather than as a surveyed point. */
+         labelled as an inference rather than as a surveyed point.
+
+         Record WHICH end met the road, as a coordinate. The flag alone was not enough: the walk was
+         later measured from arc 0 of the stored route regardless of which end matched, so a trail
+         whose road end is its LAST vertex had its walk measured from the wrong end — on a sample of
+         25 inferred routes, 5 were wrong that way, one of them (Tyler Peak Trail) with arc 0 sitting
+         1,971 m from the nearest drivable road of any kind, OSM or USFS. Storing the point rather
+         than a flag also survives joinRoutes reversing and reordering members, which the old code
+         could not: 60% of cells on a joined route were pinned to arc 0 of the whole chain. */
       for (const { wid, coords } of pendingTrails) {
         const w = ways.get(wid);
         if (!w || w.th !== TRAILHEAD_NONE) continue;
         for (const end of [coords[0], coords[coords.length - 1]]) {
           if (!end) continue;
           for (const road of drivable) {
-            if (nearestOnWay(road, end[0], end[1]).d <= TH_SNAP_M) { w.th = TRAILHEAD_INFERRED; break; }
+            if (nearestOnWay(road, end[0], end[1]).d <= TH_SNAP_M) {
+              w.th = TRAILHEAD_INFERRED; w.thPt = [end[0], end[1]]; break;
+            }
           }
           if (w.th !== TRAILHEAD_NONE) break;
         }
@@ -725,12 +775,17 @@ export async function build(opts, deps = {}) {
   await Promise.all(Array.from({ length: Math.min(TILE_WORKERS, Math.max(1, queue.length)) }, worker));
   saveCk();
 
-  /* A mapped trailhead outranks an inferred one — it is a surveyed point rather than a deduction. */
+  /* A mapped trailhead outranks an inferred one — it is a surveyed point rather than a deduction.
+     Its node is kept for the same reason the inferred end is: the trailhead's position along the
+     route is what a walk is measured from, and it has to survive joining. */
   for (const [, w] of ways) {
     if (w.cat === 'road' || !w.geom.length) continue;
+    let best = Infinity, pt = null;
     for (const [tLa, tLn] of trailheadNodes) {
-      if (nearestOnWay(w.geom, tLa, tLn).d <= TH_MAPPED_M) { w.th = TRAILHEAD_MAPPED; break; }
+      const dd = nearestOnWay(w.geom, tLa, tLn).d;
+      if (dd <= TH_MAPPED_M && dd < best) { best = dd; pt = [tLa, tLn]; }
     }
+    if (pt) { w.th = TRAILHEAD_MAPPED; w.thPt = pt; }
   }
 
   /* ---- assemble ---- */
@@ -745,6 +800,7 @@ export async function build(opts, deps = {}) {
     const w = ways.get(wid);
     if (!w) continue;
     entries.push({ wid, name: w.name, ref: w.ref, type: w.type, cat: w.cat, th: w.th,
+                   thPt: w.thPt || null,
                    osmId: /^o(\d+)$/.test(wid) ? Number(wid.slice(1)) : null,
                    segments: 1, geom: w.geom });
   }
@@ -794,26 +850,24 @@ export async function build(opts, deps = {}) {
   }
 
   /* The trailhead's position along each route, so a per-cell walk is a subtraction. Measured on the
-     stored geometry, so the figures and the drawn line agree. An inferred trailhead is an END of the
-     route; a mapped one is projected onto it. */
+     stored geometry, so the figures and the drawn line agree.
+
+     ONE path for both kinds now: project the recorded trailhead point onto the finished route. The
+     old code special-cased mapped trailheads and left inferred ones at arc 0, which measured the
+     walk from whichever end the geometry happened to start at. A route with no recorded point gets
+     no walk at all rather than a walk from an assumed end — if we do not know where you would park,
+     the honest answer is that the figure is unavailable. */
   const thArc = new Array(joined.length).fill(-1);
+  let thUnplaced = 0;
   for (let n = 0; n < joined.length; n++) {
     const j = joined[n];
     if (!j.th || !j.geom.length) continue;
-    let arc = 0;
-    if (j.th === TRAILHEAD_MAPPED) {
-      let best = Infinity;
-      for (const [tLa, tLn] of trailheadNodes) {
-        const r = nearestOnWay(j.geom, tLa, tLn);
-        if (r.d <= TH_MAPPED_M && r.d < best) { best = r.d; arc = r.arc; }
-      }
-      if (best === Infinity) arc = 0;
-    }
-    thArc[n] = arc;
+    if (!j.thPt) { thUnplaced++; continue; }
+    thArc[n] = nearestOnWay(j.geom, j.thPt[0], j.thPt[1]).arc;
   }
 
   const rows = [];
-  let withWalk = 0, withGain = 0;
+  let withWalk = 0, withGain = 0, withOffGain = 0;
   for (const [k, rec] of state.nearest) {
     const c0 = cells.get(k);
     if (!c0 || !inBbox(c0[0], c0[1], opts.bbox)) continue;
@@ -823,20 +877,27 @@ export async function build(opts, deps = {}) {
     for (const c of CATS) {
       const r = rec[c];
       const n = r ? routeOf.get(r.wid) : undefined;
-      if (!r || n === undefined) { row.push(-1, -1, -1, -1); continue; }
+      if (!r || n === undefined) { row.push(-1, -1, -1, -1, -1); continue; }
       any = true;
       const route = joined[n];
+      /* r.d and r.arc were measured on the pre-join, pre-simplify geometry, so re-project the cell
+         onto the stored route. Every number then describes the line the app draws, and the two legs
+         of the approach meet at the same point. */
+      const proj = nearestOnWay(route.geom, c0[0], c0[1]);
       let walk = -1, gain = -1;
       if (route.th && thArc[n] >= 0) {
-        /* r.arc was measured on the pre-join geometry, so re-project the cell onto the route: the
-           number shown has to describe the line shown. */
-        const proj = nearestOnWay(route.geom, c0[0], c0[1]);
         walk = Math.round(Math.abs(proj.arc - thArc[n]));
         withWalk++;
         gain = gainBetween(route.geom, profiles[n], thArc[n], proj.arc);
         if (gain >= 0) withGain++;
       }
-      row.push(Math.round(r.d), n, walk, gain);
+      /* The off-trail leg: from that nearest point straight to the cell centre. The distance is the
+         projection itself — which is why it is stored as the category distance rather than as a
+         fourth column — and the climb is sampled along the straight line from the same Terrarium
+         tiles, de-spiked the same way, so the two legs are measured by one method. */
+      const offGain = opts.skipElevation ? -1 : await offTrailGain(proj.pt, c0, deps.tileFetch);
+      if (offGain >= 0) withOffGain++;
+      row.push(Math.round(proj.d), n, walk, gain, offGain);
     }
     if (any) rows.push(row);
   }
@@ -861,7 +922,8 @@ export async function build(opts, deps = {}) {
                 usfs: usfsRequests, usfs_retries: usfsRetries, areas_abandoned: osmGaveUp },
     counts: { cells: rows.length, ways: outWays.length, ways_seen: ways.size,
               ways_named: named, ways_with_trailhead: withTh,
-              cell_walks: withWalk, cell_gains: withGain },
+              cell_walks: withWalk, cell_gains: withGain, cell_off_gains: withOffGain,
+              trailheads_unplaced: thUnplaced },
     seconds: Math.round((Date.now() - t0) / 1000),
   };
   const generated = new Date().toISOString();

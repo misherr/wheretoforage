@@ -345,14 +345,17 @@ test('bake: a regional re-bake replaces its own cells and carries the rest throu
      carried-over rows, and drop any way nothing references any more — otherwise a few regional
      bakes would leave the file full of dead geometry. */
   const g = n => AC.encodeGeom([[47 + n / 100, -121], [47 + n / 100, -120.99]]);
-  const prev = { version: 4, generated: 'old', cap_m: 2000, provenance: { counts: {} },
+  /* v5: 2 + 3 categories x ROW_STRIDE 5 = 17 numbers, [d, wayIndex, onWalk, onGain, offGain] per
+     category in CATS order (road, trail, rough). The literals are spelled out rather than generated
+     so that a stride change breaks this fixture loudly instead of quietly re-slicing it. */
+  const prev = { version: 5, generated: 'old', cap_m: 2000, provenance: { counts: {} },
     ways: [['Old Road', null, 'unclassified', 0, 0, null, 1], ['Dead Way', null, 'track', 2, 0, null, 1]],
-    rows: [[10, 20, 100, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
-           [10, 21, -1, -1, -1, -1, 700, 1, -1, -1, -1, -1, -1, -1]] };
+    rows: [[10, 20, 100, 0, -1, -1, -1,  -1, -1, -1, -1, -1,  -1, -1, -1, -1, -1],
+           [10, 21, -1, -1, -1, -1, -1,  -1, -1, -1, -1, -1,  700, 1, -1, -1, -1]] };
   const prevGeom = [g(1), g(2)];
-  const fresh = { version: 4, generated: 'new', cap_m: 2000, provenance: { counts: {} },
+  const fresh = { version: 5, generated: 'new', cap_m: 2000, provenance: { counts: {} },
     ways: [['New Trail', null, 'path', 1, 2, 555, 1]],
-    rows: [[10, 21, -1, -1, -1, -1, 42, 0, 17, 120, -1, -1, -1, -1]] };
+    rows: [[10, 21, -1, -1, -1, -1, -1,  42, 0, 17, 120, 35,  -1, -1, -1, -1, -1]] };
   const freshGeom = [g(3)];
   const { merged: m, geom: mg } = A.mergeInto(prev, fresh, prevGeom, freshGeom);
   assert.equal(m.rows.length, 2, 'no cell may be lost');
@@ -364,6 +367,7 @@ test('bake: a regional re-bake replaces its own cells and carries the rest throu
   };
   assert.equal(nameOf(byKey['10:21'], 'trail'), 'New Trail', 'the rebaked cell takes the fresh way');
   assert.equal(AC.decodeRow(byKey['10:21']).trail, 42, 'and the fresh distance');
+  assert.equal(AC.decodeRow(byKey['10:21']).trailOffGain, 35, 'including the off-trail climb column');
   assert.equal(nameOf(byKey['10:20'], 'road'), 'Old Road', 'an untouched cell keeps pointing at its own way');
   assert.ok(!m.ways.some(w => w[0] === 'Dead Way'), 'a way nothing references any more must be dropped');
   assert.equal(m.provenance.counts.carried_over, 1);
@@ -993,9 +997,10 @@ test('cache: the geometry URL is stamped, or a re-bake never reaches a returning
    without capping the number or hiding it. */
 
 const longWalkRow = (walkM, others) => ({
-  trail: 400, trailWay: 0, trailWalk: walkM, trailGain: 900,
-  road: others ? 1200 : -1, roadWay: others ? 1 : -1, roadWalk: -1, roadGain: -1,
-  rough: -1, roughWay: -1, roughWalk: -1, roughGain: -1,
+  // trail: 400 is the OFF-TRAIL leg since v5 — the straight line from the route to the cell centre
+  trail: 400, trailWay: 0, trailWalk: walkM, trailGain: 900, trailOffGain: 40,
+  road: others ? 1200 : -1, roadWay: others ? 1 : -1, roadWalk: -1, roadGain: -1, roadOffGain: -1,
+  rough: -1, roughWay: -1, roughWalk: -1, roughGain: -1, roughOffGain: -1,
 });
 const longWalkWays = [['Pacific Crest Trail', null, 'path', 1, AC.TRAILHEAD_MAPPED, 12345, 4],
                       ['Forest Road 24', null, 'track', 2, AC.TRAILHEAD_NONE, null, 1]];
@@ -1010,15 +1015,38 @@ test('walk: an implausibly long walk keeps its number and gets labelled', () => 
   assert.match(det.walkDoubt, /Also nearby/, 'point at the alternative, since there is one here');
 });
 
-test('walk: a normal walk gets no caveat', () => {
+test('walk: a normal walk gets no caveat, and the threshold is on the TOTAL', () => {
   /* The median shown walk is 1.3 mi. If the caveat appeared on those it would be noise, and the
-     honest notes on this sheet only work while every one of them means something. */
-  for (const m of [0, 500, 3000, 12000, AC.WALK_DOUBT - 1]) {
+     honest notes on this sheet only work while every one of them means something.
+
+     Since v5 the caveat is judged on the total approach, not on the on-trail leg alone. That is the
+     point of the split: 3 mi of trail plus a mile of bushwhacking is the same problem as a 4 mi
+     trail walk, and flagging only the trail part would let the worst cases through — a cell with a
+     0 m on-trail leg and 1.9 km off-trail used to be flagged by nothing at all. longWalkRow puts
+     400 m in the off-trail column, so the totals below are the on-trail value plus 400. */
+  for (const m of [0, 500, 3000, 12000, AC.WALK_DOUBT - 401]) {
     const det = AC.accessDetail(longWalkRow(m, true), longWalkWays);
-    assert.equal(det.walkDoubt, null, m + ' m must not be flagged');
+    assert.equal(det.parts.total, m + 400, 'the total is the two legs added');
+    assert.equal(det.walkDoubt, null, 'a total of ' + (m + 400) + ' m must not be flagged');
   }
-  const det = AC.accessDetail(longWalkRow(AC.WALK_DOUBT, true), longWalkWays);
+  const det = AC.accessDetail(longWalkRow(AC.WALK_DOUBT - 400, true), longWalkWays);
+  assert.equal(det.parts.total, AC.WALK_DOUBT);
   assert.ok(det.walkDoubt, 'the threshold itself is flagged');
+  /* The off-trail leg cannot trip the threshold by itself: a way is only recorded within CAP
+     (2 km) of the cell centre, so the off-trail leg is at most 2 km and the 10 mi threshold is out
+     of its reach. What it CAN do is carry a total over the line that the on-trail leg alone would
+     not, which is the whole reason the threshold moved to the total. */
+  const justUnder = AC.WALK_DOUBT - 200;                       // on-trail alone: not flagged
+  assert.equal(AC.accessDetail({ ...longWalkRow(justUnder, true), trail: 100 }, longWalkWays).walkDoubt,
+    null, 'a 100 m off-trail leg leaves the total under the threshold');
+  const over = AC.accessDetail({ ...longWalkRow(justUnder, true), trail: 900 }, longWalkWays);
+  assert.equal(over.parts.total, justUnder + 900);
+  assert.ok(over.walkDoubt, 'a 900 m off-trail leg carries the same trail walk over it');
+  /* and a zero on-trail leg keeps its off-trail number, which is the case v4 reported as 0 */
+  const zero = AC.accessDetail(longWalkRow(0, true), longWalkWays);
+  assert.equal(zero.parts.onTrail, 0, 'nothing to walk on the trail');
+  assert.equal(zero.parts.offTrail, 400, 'but 400 m to get to the cell from it');
+  assert.equal(zero.parts.total, 400, 'and the total says so rather than reading as no walk at all');
 });
 
 test('walk: the caveat does not point at "Also nearby" when nothing is nearby', () => {
@@ -1046,11 +1074,12 @@ test('walk: the caveat is a label, never a filter', () => {
 
 test('walk: the sheet renders the caveat where the figure is', () => {
   const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
-  const at = app.indexOf('Walk from the trailhead');
-  assert.ok(at > 0, 'the walk block must still exist');
-  const block = app.slice(at, at + 900);
+  /* Renamed in v5: the block is the approach in two legs, not a single walk. */
+  const at = app.indexOf('<dt>Getting in</dt>');
+  assert.ok(at > 0, 'the approach block must still exist');
+  const block = app.slice(at, at + 1400);
   assert.match(block, /ac\.walkDoubt/, 'the caveat has to be rendered, not just computed');
-  assert.match(block, /accessDistance\(ac\.walk\)/, 'and the number stays on the line above it');
+  assert.match(block, /P\.total|P\.offTrail/, 'and the figures stay on the lines above it');
   assert.match(app, /\.caveat\{/, 'with a style of its own, so it reads as a caveat');
 });
 
@@ -1186,4 +1215,268 @@ test('honesty: a cell the bake never examined is not told that nothing is mapped
      into "not checked". */
   assert.match(app, /!STATIC\.access\.examined\|\|STATIC\.access\.examined\.has/,
     'with no examined set, assume examined');
+});
+
+/* ===================== the approach has two legs =====================
+
+   The bug this format exists to fix: v4's "walk" was the distance along the way from its trailhead
+   to the point on the way NEAREST THE CELL, and it stopped there. 924 cells reported exactly 0 —
+   the point nearest the cell was the trailhead itself, on a route that runs away from the cell — and
+   for 2,460 of 10,604 displayed walks the omitted leg was longer than the reported one. */
+
+const partsRow = (over) => ({
+  road: -1, roadWay: -1, roadWalk: -1, roadGain: -1, roadOffGain: -1,
+  trail: 1900, trailWay: 0, trailWalk: 0, trailGain: 0, trailOffGain: 470,
+  rough: -1, roughWay: -1, roughWalk: -1, roughGain: -1, roughOffGain: -1,
+  ...over,
+});
+const partsWays = [['Cold Creek Trail', null, 'path', 1, AC.TRAILHEAD_INFERRED, 987, 1],
+                   ['Forest Road 24', null, 'track', 2, AC.TRAILHEAD_MAPPED, 654, 1]];
+
+test('parts: a zero on-trail leg still reports the distance that is actually left', () => {
+  /* This is the reported symptom, as data: 0 m along the trail, 1,900 m from the trail to the cell.
+     v4 showed "0 ft". The number was true and it read as "no walk at all". */
+  const det = AC.accessDetail(partsRow(), partsWays);
+  assert.equal(det.parts.onTrail, 0, 'nothing to walk along the trail');
+  assert.equal(det.parts.offTrail, 1900, 'but 1.9 km to get from the trail to the cell');
+  assert.equal(det.parts.total, 1900, 'and the total says so');
+  assert.equal(det.parts.offGain, 470, 'with its own climb');
+  assert.equal(det.parts.totalGain, 470);
+  assert.ok(accessDistanceIsNonZero(det.parts.total), 'the headline figure must not read as zero');
+});
+const accessDistanceIsNonZero = m => !/^0\b/.test(AC.accessDistance(m));
+
+test('parts: the two legs add up, and the climbs add up with them', () => {
+  const det = AC.accessDetail(partsRow({ trailWalk: 3200, trailGain: 250, trail: 600, trailOffGain: 120 }), partsWays);
+  assert.equal(det.parts.onTrail, 3200);
+  assert.equal(det.parts.offTrail, 600);
+  assert.equal(det.parts.total, 3800, 'the total is the sum, not the larger, not the on-trail leg');
+  assert.equal(det.parts.onGain, 250);
+  assert.equal(det.parts.offGain, 120);
+  assert.equal(det.parts.totalGain, 370);
+});
+
+test('parts: a total climb needs both halves, or it is not reported', () => {
+  /* Adding a known leg to an unknown one and calling the sum "the climb" is the same overclaim as
+     measuring a walk from a trailhead that does not exist. */
+  const noOff = AC.accessDetail(partsRow({ trailWalk: 3200, trailGain: 250, trailOffGain: -1 }), partsWays);
+  assert.equal(noOff.parts.onGain, 250);
+  assert.equal(noOff.parts.offGain, null);
+  assert.equal(noOff.parts.totalGain, null, 'no total climb when the off-trail half is unmeasured');
+  assert.equal(noOff.parts.total, 3200 + 1900, 'but the distances still add up');
+
+  const noOn = AC.accessDetail(partsRow({ trailWalk: 3200, trailGain: -1, trailOffGain: 120 }), partsWays);
+  assert.equal(noOn.parts.onGain, null);
+  assert.equal(noOn.parts.totalGain, null, 'nor when the on-trail half is');
+});
+
+test('parts: with no trailhead there is no on-trail leg, but the off-trail leg is real', () => {
+  /* The honesty invariant, refined. There is still nowhere to measure a walk FROM, so the on-trail
+     leg is unavailable — but the distance from the route to the cell does not depend on a trailhead,
+     and reporting it is strictly more than the straight-line-only answer v4 gave. */
+  const det = AC.accessDetail(partsRow({ trailWalk: -1, trailGain: -1 }),
+    [['Cold Creek Trail', null, 'path', 1, AC.TRAILHEAD_NONE, 987, 1], partsWays[1]]);
+  assert.equal(det.parts.onTrail, null, 'no trailhead, no on-trail figure');
+  assert.equal(det.parts.onGain, null);
+  assert.equal(det.parts.offTrail, 1900, 'the off-trail leg stands on its own');
+  assert.equal(det.parts.total, null, 'and there is no total to state');
+  assert.equal(det.walk, null, 'the old single figure stays unavailable too');
+});
+
+test('parts: the off-trail leg is labelled as a straight line over unknown ground', () => {
+  assert.match(AC.OFF_TRAIL_NOTE, /straight line/i);
+  assert.match(AC.OFF_TRAIL_NOTE, /cell centre/i);
+  assert.match(AC.OFF_TRAIL_NOTE, /terrain|brush|blowdown|water/i);
+  assert.match(AC.OFF_TRAIL_NOTE, /no trail/i, 'it has to say there is no trail');
+  assert.ok(!/\bpath\b|\broute\b/i.test(AC.OFF_TRAIL_NOTE),
+    'and must not borrow a word implying someone has been through: ' + AC.OFF_TRAIL_NOTE);
+  const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
+  const at = app.indexOf('<dt>Getting in</dt>');
+  assert.ok(at > 0, 'the sheet must render the approach in parts');
+  const block = app.slice(at - 800, at + 1200);
+  assert.match(block, /OFF_TRAIL_NOTE/, 'and always alongside the off-trail note');
+  assert.match(block, /P\.offTrail/, 'showing the off-trail leg');
+  assert.match(block, /P\.total/, 'and the total');
+});
+
+test('parts: every category carries its own approach, not just the named one', () => {
+  /* 16,091 cells hold an approach for a category the sheet does not name. The primary category is
+     chosen by class precedence, so the nearest TRAIL gets named even when it has no trailhead, while
+     the road beside it has a perfectly good figure — and all of it was invisible. */
+  /* A trail within NEAR (800 m) is what makes the class 'trail'; at 1,900 m the class is 'near'
+     and the nearest category wins instead. */
+  const d = partsRow({ trail: 600, trailWalk: -1, trailGain: -1,
+                       road: 1200, roadWay: 1, roadWalk: 800, roadGain: 60, roadOffGain: 25 });
+  const det = AC.accessDetail(d, partsWays);
+  assert.equal(det.cat, 'trail', 'the class still names the trail');
+  assert.equal(det.parts.onTrail, null, 'which has no on-trail figure');
+  const road = det.others.find(o => o.cat === 'road');
+  assert.ok(road, 'the road must appear as an alternative');
+  assert.equal(road.parts.onTrail, 800, 'with its own on-trail leg');
+  assert.equal(road.parts.offTrail, 1200);
+  assert.equal(road.parts.total, 2000, 'and its own total');
+  assert.ok(road.trailheadNote, 'and where it measured from');
+  const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
+  const at = app.indexOf('<dt>Also nearby</dt>');
+  assert.match(app.slice(at, at + 500), /o\.parts/, 'the sheet has to render those figures');
+});
+
+test('parts: naming still follows the class, which is a deliberate choice', () => {
+  /* Switching the named route to whichever one carries a walk would rename 16,091 cells, 12,331 of
+     them from a road to a rough track — from the road you would drive to a logging spur. Measured on
+     the statewide file. This test pins the decision so it is not quietly reversed. */
+  const d = partsRow({ trail: 600, trailWalk: -1, trailGain: -1,
+                       rough: 300, roughWay: 1, roughWalk: 500, roughGain: 20, roughOffGain: 5 });
+  const det = AC.accessDetail(d, partsWays);
+  assert.equal(det.cat, 'trail',
+    'a trail within NEAR is named even though the rough track is nearer AND carries the walk');
+  assert.equal(AC.primaryCat(d), 'trail');
+});
+
+/* ===================== the trailhead is a place, not a flag =====================
+
+   The walk used to be measured from arc 0 of the stored route whenever the trailhead was inferred,
+   without recording WHICH end had met the road. On a sample of 25 inferred-trailhead routes, 5 had
+   only their far end at a drivable road — checked against OSM and the USFS road layer — so their
+   walk was measured backwards. Tyler Peak Trail's arc 0 sits 1,971 m from the nearest road of any
+   kind. And 60% of cells on a joined route were pinned to arc 0 of the whole chain, which can be a
+   different member entirely, since joinRoutes reverses and reorders members as it builds one.
+
+   The fixture below is the minimal version: a trail whose ROAD END IS ITS LAST VERTEX. */
+function reversedTrailDeps(counts = {}) {
+  const d = fakeDeps(counts);
+  const inner = d.overpass;
+  d.overpass = async (s, w, n, e, cb) => {
+    await inner(s, w, n, e, (el) => {
+      if (el.id === 102) {
+        /* Same trail, same road contact, geometry written south-last. Every coordinate is identical
+           to the fixture's; only the order changed. Nothing about the ground is different, so any
+           difference in the walk figure is the bug. */
+        cb({ ...el, geometry: el.geometry.slice().reverse() });
+      } else cb(el);
+    });
+  };
+  return d;
+}
+
+const routeLength = geom => {
+  let m = 0;
+  for (let i = 1; i < geom.length; i++) {
+    const [aLa, aLn] = geom[i - 1], [bLa, bLn] = geom[i];
+    m += Math.hypot((bLn - aLn) * 111320 * Math.cos(aLa * Math.PI / 180), (bLa - aLa) * 111132);
+  }
+  return m;
+};
+
+async function bakeTrail(deps) {
+  const dir = tmpdir();
+  cellsFixture(dir);
+  const opts = A.parseArgs([`--cells=${path.join(dir, 'cells.json')}`,
+    `--out=${path.join(dir, 'a.json')}`, '--bbox=47,-123,49,-121', '--skip-usfs']);
+  const r = await A.build(opts, deps);
+  const geom = JSON.parse(fs.readFileSync(path.join(dir, 'a-geom.json'), 'utf8')).geom;
+  const n = r.ways.findIndex(w => w[0] === 'Bear Creek Trail');
+  assert.ok(n >= 0, 'the fixture trail must be stored');
+  const g = AC.decodeGeom(geom[n]);
+  /* the cell whose trail walk is longest — i.e. the far end of the route from its trailhead */
+  let far = null;
+  for (const row of r.rows) {
+    const dd = AC.decodeRow(row);
+    if (dd.trailWay !== n || dd.trailWalk < 0) continue;
+    if (!far || dd.trailWalk > far.trailWalk) far = dd;
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+  return { ways: r.ways, rows: r.rows, n, g, len: routeLength(g), far, th: r.ways[n][4] };
+}
+
+test('trailhead: the walk is measured from the end that meets the road, whichever end that is', async () => {
+  const forward = await bakeTrail(fakeDeps());
+  const reversed = await bakeTrail(reversedTrailDeps());
+
+  assert.equal(forward.th, AC.TRAILHEAD_INFERRED, 'the forward fixture infers a trailhead');
+  assert.equal(reversed.th, AC.TRAILHEAD_INFERRED, 'and so does the reversed one');
+  assert.ok(Math.abs(forward.len - reversed.len) < 5, 'the two routes are the same length');
+
+  assert.ok(forward.far && reversed.far, 'both must produce a walk figure');
+  /* The far end of the route is most of a route length from the trailhead, in BOTH orderings. Under
+     the old arc-0 pinning the reversed fixture reported near zero here, because arc 0 was the far
+     end rather than the road end. */
+  const want = forward.len * 0.5;
+  assert.ok(forward.far.trailWalk > want,
+    `forward: the far cell should be well up the trail, got ${forward.far.trailWalk} m of ${forward.len.toFixed(0)} m`);
+  assert.ok(reversed.far.trailWalk > want,
+    `reversed: same trail, same road end, so the same answer — got ${reversed.far.trailWalk} m of ${reversed.len.toFixed(0)} m`);
+  /* and the two orderings agree with each other, which is the real invariant */
+  assert.ok(Math.abs(forward.far.trailWalk - reversed.far.trailWalk) < 60,
+    `the walk must not depend on the order the vertices were written: ${forward.far.trailWalk} vs ${reversed.far.trailWalk}`);
+});
+
+test('trailhead: a route whose trailhead cannot be placed reports no walk at all', async () => {
+  /* Rather than measuring from an assumed end. This is the same rule as "no trailhead, no walk" —
+     if we do not know where you would leave the car, the figure is unavailable. */
+  const src = fs.readFileSync(fileURLToPath(new URL('./build-access.mjs', import.meta.url)), 'utf8');
+  assert.match(src, /if \(!j\.thPt\) \{ thUnplaced\+\+; continue; \}/,
+    'a trailhead with no recorded point must leave thArc at -1');
+  assert.ok(!/thArc\[n\] = 0/.test(src),
+    'and nothing may pin an arc to zero as a fallback: ' + (src.match(/thArc\[n\][^\n]*/g) || []).join(' | '));
+  assert.match(src, /thArc\[n\] = nearestOnWay\(j\.geom, j\.thPt\[0\], j\.thPt\[1\]\)\.arc/,
+    'the arc comes from projecting the recorded point onto the finished route');
+  /* and the provenance says how many could not be placed, so a regression is visible in the file */
+  assert.match(src, /trailheads_unplaced: thUnplaced/);
+});
+
+test('trailhead: joining carries the point of the member that had it', async () => {
+  /* A flag cannot express "the trailhead is at the far end of the third member, which was reversed
+     on the way into the chain". A coordinate can. */
+  const src = fs.readFileSync(fileURLToPath(new URL('./build-access.mjs', import.meta.url)), 'utf8');
+  assert.match(src, /thPt: thMember \? thMember\.thPt : null/, 'joinRoutes must carry a trailhead point');
+  assert.match(src, /thPt: w\.thPt \|\| null/, 'and the join input must include it in the first place');
+  const joined = A.joinRoutes([
+    { wid: 'a', name: 'X', ref: null, type: 'path', cat: 'trail', th: AC.TRAILHEAD_INFERRED,
+      thPt: [47.02, -122.0], segments: 1, geom: [[47.0, -122.0], [47.02, -122.0]] },
+    { wid: 'b', name: 'X', ref: null, type: 'path', cat: 'trail', th: AC.TRAILHEAD_NONE,
+      thPt: null, segments: 1, geom: [[47.02, -122.0], [47.04, -122.0]] },
+  ]);
+  assert.equal(joined.length, 1, 'the two segments chain');
+  assert.equal(joined[0].th, AC.TRAILHEAD_INFERRED, 'and keep the trailhead');
+  assert.deepEqual(joined[0].thPt, [47.02, -122.0], 'and the point it was at');
+});
+
+test('honesty: the no-trailhead note matches where it sits on the sheet', () => {
+  /* NO_TRAILHEAD_NOTE points at "the figure above", which is true in the straight-line row and false
+     in the approach block, where the unavailable leg is printed first. Two notes, each used where
+     its own wording is true. A note that points at the wrong line is a small lie in a section whose
+     entire job is not telling them. */
+  assert.match(AC.NO_TRAILHEAD_NOTE, /figure above/);
+  assert.ok(!/above/.test(AC.NO_ON_TRAIL_NOTE), 'the approach-block note must not point upward');
+  assert.match(AC.NO_ON_TRAIL_NOTE, /below/, 'it points at the off-trail leg that follows it');
+  assert.match(AC.NO_ON_TRAIL_NOTE, /nowhere to measure a walk/, 'and still says why');
+  const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
+  const at = app.indexOf('<dt>Getting in</dt>');
+  /* Cut at the straight-line branch: that row legitimately uses the other note, and a slice wide
+     enough to include it would make this assertion meaningless. */
+  const end = app.indexOf('} else if(ac.straight', at);
+  assert.ok(end > at, 'the approach block and the straight-line row must both still exist');
+  const block = app.slice(at, end);
+  assert.match(block, /NO_ON_TRAIL_NOTE/, 'the approach block uses the downward-pointing one');
+  assert.ok(!/NO_TRAILHEAD_NOTE/.test(block), 'and not the upward-pointing one');
+  const straight = app.slice(app.indexOf('<dt>Distance</dt>'), app.indexOf('<dt>Distance</dt>') + 300);
+  assert.match(straight, /NO_TRAILHEAD_NOTE/, 'while the straight-line row keeps it');
+});
+
+test('parts: the on-route leg is called what it actually is', () => {
+  /* "4.8 mi on the trail" about Moses Stool Road is wrong, and it is the kind of small wrongness
+     that makes a reader discount the numbers beside it. The off-trail leg keeps its own name in
+     every case: it names the leg, not the way, and there is no way there at all. */
+  assert.equal(AC.onRouteLabel('road'), 'on the road');
+  assert.equal(AC.onRouteLabel('trail'), 'on the trail');
+  assert.equal(AC.onRouteLabel('rough'), 'on the track');
+  assert.equal(AC.onRouteLabel(undefined), 'along the way', 'and never guesses at a category it has no word for');
+  const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
+  const at = app.indexOf('<dt>Getting in</dt>');
+  const block = app.slice(at, app.indexOf('} else if(ac.straight', at));
+  assert.match(block, /onRouteLabel\(ac\.cat\)/, 'the named route labels its leg by its own category');
+  assert.ok(!/'on the trail'/.test(block), 'and nothing hard-codes "on the trail"');
+  const also = app.slice(app.indexOf('<dt>Also nearby</dt>'), app.indexOf('<dt>Also nearby</dt>') + 600);
+  assert.match(also, /onRouteLabel\(o\.cat\)/, 'and so does each alternative');
 });

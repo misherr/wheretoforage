@@ -12,6 +12,45 @@ deferred work.
 
 ## Access
 
+### Drop Overpass for a Geofabrik extract
+
+**Not built. This is the answer if the bake gives trouble again — do not add a
+fifth mirror.**
+
+Overpass has now been the awkward part of **four separate statewide runs**:
+
+- the main instance stopped answering mid-run (a connect timeout, not a 429), so
+  a mirror list was added;
+- all three mirrors were down at once and the `/status` health probe could not
+  tell, because `/status` is a static string a queue-saturated server still
+  serves — so the probe became a real query and a fourth mirror was added;
+- a run wedged at 10 of 316 tiles and abandoned 5 sub-areas in the first 10;
+- the v5 re-bake took over an hour of fetching against 36 minutes for the
+  identical work a few hours earlier, purely on mirror speed.
+
+Every fix so far has been another mirror or another probe, and each one buys a
+little more redundancy against the same underlying problem: **the data is behind
+somebody else's rate limiter.** There is no arrangement of mirrors that makes a
+statewide query cheap or predictable.
+
+**The actual fix is to stop querying it.** Geofabrik publishes a Washington
+extract (`washington-latest.osm.pbf`, a few hundred MB) updated daily. Download
+once, filter locally for the highway tags `osmCategory` already knows about, and
+the 316-tile fetch becomes a local pass over a file: no mirrors, no rate limits,
+no subdivision on 504s, no abandoned areas, and a re-bake that is reproducible
+because the input is a file you still have.
+
+**What it costs.** A PBF reader — the format is protobuf-framed and this repo has
+no dependencies, so either a small decoder gets written (as the PNG decoder was)
+or the extract is converted to a simpler form once, outside the bake. Plus a
+place to keep a few hundred MB, and a note in provenance saying which extract
+date the bake used, which is strictly better than "whatever Overpass returned
+that afternoon".
+
+**What it does not change.** USFS roads and trails still come from the EDW
+ArcGIS endpoints, which have never given trouble, and the terrain tiles still
+come from AWS. Only the OSM half moves.
+
 ### OSM route relations, so a long trail draws as one line
 
 **Not built. Wanted, but not on the critical path.**
@@ -57,35 +96,38 @@ of which come from the nearest way and its trailhead, and none of which get
 better with relations. Worth doing when the drawn line matters more than it does
 today.
 
-### The climb column costs 0.85 MB in the up-front download
+### The approach columns cost about 1.4 MB in the up-front download
 
 **Open — the user's call, raised and not decided.**
 
-`access.json` grew 4.12 → 4.97 MB at v4. Removing the geometry clip accounts for
-only +0.13 MB and that lands on the lazily-fetched `access-geom.json`; the
-+0.85 MB up front is the climb column plus the OSM way ids. The climb is `-1`
-for most rows and could move into `access-geom.json`, which most viewers never
-fetch. The cost of moving it is that the climb would not appear until the line
-is fetched, so the sheet would show a walk with no climb next to it and then
-change. That trade has not been made.
+`access.json` grew 4.12 → 4.97 MB at v4 — the climb column plus the OSM way ids,
+not the un-clipping, which cost +0.13 MB and landed on the lazily-fetched
+`access-geom.json`. v5 adds the off-trail climb column on top of that.
 
-### 16,091 cells hold a walk figure that is never shown
+Both climb columns are `-1` for most rows and could move into
+`access-geom.json`, which most viewers never fetch. The cost is that the climbs
+would not appear until the line is fetched, so the sheet would show distances
+first and grow numbers beside them a moment later. That trade has not been made.
+If it ever is, **both** columns move together: the two climbs are added and shown
+as one total, so having one arrive late and the other immediately would be worse
+than either arrangement.
 
-**Measured 2026-09-10. Not a bug; a product question, and a behaviour change to
-the access feature, so not made unilaterally.**
+### ~~16,091 cells hold a walk figure that is never shown~~ — done in v5
 
-26,695 cells have a walk stored in at least one category, but the sheet shows a
-walk for **10,604** of them, because `accessDetail` reports only the *primary*
-category — the nearest one. A cell 200 m from an unnamed track with no trailhead
-and 900 m from a named trail with a mapped trailhead shows the track, and no
-walk, even though a perfectly good walk figure is sitting in the row.
+"Also nearby" now carries each category's own off-trail leg, on-trail leg and
+total, so the 16,091 cells whose approach sat in a category the sheet does not
+name are no longer silent.
 
-Showing the nearest way is the right default: it is the honest answer to "what is
-near this cell". Preferring a slightly further way because it has a trailhead
-would be a different question, and worth asking, but it changes which way the
-sheet names and which line "Show the approach" draws. Note also that only the
-nearest way *per category* is stored, so a nearer way of the same category with a
-trailhead is not in the data at all and cannot be recovered without a re-bake.
+**The naming deliberately did not change**, and that was measured before it was
+decided: switching the named route to whichever one carries a walk would rename
+16,091 cells, **12,331 of them from a road to a rough track** — from the road you
+would drive to a logging spur.
+
+What remains open, and cannot be evaluated without a re-bake: only the nearest way
+**per category** is stored. A cell whose nearest trail has no trailhead cannot be
+offered the second-nearest trail, only the nearest road or track. Storing two
+candidates per category would change that, at a cost in file size nobody has
+estimated yet.
 
 ---
 

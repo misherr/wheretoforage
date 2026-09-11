@@ -221,3 +221,50 @@ Case 3 is the one to keep an eye on: before the fix it read "No mapped access �
 nothing is mapped within about a mile", which is a claim about a lookup that
 never happened. It is reachable from a third of in-state taps, and no assertion
 about `cells.json` cells would ever have exercised it.
+
+## Tracing a walk figure end to end
+
+The check that found the zero-walk bug, and the one to repeat on any figure that
+looks wrong. Per cell, from the shipped files alone:
+
+1. `decodeRow` → which category, its distance, its way index.
+2. `decodeWay` → the name, the trailhead **kind**, how many ways were joined.
+3. `nearestOnWay(geom, cellLat, cellLon)` → `{d, arc, pt}`: how far the route is
+   from the cell centre, and how far along the route that point sits.
+4. Solve for the trailhead arc: the shipped walk is `|proj.arc − thArc|`, so
+   `thArc` is `proj.arc ± walk`. Print the coordinate at each candidate and how
+   far it is from the cell.
+5. Compare the route's start and end against the cell. If the closest approach is
+   at arc 0 or at the far end, the route does not come near the cell at all.
+
+What that showed: three cells reporting 0 whose closest approach was **at arc 0**,
+1.9 km from the cell, with the inferred trailhead pinned to the same arc 0.
+
+Do not trust a trailhead flag without checking the ground under it:
+
+```
+# is the arc-0 end of an inferred-trailhead route actually at a road?
+Overpass: way["highway"~"^(motorway|trunk|...|residential)$"](bbox around the route)
+USFS:     EDW_RoadBasic_01/0/query, keep OPER_MAINT_LEVEL matching /^[345]/
+then nearestOnWay(road, end) <= TH_SNAP_M (60 m) for BOTH ends
+```
+
+**Query both sources.** Checking OSM alone made one route (BEAR LAKE) look like a
+trailhead with no road at either end; the USFS layer has a drivable road 1 m from
+its arc 0. Five of 25 sampled routes had only their far end at a road, and that
+finding only survives because both sources were checked.
+
+## The coordinate round trip
+
+```js
+// the app's own readout must parse back to the same place
+parseCoords(formatCoords(47.45125, -119.9363))   // -> {lat: 47.45125, lon: -119.9363}
+// and a tap and a paste must resolve identically
+showAt(47.45125, -119.9363)                      // the same function the map click uses
+```
+
+A test that never runs is worse than no test: `test:data` names its files
+explicitly rather than globbing, and `scripts/coords.test.mjs` passed ten
+assertions for a while without being run by `npm test`. Two mutations that should
+have failed did not, which is how it was noticed. **After adding a test file,
+check the count in `npm test` actually went up.**

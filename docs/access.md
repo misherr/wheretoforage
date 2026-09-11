@@ -619,3 +619,186 @@ entry, which can move it by ~5 m, so a tap within 5 m of a cell boundary can be
 attributed to the neighbour. On a 1.6 km cell that is the right trade, and the
 sheet describes the cell it actually resolved. The parity test's containment
 assertion is what surfaced it — it caught a bad fixture of mine on the first run.
+
+## "The walk" was the wrong quantity
+
+Reported: cells showing a walk of 0 ft with no trail entering the area. Traced
+end to end before changing anything, on real cells. It is both a definitional
+error and three bugs, and the definitional error is the bigger half.
+
+### What the number actually measured
+
+`walk = |arc(nearest point on the route to the CELL CENTRE) − arc(trailhead)|`
+
+Distance along the way, from its trailhead, to **the point on the way nearest the
+cell**. It stops at the trail. Getting from there to the cell was never in it.
+
+Three traced cells, all reporting 0:
+
+| | cell 3272:-5605 | cell 3297:-5792 | cell 3181:-5678 |
+| --- | --- | --- | --- |
+| centre | 47.45125,-119.93630 | 47.81375,-123.93810 | 46.13175,-121.49850 |
+| route | Moses Stool Road | unnamed track | South Climb Trail (2 joined) |
+| trailhead | inferred | inferred | inferred |
+| route length | 7,688 m | 1,580 m | 5,187 m |
+| nearest point to the cell | **at arc 0** | **at arc 0** | **at arc 0** |
+| its distance from the cell | 1,949 m | 1,909 m | 442 m |
+| trailhead arc | 0 | 0 | 0 |
+| **reported walk** | **0 m** | **0 m** | **0 m** |
+
+In each case the route's closest approach to the cell *is its own start*, the
+inferred trailhead is pinned to that same start, and the subtraction is zero. The
+route then runs away from the cell — it never comes near it at all. The figure
+was true and useless, and it read as "no walk", which is the opposite of the
+truth: 1.9 km of trackless ground.
+
+And it is not only inferred trailheads. Cell 3299:-5750 (47.84275,-123.03930) is
+on the USFS trail MT. TOWNSEND with a **mapped** trailhead, and reports a 27 m
+walk — because the mapped node happens to sit beside the point on the trail
+nearest the cell, which is itself 1,511 m away.
+
+### Confirmed, ruled out, quantified
+
+Over the 10,604 cells that displayed a walk:
+
+**A zero by construction, from a trailhead coinciding with the nearest point —
+confirmed.** 924 cells reported exactly 0 and 1,589 under 100 m. 8,329 of the
+displayed walks come from an inferred trailhead, and **92.1% of those are
+consistent with a trailhead arc of 0**, because the bake left `thArc` at 0 for
+every inferred trailhead. 95 cells reported 0 while the way was more than 800 m
+from the cell centre.
+
+**Nearest point to the centre or to the boundary — the centre.** 91.2% of stored
+distances equal the centre projection exactly. A cell is 1,611 × 1,609 m, so at a
+corner the boundary is up to 1,139 m nearer than the centre. This stays: the
+centre is where the score, the terrain and the vegetation are all measured, and a
+distance to the nearest corner of a square mile would be a distance to somewhere
+nobody is going. It is now labelled as being to the centre.
+
+**A way selected that never comes near the cell — confirmed.** A way is recorded
+for a cell when any point on it is within `CAP` (2 km) of the cell centre.
+**1,281 cells (12.1%) name a route that never enters the cell**, and 2,247
+(21.2%) have their closest approach at a route *endpoint* — the route stops short
+and runs away. That selection is not itself wrong; "the nearest mapped way within
+2 km" is what the class means. What was wrong was reporting a walk along it as
+though it reached the cell.
+
+**Joining broke the along-way distance — half confirmed.** The cell side was
+fine: the code re-projects the cell onto the joined geometry. The trailhead side
+was not. 1,388 cells sit on a multi-way route and **60.2% of those were pinned to
+arc 0 of the whole chain**, which can be a different member entirely, since
+`joinRoutes` reverses and reorders members as it builds one.
+
+**And one more, found while checking the above: the walk was often measured from
+the wrong end.** The inference recorded *that* a way met a road, never *which
+end* did. Sampling 25 inferred-trailhead routes and checking both ends against
+OSM drivable roads **and** the USFS road layer:
+
+| | routes |
+| --- | --- |
+| arc 0 is at a road, the far end is not | 7 |
+| both ends are at a road (loops, through-routes) | 12 |
+| **only the FAR END is at a road — measured backwards** | **5** |
+
+Tyler Peak Trail is the clearest: its arc 0 sits **1,971 m** from the nearest
+drivable road of any kind, its far end is on one, and the walk was measured from
+arc 0. (A sixth case, BEAR LAKE, looked like a trailhead with no road at either
+end until the USFS layer was queried too — a road is 1 m from its arc 0. That one
+was my error, not the bake's, and it is why both sources had to be checked.)
+
+**The leg that was missing.** From the nearest point on the route to the cell
+centre: median **386 m**, p90 1,002 m, p99 1,783 m, max 1,993 m. For **2,460 of
+10,604 displayed walks the omitted leg was longer than the reported one**.
+
+### So: an approach has two legs, and v5 reports both
+
+```
+on-trail    trailhead ──────────────► nearest point on the route     along the route
+off-trail   nearest point ──────────► cell centre                    STRAIGHT LINE
+total       the two added
+```
+
+The off-trail leg is the honest part and the dangerous one. It is a straight line
+over ground nobody has walked, and the sheet always says so:
+
+> straight line to the cell centre — no trail, and it takes no account of
+> terrain, brush, blowdown or water. A quarter mile of slide alder is not a
+> quarter mile of trail.
+
+Its climb is measured the same way as the on-trail figure — the same Terrarium
+tiles at the same zoom, sampled every 100 m, the same 3-point median, the same
+cumulative positive difference with the same 300% gradient gate — because two
+numbers shown side by side and then added must not be measured two different
+ways.
+
+A **total climb is only reported when both halves are known.** Adding a measured
+leg to an unmeasured one and calling the sum "the climb" would be the same
+overclaim as measuring a walk from a trailhead that does not exist.
+
+The 10-mile caveat now judges the **total**, not the on-trail leg: 3 mi of trail
+plus a mile of bushwhacking is the same problem as a 4 mi trail walk, and a cell
+with a 0 m on-trail leg and 1.9 km off-trail was previously flagged by nothing.
+
+### The three fixes in the bake
+
+1. **A trailhead is a place, not a flag.** Both kinds now record a coordinate —
+   the way end that met the road, or the mapped node — and `thArc` is that point
+   projected onto the finished route. One code path instead of two, immune to
+   which end matched and to `joinRoutes` reversing a member.
+2. **A trailhead that cannot be placed gets no walk**, rather than a walk from an
+   assumed end. `provenance.counts.trailheads_unplaced` reports how many, so a
+   regression shows up in the file.
+3. **The category distance is measured on the stored geometry**, not on the
+   pre-join, pre-simplify original. It is therefore exactly the off-trail leg, the
+   two legs meet at the same coordinate, and every number describes the line the
+   app draws. It also means the class is decided on the geometry you can see.
+
+### v5, and what it costs
+
+Row stride 4 → 5: `[d, wayIndex, onWalk, onGain, offGain]` per category, where
+`d` is the off-trail leg. One extra column rather than two, because the off-trail
+*distance* is the category distance once both are measured on the stored
+geometry — a redefinition that pays for itself.
+
+### Every category carries its own approach now
+
+26,695 cells hold a walk value and only **10,604 displayed one**, because
+`accessDetail` reported the primary category alone. The primary is chosen by
+class precedence, so a cell whose nearest trail has no trailhead named that trail
+and went silent while the road beside it had a perfectly good figure.
+
+**The naming does not change, and that was a decision rather than an omission.**
+Switching the named route to whichever one carries a walk would rename 16,091
+cells — **12,331 of them from a road to a rough track**, which is to say from the
+road you would drive to a logging spur. So the figures go to the alternatives
+instead: "Also nearby" now carries each category's own off-trail leg, on-trail
+leg and total, with where it measured from.
+
+## Coordinates in and out
+
+`src/coords.mjs`. Out: `47.45125, -119.93630` — decimal degrees with a minus
+sign rather than a hemisphere letter, because that form pastes into onX, Gaia,
+CalTopo, AllTrails and Google Maps and `119.93630 W` does not work reliably in
+any of them. Selectable as well as copyable: `navigator.clipboard` is
+unavailable on an insecure origin and refused outright by some browsers, and a
+readout you cannot select would then be a dead end.
+
+In: an input that accepts what people actually paste — decimal degrees in any
+spacing, hemisphere letters leading or trailing, and the degrees-minutes-seconds
+the iPhone Compass app shows (`47°27'04" N 119°56'11" W`), including the primes,
+curly quotes, masculine ordinals and en-dashes that real clipboards deliver.
+
+It is **strict**, and that is the design: anything it cannot read returns null and
+the panel says so. A pin dropped in the wrong drainage is worse than an error
+message, because the user would drive to it. Two consequences worth knowing:
+
+- `47 27.07 N 119 56.18 W` is **refused**. Without symbols those digits are
+  genuinely ambiguous with the pair (47, 27.07), and every app that emits a
+  minutes form includes the symbols.
+- `-119.9363, 47.45125` is **repaired** to lat 47.45125, because a first value
+  beyond 90 cannot be a latitude. `47, -46` is *not* repaired — both are valid
+  latitudes, so the conventional order stands rather than a guess being made.
+
+A pasted coordinate resolves through `showAt()`, the same function a map tap
+uses. That is deliberate: the last thing to go wrong in this area was two paths
+into `showPoint` that disagreed about a cell.

@@ -5,8 +5,8 @@
   "description": "King bolete foraging forecast for Washington State. The app is a static index.html plus ES modules under src/, with no build step; this file exists only to wire up the test suites and the data bake.",
   "scripts": {
     "test": "npm run test:model && npm run test:data",
-    "test:model": "node --test tests/model/relational.test.mjs tests/model/snapshot.test.mjs tests/model/purity.test.mjs",
-    "test:data": "node --test scripts/fetch-weather.test.mjs scripts/evt-names.test.mjs scripts/build-cells.test.mjs scripts/build-access.test.mjs",
+    "test:model": "node --test \"tests/model/*.test.mjs\"",
+    "test:data": "node --test \"scripts/*.test.mjs\"",
     "snapshots:update": "node tests/model/update-snapshots.mjs"
   },
   "engines": {

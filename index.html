@@ -48,6 +48,20 @@ html,body{margin:0;height:100%;background:var(--moss);color:var(--pore);
 
 /* layers menu */
 #layers{position:fixed;left:10px;top:calc(env(safe-area-inset-top) + 70px);z-index:910;background:var(--moss);border:1px solid var(--line);border-radius:14px;padding:6px 6px;display:none;min-width:210px;box-shadow:0 8px 30px rgba(0,0,0,.4)}
+/* Paste a coordinate and go there. Same panel treatment as #layers so the rail behaves consistently. */
+#goto{position:fixed;right:60px;top:calc(env(safe-area-inset-top) + 70px);z-index:910;background:var(--moss);border:1px solid var(--line);border-radius:14px;padding:10px;display:none;width:min(320px,calc(100vw - 80px));box-shadow:0 8px 30px rgba(0,0,0,.4)}
+#goto.open{display:block}
+#goto input{width:100%;box-sizing:border-box;background:var(--moss-2);border:1px solid var(--line);color:var(--pore);border-radius:10px;padding:9px 10px;font-size:15px;font-family:inherit}
+#goto .row{display:flex;gap:6px;margin-top:8px}
+#goto .row .pill{flex:1;text-align:center}
+#goto small{display:block;color:var(--pore-dim);font-size:11px;line-height:1.5;margin-top:8px}
+#goto .err{color:var(--c-med);font-size:12px;margin-top:6px;display:none}
+#goto .err.show{display:block}
+/* The coordinate readout on the sheet: monospace so digits line up, selectable so it can be copied
+   by hand when the clipboard API is unavailable (an insecure origin, or a browser that refuses). */
+.coords{display:flex;align-items:center;gap:8px;margin:10px 0 0}
+.coords code{background:var(--moss-2);border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:13px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;user-select:all;-webkit-user-select:all;flex:1}
 #layers.open{display:block}
 #layers label{display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:10px;font-size:14px;cursor:pointer}
 #layers label:active{background:var(--moss-2)}
@@ -167,12 +181,22 @@ a.drawway{color:var(--cap-light);text-decoration:underline;font-size:13px}
   <button id="btn-loc" title="My location"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="8"/></svg></button>
   <button id="btn-base" title="Map style"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></svg></button>
   <button id="btn-refine" title="Refine this area" style="display:none"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-5-5"/><path d="M11 8v6M8 11h6"/></svg></button>
+  <button id="btn-goto" title="Go to coordinates"><svg viewBox="0 0 24 24"><path d="M12 21s-6-5.3-6-10a6 6 0 1 1 12 0c0 4.7-6 10-6 10z"/><circle cx="12" cy="11" r="2.2"/></svg></button>
   <button id="btn-layers" title="Layers"><svg viewBox="0 0 24 24"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/></svg></button>
   <button id="btn-model" title="How it works"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg></button>
   <button id="btn-refresh" title="Refresh weather"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v5h-5"/></svg></button>
 </div>
 
 <div id="layers" class="open"></div>
+
+<div id="goto">
+  <input id="goto-input" type="text" inputmode="text" autocapitalize="off" autocorrect="off" spellcheck="false"
+         placeholder="47.45125, -119.93630" aria-label="Coordinates">
+  <div class="err" id="goto-err"></div>
+  <div class="row"><button class="pill cap" id="goto-add">Go</button><button class="pill" id="goto-close">Close</button></div>
+  <small>Decimal degrees, or the degrees-minutes-seconds the iPhone Compass shows &mdash;
+    <code>47°27'04" N 119°56'11" W</code>. Hemisphere letters or a minus sign both work.</small>
+</div>
 
 <div id="bottom">
   <div id="legends"></div>
@@ -208,10 +232,12 @@ import { makeEntry, applyVeg } from './src/model/cell.mjs';
 import { DLAT, DLON, BLK, BLAT, BLON, inWA, cellCenter, cellKey,
          terrainAt, pointKey as key } from './src/grid.mjs';
 // Access is a separate axis from suitability and never touches a score — see src/access.mjs.
+import { parseCoords, formatCoords } from './src/coords.mjs';
 import { classifyAccess, accessDetail, accessRank, accessDistance, gainLabel, externalLinks,
          NO_TRAILHEAD_NOTE, decodeRow as decodeAccessRow, decodeWay as decodeAccessWay,
          CLASSES as ACCESS_CLASSES, ACCESS_FORMAT, accessAt, CELL_SCOPE_NOTE,
-         NOT_EXAMINED_LABEL, NOT_EXAMINED_NOTE } from './src/access.mjs';
+         NOT_EXAMINED_LABEL, NOT_EXAMINED_NOTE, OFF_TRAIL_NOTE,
+         NO_ON_TRAIL_NOTE, onRouteLabel } from './src/access.mjs';
 /* ===================== CONFIG ===================== */
 const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
 const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400; // local refine below 1 mi when zoomed way in
@@ -939,12 +965,20 @@ async function exactPoint(lat,lon){
   try{ const e=await pointEntry(+lat.toFixed(4),+lon.toFixed(4)); if(!e||e.failed) throw 0; e.exact=true; showPoint(e); }
   catch(err){ $('sheet-body').innerHTML=`<div class="empty">${apiBlocked?apiBlocked+'. The free quota resets on a daily cycle — try again later today or tomorrow morning.':'Could not load weather for this point ('+(err&&err.message||'no response')+'). Tap again in a minute.'}</div>`; }
 }
-map.on('click',ev=>{ if($('layers').classList.contains('open')){$('layers').classList.remove('open');return;} const {lat,lng}=ev.latlng; if(!inWA(lat,lng)){setStatus('Outside Washington');return;}
+/* Resolve a point to a sheet. Factored out because a tap and a pasted coordinate have to land on the
+   same answer, and the last thing that went wrong in this area was two paths into showPoint that
+   disagreed about a cell. One function, two callers. */
+function showAt(lat,lng){
   dismissTapHint();
   if(marker) marker.remove(); marker=L.circleMarker([lat,lng],{radius:7,color:'#fff',weight:2,fillColor:'#b8742c',fillOpacity:1}).addTo(map);
   let e=null; if(fineEntries.length&&fineBounds&&fineBounds.contains([lat,lng])) e=fineEntries.find(x=>Math.abs(x.lat-lat)<=x.size/2&&Math.abs(x.lon-lng)<=(x.lonsize||x.size)/2);
   if(!e) e=cells.get(cellKey(lat,lng));
   if(e&&e.A&&!e.failed){ e.tap=[lat,lng]; showPoint(e); } else exactPoint(lat,lng);
+}
+map.on('click',ev=>{ if($('layers').classList.contains('open')){$('layers').classList.remove('open');return;}
+  if($('goto').classList.contains('open')){$('goto').classList.remove('open');return;}
+  const {lat,lng}=ev.latlng; if(!inWA(lat,lng)){setStatus('Outside Washington');return;}
+  showAt(lat,lng);
 });
 
 /* ===================== SHEET ===================== */
@@ -959,6 +993,9 @@ let ty=null; sheet.addEventListener('touchstart',e=>{ty=e.touches[0].clientY},{p
 function bar(k,v,note){ return `<div class="k">${k}</div><div class="bg"><b style="width:${Math.round(v*100)}%"></b></div><div class="v">${Math.round(v*100)}</div>`; }
 function stageBar(key,pct){ return `<div class="k">${stageIcon(key)}${STAGE_LABELS[key]}</div><div class="bg"><b style="width:${Math.round(pct*100)}%"></b></div><div class="v">${Math.round(pct*100)}</div>`; }
 let stageOpen=false, elevOpen=false, lastShownKey=null;
+/* The same dim wrapper the access block uses, at function scope: the one in there is declared
+   inside the STATIC.access branch, which may not have run for this cell. */
+const dimAny=t=>`<span style="color:var(--pore-dim)">${t}</span>`;
 function showPoint(e,t){
   t=t||0;
   const pk=key(e.lat,e.lon)+(e.exact?':exact':'');
@@ -1061,22 +1098,44 @@ function showPoint(e,t){
         +(ac.way&&ac.way.segments>1?' '+dim('('+ac.way.segments+' mapped segments joined)'):'')
         +`<br>${dim(ac.blurb)}`
         +(ac.wayIndex>=0?` <a href="#" class="drawway">Show the approach on the map</a>`:'')+`</dd>`;
-      /* The walk. Where there is no trailhead to measure from, say so rather than computing a distance
-         from an arbitrary end of the way — an invented start point would look like an answer. */
-      if(ac.walk!=null){
-        const climb = ac.gain!=null ? gainLabel(ac.gain) : null;
-        h+=`<dt>Walk from the trailhead</dt><dd>${accessDistance(ac.walk)}`
-          +(climb?` · ${climb}`:'')
-          +`<br>${dim(ac.trailheadNote)}`
-          +(climb?'':`<br>${dim('Elevation gain unavailable for this stretch.')}`)
-          /* An implausibly long walk is still shown, with the number intact, and told what it is.
-             Capping it would replace a measurement with an invention; hiding it would imply nothing
-             is known about reaching this cell. */
-          +(ac.walkDoubt?`<br><span class="caveat">${ac.walkDoubt}</span>`:'')+`</dd>`;
+      /* The approach, in its two legs. v4 showed one number — along the trail from the trailhead to
+         the point nearest the cell — and stopped there, so 924 cells read "0 ft" while the trail was
+         up to 1.9 km away. Neither leg alone answers "how far in is it", so both are shown and then
+         added, and the off-trail leg carries the note that it is a straight line over unknown ground.
+
+         The legs are rendered even when the on-trail half is unavailable: a cell with no trailhead
+         still has a real off-trail distance from a real route, and that is worth more than silence. */
+      const P=ac.parts;
+      if(P){
+        const leg=(m,g)=>accessDistance(m)+(g!=null?` · ${gainLabel(g)||'negligible climb'}`:'');
+        h+=`<dt>Getting in</dt><dd>`;
+        if(P.onTrail!=null){
+          h+=`${leg(P.onTrail,P.onGain)} ${dim(onRouteLabel(ac.cat)+(ac.trailheadNote?', '+ac.trailheadNote:''))}<br>`
+            +(P.onGain==null?`${dim('Climb unavailable for this stretch.')}<br>`:'');
+        } else {
+          h+=`${dim(NO_ON_TRAIL_NOTE)}<br>`;
+        }
+        h+=`${leg(P.offTrail,P.offGain)} <span class="caveat">off trail</span><br>${dim(OFF_TRAIL_NOTE)}`;
+        if(P.total!=null){
+          h+=`<br><b>${accessDistance(P.total)} in total${P.totalGain!=null?' · '+(gainLabel(P.totalGain)||'negligible climb'):''}</b>`
+            +(P.totalGain==null?` ${dim('(total climb unavailable — one leg is unmeasured)')}`:'');
+        }
+        h+=(ac.walkDoubt?`<br><span class="caveat">${ac.walkDoubt}</span>`:'')+`</dd>`;
       } else if(ac.straight!=null){
         h+=`<dt>Distance</dt><dd>${accessDistance(ac.straight)} ${dim('in a straight line')}<br>${dim(NO_TRAILHEAD_NOTE)}</dd>`;
       }
-      if(ac.others.length) h+=`<dt>Also nearby</dt><dd>${ac.others.map(o=>`${o.name||o.cat} ${accessDistance(o.m)}`).join('<br>')}</dd>`;
+      /* The alternatives, with their own figures. 16,091 cells hold an approach for a category the
+         sheet does not name — the class precedence names the nearest trail, which often has no
+         trailhead, while the road beside it has a perfectly good one — and all of it used to be
+         invisible. Naming the other route instead would rename 16,091 cells, 12,331 of them from a
+         road to a rough track, so the figures come to the alternatives rather than the name going
+         to the figures. */
+      if(ac.others.length) h+=`<dt>Also nearby</dt><dd>`+ac.others.map(o=>{
+        const q=o.parts; let t=`${o.name||o.cat} ${accessDistance(o.m)} ${dim('off trail')}`;
+        if(q&&q.onTrail!=null) t+=` ${dim('+ '+accessDistance(q.onTrail)+' '+onRouteLabel(o.cat)+(o.trailheadNote?', '+o.trailheadNote:'')
+          +(q.total!=null?' = '+accessDistance(q.total):''))}`;
+        return t;
+      }).join('<br>')+`</dd>`;
       if(ac.way){
         const links=externalLinks(ac.way,e.lat,e.lon);
         h+=`<dt>Elsewhere</dt><dd>${links.map(l=>`<a href="${l.url}" target="_blank" rel="noopener">${l.label}</a> ${dim('— '+l.note)}`).join('<br>')}</dd>`;
@@ -1089,10 +1148,31 @@ function showPoint(e,t){
     const w=e.w,i=w.today; const days=[]; for(let d=Math.max(0,i-20);d<=i;d++) days.push(d); const mxp=Math.max(5,...days.map(d=>w.p[d]));
     h+=`<div class="sec">Rain, last 3 weeks (inches)</div><div class="rain">`+days.map(d=>`<div class="${w.p[d]>=10?'hi':''}"><b style="height:${Math.round(w.p[d]/mxp*38)}px"></b><span>${w.p[d]>=2.5?inch(w.p[d]).replace(/^0/,''):''}</span></div>`).join('')+`</div><p class="note">Left = 3 weeks ago, right = today. Lighter bars ≥0.4".</p>`;
   }
+  /* The coordinate, for pasting into onX, Gaia, CalTopo, AllTrails or Google Maps. Decimal degrees
+     with a minus sign rather than a hemisphere letter, because that is the form every one of them
+     accepts in a search box. Selectable as well as copyable: the clipboard API is unavailable on an
+     insecure origin and refused outright by some browsers, and a readout you cannot select would
+     then be a dead end. */
+  /* Say WHICH point this is. A cell sheet describes a square mile, so its coordinate is the cell
+     centre — up to about 0.7 mi from wherever the finger actually landed — and an exact-point
+     sheet is the point itself. Handing over a coordinate without saying which one it is would
+     send someone to a spot they did not choose. */
+  h+=`<div class="coords"><code id="coord-text">${formatCoords(e.lat,e.lon)}</code>`
+    +`<button class="pill" id="btn-copy-coord">Copy</button></div>`
+    +`<div style="margin:4px 0 0;font-size:12px">${dimAny(e.exact?"this exact point":"the centre of this cell")}</div>`;
   h+=`<div class="actions">${e.exact?'':`<button class="pill cap" id="btn-exact">Exact point forecast</button>`}<a class="pill" href="https://maps.apple.com/?ll=${e.lat},${e.lon}&q=Bolete%20spot" target="_blank" rel="noopener">Open in Maps</a><a class="pill" href="https://www.google.com/maps/@${e.lat},${e.lon},14z/data=!3m1!1e3" target="_blank" rel="noopener">Satellite</a></div>`;
   $('sheet-body').innerHTML=h;
   if(samePoint) $('sheet-body').scrollTop=prevScroll;
   const bx=$('btn-exact'); if(bx){ const tp=e.tap||[e.lat,e.lon]; bx.onclick=()=>exactPoint(tp[0],tp[1]); }
+  const cc=$('btn-copy-coord');
+  if(cc) cc.onclick=async()=>{
+    const t=formatCoords(e.lat,e.lon);
+    try{ await navigator.clipboard.writeText(t); cc.textContent='Copied'; }
+    catch(_){ /* no clipboard permission, or an insecure origin: select it so a long-press copies */
+      const r=document.createRange(); r.selectNodeContents($('coord-text'));
+      const sel=getSelection(); sel.removeAllRanges(); sel.addRange(r); cc.textContent='Select & copy'; }
+    setTimeout(()=>{ if(cc) cc.textContent='Copy'; },1600);
+  };
   const stEl=$('stage-strip'), stDet=$('stage-detail');
   if(stEl) stEl.onclick=()=>{ stageOpen=!stageOpen; stEl.classList.toggle('open',stageOpen); stDet.hidden=!stageOpen; };
   const evEl=$('elev-strip'), evDet=$('elev-detail');
@@ -1226,6 +1306,27 @@ $('btn-model').onclick=showModel;
 $('btn-refine').onclick=refine;
 $('btn-refresh').onclick=()=>{ if(approachLayer){ approachLayer.remove(); approachLayer=null; } apiBlocked=null; STATIC.tried=false; STATIC.cells=null; STATIC.weather=null; let miss=0; for(const e of cells.values()) if(!e.A||e.failed) miss++; if(!miss) wcache.clear(); loadState(); };
 $('btn-layers').onclick=ev=>{ ev.stopPropagation(); $('layers').classList.toggle('open'); };
+/* Go to a pasted coordinate. The parser is in src/coords.mjs and is strict: anything it cannot read
+   returns null and says so here, rather than dropping a pin somewhere plausible. */
+const gotoErr=t=>{ const el=$('goto-err'); el.textContent=t||''; el.classList.toggle('show',!!t); };
+$('btn-goto').onclick=ev=>{ ev.stopPropagation();
+  const g=$('goto'); const open=g.classList.toggle('open');
+  gotoErr(''); if(open){ $('goto-input').focus(); $('goto-input').select(); } };
+$('goto-close').onclick=()=>{ $('goto').classList.remove('open'); gotoErr(''); };
+$('goto').onclick=ev=>ev.stopPropagation();
+function gotoSubmit(){
+  const raw=$('goto-input').value;
+  const c=parseCoords(raw);
+  if(!c){ gotoErr('Could not read a coordinate pair from that.'); return; }
+  if(!inWA(c.lat,c.lon)){ gotoErr(formatCoords(c.lat,c.lon)+' is outside Washington.'); return; }
+  gotoErr(''); $('goto').classList.remove('open');
+  /* Zoom in far enough that the marker is obviously in one cell, then hand over to the same
+     resolution a tap uses. */
+  map.setView([c.lat,c.lon],Math.max(map.getZoom(),13));
+  showAt(c.lat,c.lon);
+}
+$('goto-add').onclick=gotoSubmit;
+$('goto-input').addEventListener('keydown',ev=>{ if(ev.key==='Enter'){ ev.preventDefault(); gotoSubmit(); } });
 $('btn-base').onclick=()=>{ bases[baseOrder[baseIdx]].remove(); baseIdx=(baseIdx+1)%baseOrder.length; bases[baseOrder[baseIdx]].addTo(map); setStatus(['Satellite','Topo map','USGS topo'][baseIdx]); };
 $('btn-loc').onclick=()=>{ if(!navigator.geolocation){setStatus('Location not available');return;} setStatus('Finding you…'); navigator.geolocation.getCurrentPosition(pos=>{ userLoc=[pos.coords.latitude,pos.coords.longitude]; L.circleMarker(userLoc,{radius:6,color:'#fff',weight:2,fillColor:'#4a90d9',fillOpacity:1}).addTo(map); map.setView(userLoc,9); setStatus('Centered on your location'); },()=>setStatus('Location permission denied'),{enableHighAccuracy:false,timeout:10000}); };
 
@@ -1237,7 +1338,7 @@ Object.assign(window,{anchorHit,snapLattice,key,cells,wcache,STATIC,habitat,anal
   /* showPoint and the Leaflet instance are here so the tap sheet can be driven from a console. It
      is the part of the app a test cannot reach, and the "dim is not defined" crash in the access
      block was caught by opening it by hand rather than by any assertion. */
-  showPoint,leafletMap:map});
+  showPoint,leafletMap:map,showAt,parseCoords,formatCoords});
 // WBASE/WCOARSE/WLATTICE are reassigned when the archive loads, so bind them live rather than
 // copying whatever they happened to hold at startup.
 Object.defineProperties(window,{WBASE:{get:()=>WBASE},WCOARSE:{get:()=>WCOARSE},WLATTICE:{get:()=>WLATTICE}});

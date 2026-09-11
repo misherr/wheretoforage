@@ -100,8 +100,19 @@ while nothing throws.
   timberland is patchy, and absence of a mapped way is not absence of a way.
   The same applies to the walk and the climb: with no trailhead to measure from
   they are reported as unavailable, never computed from an arbitrary point, and
-  past `WALK_DOUBT` (10 mi) a walk is **labelled, never capped or hidden** — the
-  figure is real and the caveat says what it probably means.
+  past `WALK_DOUBT` (10 mi) the **total** approach is labelled, never capped or
+  hidden — the figure is real and the caveat says what it probably means.
+- **An approach has two legs and both are reported.** On-trail from the trailhead
+  to the nearest point on the route, then **off-trail in a straight line** from
+  there to the cell centre, then the total. v4 reported only the first and stopped
+  at the trail, so 924 cells read "0 ft" while the route was up to 1.9 km away.
+  The off-trail leg always carries `OFF_TRAIL_NOTE`: it ignores terrain, brush and
+  water. A total climb is reported only when both halves are measured.
+  [docs/access.md](docs/access.md#the-walk-was-the-wrong-quantity)
+- **A trailhead is a coordinate, not a flag.** `thArc` comes from projecting that
+  point onto the finished route, so it cannot depend on which end met the road or
+  on `joinRoutes` reversing a member. A trailhead that cannot be placed yields no
+  walk at all, never a walk from an assumed end.
 
 ## Current phase
 
@@ -186,6 +197,17 @@ node scripts/build-cells.mjs --region=coast
 node scripts/build-access.mjs           # ~10 h: ~316 Overpass tiles + USFS + terrain
 node scripts/build-access.mjs --resume  # re-assembles in 30 s, zero requests
 ```
+
+**Log a long bake to a file you can read while it runs.** `node
+scripts/build-access.mjs > bake.log 2>&1` and tail the file. Piping it through
+`tail -60` buffers everything until the process exits, which left a 90-minute run
+with checkpoint file size as its only progress signal — no tile count, no ETA, and
+no way to tell a slow mirror from a wedged one. Same class of mistake as leaving a
+waiter process parked on a job that has already finished.
+
+**If the bake gives trouble again, do not add a fifth Overpass mirror.** Four runs
+have now been degraded by Overpass one way or another. The fix is a local
+Geofabrik extract; see [ROADMAP.md](ROADMAP.md).
 
 **The access checkpoint is kept on success and re-assembling from it is free.**
 Everything after the fetch — route joining, elevation, what gets stored, the row

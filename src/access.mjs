@@ -39,6 +39,13 @@ export const CLASSES = {
 export const CLASS_ORDER = ['trail', 'road', 'rough', 'near', 'unknown'];
 export const CATS = ['road', 'trail', 'rough'];      // the order they are stored in a row
 
+/* What to call the on-route leg of an approach. A road is not a trail, and saying "4.8 mi on the
+   trail" about a forest road is the sort of small wrongness that makes a reader discount the
+   numbers next to it. The off-trail leg keeps its own name in every case: it describes the leg, not
+   the way, and there is no way there at all. */
+export const ON_ROUTE_LABEL = { road: 'on the road', trail: 'on the trail', rough: 'on the track' };
+export const onRouteLabel = cat => ON_ROUTE_LABEL[cat] || 'along the way';
+
 const has = (v, limit) => v != null && v >= 0 && v <= limit;
 
 export function classifyAccess(d) {
@@ -187,23 +194,75 @@ export function decodeWay(w, geomFlat) {
 /* rows[k] = [i, j] then four numbers per category: distance, way index, walk, elevation gain.
    -1 anywhere means "not found within CAP" / "no way" / "not computable". Gain is only ever present
    alongside a walk, because both are measured from a trailhead and mean nothing without one. */
-/* The stored format version. The row stride and the way-entry width have both changed once, and a
-   file from the other side of that change decodes into confident nonsense rather than failing: v3
-   rows are 3 wide per category, so a v4 reader takes one category's distance as another's way index.
-   The app refuses a version it does not know and reads every cell as unknown instead, which is the
-   answer it would give with no file at all. */
-export const ACCESS_FORMAT = 4;
-export const ROW_STRIDE = 4;
+/* The stored format version. The row stride has now changed twice, and a file from the other side of
+   such a change decodes into confident nonsense rather than failing: v3 rows are 3 wide per category
+   and v4 rows 4, so a v5 reader takes one category's distance as another's way index. The app refuses
+   a version it does not know and reads every cell as unknown instead, which is the answer it would
+   give with no file at all.
+
+   v5 splits the approach into its two legs, because v4's single "walk" number was measured from the
+   trailhead to the point on the way nearest the cell and stopped there — it never included getting
+   from that point to the cell, which is why 924 cells reported a walk of exactly 0 while the way was
+   up to 1.9 km away. See docs/access.md. */
+export const ACCESS_FORMAT = 5;
+export const ROW_STRIDE = 5;
 export function decodeRow(row) {
   const d = {};
   CATS.forEach((c, n) => {
     const at = 2 + n * ROW_STRIDE;
+    /* d is the OFF-TRAIL leg: straight-line metres from the cell centre to the nearest point on the
+       stored route. It is also what the class is decided on, and measuring both from the stored
+       geometry is deliberate — the number shown has to describe the line drawn. */
     d[c] = row[at];
     d[c + 'Way'] = row[at + 1];
     d[c + 'Walk'] = row[at + 2];
     d[c + 'Gain'] = row[at + 3];
+    d[c + 'OffGain'] = row[at + 4];
   });
   return d;
+}
+
+/* The approach to a cell, in the two legs it actually has.
+
+   v4 reported one number called "the walk": the distance along the way from its trailhead to the
+   point on the way nearest the cell. It stopped at the trail. Getting from that point to the cell
+   was never in the figure, and for 2,460 of 10,604 displayed walks the omitted part was LONGER than
+   the part shown. 924 cells reported exactly 0 — true, useless, and read as "no walk at all" when
+   the honest answer was "1.9 km of off-trail bushwhacking from a point next to the trailhead".
+
+   So the answer has three numbers and the sheet shows all three:
+
+     onTrail   trailhead -> the nearest point on the route, along the route
+     offTrail  that point -> the cell centre, in a STRAIGHT LINE
+     total     the two added
+
+   The off-trail leg is the honest part and the dangerous one: it ignores terrain, brush, water and
+   whether anyone has ever walked it. A quarter mile of Cascade slide alder is not a quarter mile of
+   trail. OFF_TRAIL_NOTE says so, and the sheet always shows it alongside the number.
+
+   The total exists because neither leg alone answers "how far in is it". A zero on-trail leg with a
+   1.9 km off-trail leg is now visibly a 1.9 km problem rather than invisibly a 0. */
+export function approachParts(d, cat, way) {
+  if (!d || !cat || !way) return null;
+  const off = d[cat];
+  if (off == null || off < 0) return null;
+  const on = d[cat + 'Walk'], onG = d[cat + 'Gain'], offG = d[cat + 'OffGain'];
+  const haveOn = way.trailhead && on != null && on >= 0;
+  const p = {
+    onTrail: haveOn ? on : null,
+    onGain: haveOn && onG != null && onG >= 0 ? onG : null,
+    offTrail: off,
+    offGain: offG != null && offG >= 0 ? offG : null,
+    total: null, totalGain: null,
+  };
+  if (p.onTrail != null) {
+    p.total = p.onTrail + p.offTrail;
+    /* A total climb only means anything when both halves are known. Adding a known leg to an
+       unknown one and presenting the sum as the climb would be the same overclaim as measuring a
+       walk from a trailhead that does not exist. */
+    if (p.onGain != null && p.offGain != null) p.totalGain = p.onGain + p.offGain;
+  }
+  return p;
 }
 
 /* One structured answer for the tap sheet: the class, the way it is talking about, how far, and
@@ -213,7 +272,7 @@ export function accessDetail(d, ways, geoms) {
   const cat = primaryCat(d);
   const out = { cls, label: CLASSES[cls].label, blurb: CLASSES[cls].blurb, cat, wayIndex: -1,
                 way: null, wayName: null, straight: null, walk: null, gain: null,
-                trailheadNote: null, walkDoubt: null, others: [] };
+                parts: null, trailheadNote: null, walkDoubt: null, others: [] };
   if (!d || !cat) return out;
   out.straight = d[cat];
   const wi = d[cat + 'Way'];
@@ -221,6 +280,7 @@ export function accessDetail(d, ways, geoms) {
     out.wayIndex = wi;
     out.way = decodeWay(ways[wi], geoms && geoms[wi]);
     out.wayName = wayLabel(out.way);
+    out.parts = approachParts(d, cat, out.way);
     const walk = d[cat + 'Walk'];
     if (walk != null && walk >= 0 && out.way.trailhead) {
       out.walk = walk;
@@ -229,17 +289,26 @@ export function accessDetail(d, ways, geoms) {
       out.trailheadNote = TRAILHEAD_NOTE[out.way.trailhead];
     }
   }
-  // the other categories, so the sheet can say "also a road 1.2 mi away"
+  /* The other categories, so the sheet can say "also a road 1.2 mi away" — and, since v5, with
+     their own approach figures. 16,091 cells have a walk sitting in a category the sheet does not
+     name, and showed nothing at all: the primary category is chosen by class precedence, so a cell
+     whose nearest trail has no trailhead named that trail and went silent while the road beside it
+     had a perfectly good figure. Naming the other route instead would be worse — it would rename
+     16,091 cells, 12,331 of them from a road to a rough track, i.e. from the road you would drive
+     to a logging spur. So the naming stands and the figures come with the alternatives. */
   for (const c of CATS) {
     if (c === cat) continue;
     if (d[c] == null || d[c] < 0) continue;
-    const w = ways && d[c + 'Way'] >= 0 ? decodeWay(ways[d[c + 'Way']]) : null;   // name only
-    out.others.push({ cat: c, m: d[c], name: w ? wayLabel(w) : null });
+    const w = ways && d[c + 'Way'] >= 0 ? decodeWay(ways[d[c + 'Way']]) : null;
+    out.others.push({ cat: c, m: d[c], name: w ? wayLabel(w) : null,
+                      parts: w ? approachParts(d, c, w) : null,
+                      trailheadNote: w && w.trailhead ? TRAILHEAD_NOTE[w.trailhead] : null });
   }
   out.others.sort((a, b) => a.m - b.m);
   /* After the others, because whether there is anything else nearby changes what the note can
-     honestly tell you to do about it. */
-  out.walkDoubt = walkDoubtNote(out.walk, out.others.length > 0);
+     honestly tell you to do about it. The doubt is about the TOTAL now, not the on-trail leg: a
+     3 mi trail walk plus a mile of off-trail is the same problem as a 4 mi trail walk. */
+  out.walkDoubt = walkDoubtNote(out.parts ? out.parts.total : null, out.others.length > 0);
   return out;
 }
 
@@ -354,11 +423,26 @@ export function walkDoubtNote(m, hasOthers) {
     + 'trailhead.' + (hasOthers ? ' Check "Also nearby".' : '');
 }
 
+/* The off-trail leg is a straight line on a map and nothing more. It is measured to the cell CENTRE,
+   which is where the score, the terrain and the vegetation are all measured, and it takes no account
+   of what is in the way. Saying the number without saying that would turn the most uncertain figure
+   on the sheet into the most confident-looking one. */
+export const OFF_TRAIL_NOTE =
+  'straight line to the cell centre — no trail, and it takes no account of terrain, brush, blowdown '
+  + 'or water. A quarter mile of slide alder is not a quarter mile of trail.';
+
 /* What to say when there is no trailhead to measure from. Computing a distance from an arbitrary end
    of the way would be worse than saying nothing: it would look like an answer. */
 export const NO_TRAILHEAD_NOTE =
   'No trailhead is mapped on this way, so there is nowhere to measure a walk from — '
   + 'the figure above is a straight line from the cell to the way.';
+
+/* The same fact, said where the off-trail leg follows it rather than precedes it. Two constants
+   rather than one because a note that points at "the figure above" has to have the figure above it,
+   and the approach block puts the unavailable leg first. */
+export const NO_ON_TRAIL_NOTE =
+  'No trailhead is mapped on this route, so there is nowhere to measure a walk along it from. '
+  + 'Only the off-trail leg below is known.';
 
 /* ===================== external links =====================
 
