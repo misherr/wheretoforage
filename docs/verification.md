@@ -315,9 +315,17 @@ screen, as basemap or overlay, the attribution control must read
 `Map data: © OpenStreetMap contributors, SRTM | Map style: © OpenTopoMap (CC-BY-SA)`.
 
 **Try the fallback before relying on it.** Load `?roads=stadia` from each
-production host. Until the domains are registered with Stadia every tile is a 401
-and the overlay is simply blank, with nothing on the page to say so — check the
-network panel, not the map.
+production host. Until the domains are registered with Stadia every tile is an
+HTTP 401 **whose body is itself a PNG** — Stadia's "401 Error — Invalid
+Authentication" tile, with a QR code — so the map fills with error tiles rather
+than going blank. Checking that the tile images loaded (`complete`,
+`naturalWidth > 0`) passes all of them; it did on the first check here. Check the
+status code:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -H "Referer: https://wheretoforage.com/" \
+  https://tiles.stadiamaps.com/tiles/stamen_terrain_lines/14/2564/5731.png   # 200 once registered
+```
 
 **And the lesson the vector layers left.** Both passed every test. The first drew
 one nearest way per cell — 11.6% of the network, 1.4% in Seattle, 1.1 ways per

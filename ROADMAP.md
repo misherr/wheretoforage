@@ -30,7 +30,9 @@ with its credit. `?roads=stadia` tries it on any deploy, and changing
 `ROAD_OVERLAY` switches everyone — **no rebuild**, because the overlay carries no
 data of ours. It needs a free Stadia account with `wheretoforage.com` and
 `dev.wheretoforage.com` registered for domain authentication; until then Stadia
-answers 401 from those hosts. It works from `localhost` without one.
+answers 401 from those hosts, and the 401's body is an error-message tile, so
+`?roads=stadia` there covers the map in "401 Error" squares. It works from
+`localhost` without one. Checked 2026-09-11: 401 from both hosts.
 
 **Neither free tier is the permanent answer.** Stadia's free tier is
 **non-commercial**, which conflicts with any premium plan on this app. If
