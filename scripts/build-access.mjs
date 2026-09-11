@@ -27,13 +27,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cellIndex } from '../src/grid.mjs';
-import { osmCategory, osmType, USFS_DRIVABLE_ML, CAP, CATS, encodeGeom, ROW_STRIDE, ACCESS_FORMAT,
+import { osmCategory, osmType, osmPaved, osmRoughReason, LIMITED_ACCESS, USFS_DRIVABLE_ML, CAP, CATS, encodeGeom,
+         ROW_STRIDE, ACCESS_FORMAT,
          OSM_DRIVE, OSM_TRAIL, OSM_ROUGH,
          TRAILHEAD_NONE, TRAILHEAD_MAPPED, TRAILHEAD_INFERRED } from '../src/access.mjs';
 import { REGIONS, decodePNG, terrariumMetres, tileXY, TERRAIN_SOURCE } from './build-cells.mjs';
 
 export const GENERATOR = 'scripts/build-access.mjs';
-export const GENERATOR_VERSION = '4.0.0';
+export const GENERATOR_VERSION = '5.0.0';
+/* What a checkpoint holds, which is not the same question as which generator wrote it. Schema 2 keeps
+   what the sources SAY — USFS maintenance level and trail_type, one way per USFS path, the OSM tags
+   that describe a road — and nothing the rules derive, because the rules now run at assembly. A
+   schema-1 checkpoint is upgraded on --resume rather than refused; refusing it would mean hours of
+   Overpass to change a rule that only assembly reads. */
+export const CHECKPOINT_SCHEMA = 2;
 
 const UA = 'king-bolete-forecast/1.0 (github.com/misherr/wheretoforage)';
 
@@ -62,6 +69,10 @@ const JOIN_SNAP_M = 40;       // two segments of one named route whose ends are 
 const ELEV_Z = 10;            // same Terrarium zoom the cell bake uses, so the tiles are shared
 const TH_SNAP_M = 60;         // a trail end this close to a drivable road counts as a trailhead
 const TH_MAPPED_M = 150;      // a mapped trailhead node this close to a way belongs to it
+const USFS_PAGE = 1000;       // USFS records per page; a 2,000-record trails page failed server-side
+const TWIN_STEP_M = 25;       // sampling step when measuring how far two ways run together
+const TWIN_TOL_M = 20;        // copies of one road sit a median 7 m apart, before 25 m simplification
+const TWIN_MIN_M = 150;       // ...and must run together at least this far to be one road
 const MIRROR_TRIES = 3;       // per area, across mirrors, before asking for a smaller area instead
 const MAX_SPLIT_DEPTH = 4;    // a 0.3 deg tile can become 256 pieces; metro tiles need about 16
 const ATTEMPTS = 6;           // USFS only — its endpoints are stable and do not need subdividing
@@ -210,15 +221,15 @@ export async function pickMirrors(list = OVERPASS_MIRRORS, fetchImpl = fetch) {
   return alive;
 }
 
-async function overpassOnce(s, w, n, e) {
+export async function overpassRaw(query, timeoutMs = REQ_TIMEOUT) {
   let lastErr = '';
   for (let a = 0; a < MIRROR_TRIES; a++) {
     const url = mirrors[mirror % mirrors.length];
     try {
       const r = await fetch(url, {
-        method: 'POST', body: 'data=' + encodeURIComponent(overpassQuery(s, w, n, e)),
+        method: 'POST', body: 'data=' + encodeURIComponent(query),
         headers: { 'content-type': 'application/x-www-form-urlencoded', 'user-agent': UA },
-        signal: AbortSignal.timeout(REQ_TIMEOUT),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       if (!r.ok) { await r.text().catch(() => {}); throw new Error('HTTP ' + r.status); }
       const text = await r.text();
@@ -235,6 +246,7 @@ async function overpassOnce(s, w, n, e) {
   }
   throw new Error(lastErr);
 }
+const overpassOnce = (s, w, n, e) => overpassRaw(overpassQuery(s, w, n, e));
 
 const bboxStr = (s, w, n, e) => s.toFixed(2) + ',' + w.toFixed(2) + ',' + n.toFixed(2) + ',' + e.toFixed(2);
 
@@ -264,10 +276,12 @@ async function forEachElement(s, w, n, e, cb, depth = 0) {
   for (const el of (j.elements || [])) cb(el);
 }
 
-async function arcgis(base, s, w, n, e, fields) {
-  const u = base + '/query?f=json&where=1%3D1&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326'
+async function arcgis(base, s, w, n, e, fields, page) {
+  let u = base + '/query?f=json&where=1%3D1&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326'
     + '&geometry=' + encodeURIComponent([w, s, e, n].join(','))
     + '&spatialRel=esriSpatialRelIntersects&returnGeometry=true&outFields=' + fields;
+  // Ordered by objectid, so a retried page is the same page.
+  if (page) u += '&orderByFields=objectid&resultOffset=' + page.offset + '&resultRecordCount=' + USFS_PAGE;
   let lastErr = '';
   for (let a = 0; a < ATTEMPTS; a++) {
     try {
@@ -280,7 +294,10 @@ async function arcgis(base, s, w, n, e, fields) {
     } catch (err) {
       lastErr = (err.cause && err.cause.code) || err.message || err.name;
       usfsRetries++;
-      if (a === ATTEMPTS - 1) { log('    USFS gave up: ' + lastErr); return { features: [] }; }
+      if (a === ATTEMPTS - 1) {
+        if (page && page.fatal) throw new Error('USFS page at offset ' + page.offset + ' of ' + base + ' failed: ' + lastErr);
+        log('    USFS gave up: ' + lastErr); return { features: [] };
+      }
       await sleep(Math.min(30000, 3000 * (a + 1)));
     }
   }
@@ -611,6 +628,407 @@ export function gainBetween(geom, elev, arcA, arcB) {
   return any ? Math.round(gain) : -1;
 }
 
+/* ===================== USFS, fetched by page ===================== */
+
+/* The three USFS layers, paged for the whole region rather than asked for tile by tile: three
+   requests per tile across 316 tiles became about 25, and the per-tile version returned a road once
+   for every tile it crossed. */
+export const USFS_LAYERS = [
+  { url: USFS_ROADS + '/0', type: 'nfsr', fields: 'objectid,name,id,oper_maint_level' },
+  { url: USFS_ROADS + '/1', type: 'nfsr-closed', fields: 'objectid,name,id' },
+  { url: USFS_TRAILS, type: 'nfst', fields: 'objectid,trail_name,trail_no,trail_type' },
+];
+
+/* One way per PATH, not one per feature.
+
+   An ArcGIS polyline is a list of paths, and an EDW road record is sometimes several disjoint pieces.
+   Flattening them into one line, which the bake used to do, drew a straight segment across every gap
+   — 383 m at the median in a Cascades sample, up to 6.2 km — and a walk measured along that segment
+   crossed ground no road covers. Each piece is its own way now; joinRoutes chains the ones whose ends
+   actually meet.
+
+   Kept from the source rather than decided here: the maintenance level (`ml`) and, for trails,
+   trail_type (`tt`). What they mean is decided at assembly, so changing a rule needs no re-fetch. */
+export function usfsWays(f, type) {
+  const a = (f && f.attributes) || {};
+  const paths = ((f && f.geometry && f.geometry.paths) || []).filter(p => p && p.length);
+  const name = (type === 'nfst' ? a.trail_name : a.name) || null;
+  const rawRef = type === 'nfst' ? a.trail_no : a.id;
+  const ref = rawRef == null || rawRef === '' ? null : String(rawRef);
+  const cat = type === 'nfst' ? 'trail'
+    : type === 'nfsr' && USFS_DRIVABLE_ML.test(String(a.oper_maint_level || '')) ? 'road' : 'rough';
+  return paths.map((p, k) => {
+    const w = { name, ref, type, cat, geom: simplify(p.map(q => [q[1], q[0]]), SIMPLIFY_M), th: TRAILHEAD_NONE };
+    if (type === 'nfsr' && a.oper_maint_level) w.ml = String(a.oper_maint_level).charAt(0);
+    if (type === 'nfst' && a.trail_type) w.tt = String(a.trail_type);
+    return ['u' + type + a.objectid + (paths.length > 1 ? '.' + (k + 1) : ''), w];
+  });
+}
+
+/* Is a point inside any queried tile's padded box — the area the per-tile fetch used to cover — so
+   paging the region's bounding box does not quietly widen the bake into Oregon and British Columbia. */
+function tileMembership(tiles) {
+  const byKey = new Map(tiles.map(t => [t.k, t]));
+  return (lat, lon) => {
+    const ti = Math.floor(lat / TILE), tj = Math.floor(lon / TILE);
+    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+      const t = byKey.get((ti + di) + ':' + (tj + dj));
+      if (t && lat >= t.s && lat <= t.n && lon >= t.w && lon <= t.e) return true;
+    }
+    return false;
+  };
+}
+
+export async function fetchUsfs(tiles, bbox, fetchArc, ways, logFn = log) {
+  const inTiles = tileMembership(tiles);
+  const st = { features: 0, kept: 0, multi_path: 0, pieces: 0 };
+  const s = bbox.lat0 - PAD, n = bbox.lat1 + PAD, w = bbox.lon0 - PAD, e = bbox.lon1 + PAD;
+  for (const L of USFS_LAYERS) {
+    let got = 0, kept = 0;
+    for (let offset = 0; ; offset += USFS_PAGE) {
+      /* A page that fails is fatal, not empty: an empty page would delete up to a thousand roads from
+         the bake and still mark the USFS fetch done. */
+      const j = await fetchArc(L.url, s, w, n, e, L.fields, { offset, fatal: true });
+      const feats = j.features || [];
+      for (const f of feats) {
+        const paths = (f.geometry && f.geometry.paths) || [];
+        if (!paths.some(p => p.some(q => inTiles(q[1], q[0])))) continue;
+        const pieces = usfsWays(f, L.type);
+        if (pieces.length > 1) st.multi_path++;
+        for (const [wid, way] of pieces) { ways.set(wid, way); st.pieces++; }
+        kept++;
+      }
+      got += feats.length;
+      if (!j.exceededTransferLimit || !feats.length) break;
+    }
+    st.features += got; st.kept += kept;
+    logFn('  USFS ' + L.type + ': ' + got.toLocaleString() + ' features in the region, '
+      + kept.toLocaleString() + ' near the cells');
+  }
+  return st;
+}
+
+/* ===================== geometry for comparing ways ===================== */
+const lengthM = g => {
+  let L = 0;
+  for (let i = 1; i < g.length; i++) L += Math.hypot((g[i][1] - g[i - 1][1]) * mLon(g[i - 1][0]), (g[i][0] - g[i - 1][0]) * M_LAT);
+  return L;
+};
+/* Metres from a point to a segment, in a local projection at the point. */
+function segDistM(la, lo, a, b) {
+  const k = mLon(la);
+  const ax = (a[1] - lo) * k, ay = (a[0] - la) * M_LAT, bx = (b[1] - lo) * k, by = (b[0] - la) * M_LAT;
+  const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+  const t = L2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / L2)) : 0;
+  return Math.hypot(ax + t * dx, ay + t * dy);
+}
+function forEachSample(g, stepM, cb) {
+  cb(g[0][0], g[0][1]);
+  for (let i = 1; i < g.length; i++) {
+    const [aLa, aLo] = g[i - 1], [bLa, bLo] = g[i];
+    const n = Math.max(1, Math.ceil(Math.hypot((bLo - aLo) * mLon(aLa), (bLa - aLa) * M_LAT) / stepM));
+    for (let q = 1; q <= n; q++) cb(aLa + (bLa - aLa) * q / n, aLo + (bLo - aLo) * q / n);
+  }
+}
+/* A grid of ~220 m cells for "what passes near here". A segment is filed under every cell its box,
+   padded by the search radius, touches — so a query reads only the one cell its point falls in. */
+const GRID_LAT = 0.002, GRID_LON = 0.003;
+const gridKey = (i, j) => i * 1e6 + (j + 500000);
+const gcell = (lat, lon) => gridKey(Math.floor(lat / GRID_LAT), Math.floor(lon / GRID_LON));
+function forCells(a, b, padM, cb) {
+  const pLa = padM / M_LAT, pLo = padM / mLon(Math.max(a[0], b[0]));
+  const i0 = Math.floor((Math.min(a[0], b[0]) - pLa) / GRID_LAT), i1 = Math.floor((Math.max(a[0], b[0]) + pLa) / GRID_LAT);
+  const j0 = Math.floor((Math.min(a[1], b[1]) - pLo) / GRID_LON), j1 = Math.floor((Math.max(a[1], b[1]) + pLo) / GRID_LON);
+  for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) cb(gridKey(i, j));
+}
+
+/* ===================== one road, two sources ===================== */
+
+/* Which OSM roads and tracks are the same road as a USFS road record.
+
+   Where both sources map a forest road the bake kept both, each with its own category, and they
+   disagree often: 1,018 OSM roads classed drivable run alongside a USFS record at maintenance level 2
+   ("high clearance vehicles"), and 274 OSM tracks alongside a level-3 road ("suitable for passenger
+   cars"), a median 7 m apart. A cell then read "drivable road mapped" off the OSM copy while its rough
+   entry was the same road — 949 cells had exactly that.
+
+   Twins run within TWIN_TOL_M of each other for at least TWIN_MIN_M and for at least half the shorter
+   of the two, which is the test that separated a road mapped twice from two roads that meet or cross.
+   An OSM piece of 100 m or more lying 80% along a USFS road is a twin too, so a road split at every
+   junction does not leave its short pieces on the other source's category. Measured on the STORED
+   geometry, simplified to 25 m — which is why the tolerance is 20 m, not the 7 m the copies usually
+   sit apart. Returns OSM way id -> [{uwid, overlap}], largest overlap first. */
+export function findTwins(ways, tolM = TWIN_TOL_M, minM = TWIN_MIN_M) {
+  const U = [], grid = new Map();
+  for (const [wid, w] of ways) {
+    if ((w.type !== 'nfsr' && w.type !== 'nfsr-closed') || !w.geom || w.geom.length < 2) continue;
+    const u = U.length;
+    U.push({ wid, geom: w.geom, len: lengthM(w.geom) });
+    for (let k = 1; k < w.geom.length; k++) forCells(w.geom[k - 1], w.geom[k], tolM, key => {
+      let arr = grid.get(key); if (!arr) grid.set(key, arr = []); arr.push(u, k);
+    });
+  }
+  const twins = new Map();
+  if (!U.length) return twins;
+  for (const [wid, w] of ways) {
+    if (wid[0] !== 'o' || (w.cat !== 'road' && w.cat !== 'rough') || !w.geom || w.geom.length < 2) continue;
+    const hits = new Map();
+    forEachSample(w.geom, TWIN_STEP_M, (la, lo) => {
+      const arr = grid.get(gcell(la, lo));
+      if (!arr) return;
+      let seen = null;
+      for (let q = 0; q < arr.length; q += 2) {
+        const u = arr[q];
+        if (seen && seen.has(u)) continue;
+        const g = U[u].geom, k = arr[q + 1];
+        if (segDistM(la, lo, g[k - 1], g[k]) <= tolM) {
+          (seen || (seen = new Set())).add(u);
+          hits.set(u, (hits.get(u) || 0) + 1);
+        }
+      }
+    });
+    if (!hits.size) continue;
+    const len = lengthM(w.geom), list = [];
+    for (const [u, h] of hits) {
+      const ov = Math.min(len, h * TWIN_STEP_M);
+      if ((ov >= minM && ov >= 0.5 * Math.min(len, U[u].len)) || (len >= 4 * TWIN_STEP_M && ov >= 0.8 * len))
+        list.push({ uwid: U[u].wid, overlap: Math.round(ov) });
+    }
+    if (list.length) twins.set(wid, list.sort((x, y) => y.overlap - x.overlap));
+  }
+  return twins;
+}
+
+/* ===================== the rules, applied at assembly =====================
+
+   Everything the sources SAY is in the checkpoint; what it MEANS is decided here, so a rule can change
+   without a re-fetch. Each rule can be switched off through opts.rules — not as a feature, but so its
+   effect on the shipped figures can be measured on its own (docs/verification.md). */
+export function applyRules(ways, rules = {}) {
+  const st = { snow_routes: { ways: 0, km: 0 }, described_rough: {}, usfs: null };
+  if (rules.snow !== false) {
+    /* Over-snow routes are not trails in the season this app is for. 597 USFS "trails" were
+       snowmobile and ski routes, 4,687 km — a quarter of the USFS trail length — one of them along
+       SR 20. 1,155 cells said "a trail is mapped" because of one, and 1,105 showed a walk measured
+       along it, from a trailhead inferred where it met a road: in practice, a sno-park. */
+    for (const [wid, w] of ways) if (w.type === 'nfst' && w.tt === 'SNOW') {
+      st.snow_routes.ways++; st.snow_routes.km += lengthM(w.geom) / 1000; ways.delete(wid);
+    }
+    st.snow_routes.km = Math.round(st.snow_routes.km);
+  }
+  if (rules.described !== false) {
+    /* A tag that describes the road beats one that classifies it: 4wd_only=yes, motor_vehicle=no and
+       smoothness=impassable|very_horrible each say a car cannot use it, whatever highway= says.
+       osmCategory applies this during a fresh fetch; a schema-1 checkpoint's ways need it here. */
+    for (const [, w] of ways) if (w.rd && w.cat === 'road' && !LIMITED_ACCESS.test(w.type)) {
+      w.cat = 'rough'; w.catBy = 'described';
+      const k = w.rd.replace(/=.*/, '');
+      st.described_rough[k] = (st.described_rough[k] || 0) + 1;
+    }
+  }
+  if (rules.usfs !== false) st.usfs = reconcileUsfs(ways);
+  return st;
+}
+
+/* Where both sources map a road, the USFS maintenance level decides its category.
+
+   The level is the only field in either source that directly answers "passenger car or high
+   clearance". OSM's choice between track and unclassified on forest roads is inconsistent — 481
+   named roads switch between the two from one mapped piece to the next. Two exceptions, where OSM
+   overrides, because those tags describe the road rather than classify it:
+
+     - paved (surface=paved, asphalt, concrete, chipseal) is drivable even at level 1-2. USFS records
+       lag: Bogachiel Road is paved in OSM and gravel in USFS. Not over the closed-roads layer, though
+       — a paved road can still be gated, and paving says nothing about that.
+     - 4wd_only=yes, motor_vehicle=no, or smoothness=impassable|very_horrible is rough even at level
+       3+. Where the exceptions collide, rough wins: optimism is the failure this project keeps
+       rediscovering.
+
+   The OSM copy keeps its geometry, which is connected to the rest of the network. The USFS copy stays
+   too — it carries the road's number and covers whatever OSM lacks — and it takes its twin's category
+   only when an exception flipped that twin and the flipped twins cover 80% of it. Otherwise the same
+   road would sit in a cell twice again, drivable once and rough once. */
+/* A USFS maintenance level describes a forest road. It says nothing about a state or federal highway,
+   and it cannot speak for the parts of an OSM way it does not run along. The live check of this rule
+   found State Route 410 — highway=primary — demoted to rough because a 337 m level-2 spur ran beside
+   7% of a 3.3 km OSM way. Twins are still twins (the USFS copy may still follow an exception), but
+   USFS only DECIDES where it covers at least half the OSM way, and never for these classes. */
+const USFS_NEVER_DECIDES = /^(motorway|trunk|primary|secondary)(_link)?$/;
+const USFS_MIN_COVER = 0.5;
+
+export function reconcileUsfs(ways) {
+  const twins = findTwins(ways);
+  const st = { osm_ways_with_twin: twins.size, pairs: 0, to_rough: 0, to_road: 0, paved: 0, described: 0,
+               conflicting_twins: 0, usfs_adopted: 0, usfs_still_disagreeing: 0,
+               kept_highway: 0, kept_partial: 0 };
+  for (const [owid, list] of twins) {
+    const o = ways.get(owid), top = ways.get(list[0].uwid);
+    st.pairs += list.length;
+    if (USFS_NEVER_DECIDES.test(o.type)) { st.kept_highway++; continue; }
+    if (list[0].overlap < USFS_MIN_COVER * lengthM(o.geom)) { st.kept_partial++; continue; }
+    if (new Set(list.map(t => ways.get(t.uwid).cat)).size > 1) st.conflicting_twins++;
+    let cat = top.cat, by = 'usfs';
+    if (cat === 'rough' && o.pv && top.type === 'nfsr') { cat = 'road'; by = 'paved'; }
+    if (o.rd) { cat = 'rough'; by = 'described'; }
+    if (by === 'paved') st.paved++;
+    if (by === 'described' && top.cat === 'road') st.described++;
+    if (o.cat !== cat) { if (cat === 'rough') st.to_rough++; else st.to_road++; }
+    o.cat = cat; o.catBy = by; o.twin = list[0].uwid;
+  }
+  const byU = new Map();
+  for (const [owid, list] of twins) for (const t of list) {
+    if (!byU.has(t.uwid)) byU.set(t.uwid, []);
+    byU.get(t.uwid).push({ o: ways.get(owid), overlap: t.overlap });
+  }
+  for (const [uwid, list] of byU) {
+    const u = ways.get(uwid);
+    const cats = new Set(list.map(x => x.o.cat));
+    const byException = list.every(x => x.o.catBy === 'paved' || x.o.catBy === 'described');
+    const cover = list.reduce((a, x) => a + x.overlap, 0);
+    if (byException && cats.size === 1 && !cats.has(u.cat) && cover >= 0.8 * lengthM(u.geom)) {
+      u.cat = [...cats][0]; u.catBy = 'twin'; st.usfs_adopted++;
+    } else if (list.some(x => x.o.cat !== u.cat)) st.usfs_still_disagreeing++;
+  }
+  return st;
+}
+
+/* ===================== trailheads, decided after the categories =====================
+
+   A trailhead is inferred where a non-road way ends within TH_SNAP_M of a DRIVABLE road, so it is
+   downstream of every rule above. It used to be inferred during the fetch, tile by tile, against
+   whatever each source alone called drivable, so a trail ending on an OSM "road" that USFS records
+   as high-clearance got a trailhead there: 5,072 of 60,658 inferred trailheads (8.4%) had no other
+   drivable road near them. Inferred here, after USFS has decided, such a way gets its trailhead at
+   its other end if that end meets a real road, or no trailhead — and then no walk, because a walk
+   from where a passenger car cannot go is exactly the optimism the rule exists to stop.
+
+   Otherwise the rule is the one it was: the way's FIRST end is checked before its last, and the
+   POINT is recorded, not a flag. A flag once let the walk be measured from whichever end the
+   geometry started at — Tyler Peak Trail's arc 0 is 1,971 m from any road — and a point survives
+   joinRoutes reversing and reordering members. Mapped trailhead nodes, within TH_MAPPED_M of any
+   point on the way, still outrank inferred ones: a surveyed point beats a deduction. */
+export function inferTrailheads(ways, trailheadNodes = [], snapM = TH_SNAP_M, mappedM = TH_MAPPED_M) {
+  const E = [], ends = new Map();
+  for (const [, w] of ways) {
+    w.th = TRAILHEAD_NONE; delete w.thPt;
+    if (w.cat === 'road' || !w.geom || !w.geom.length) continue;
+    const e = { w, pts: [w.geom[0], w.geom[w.geom.length - 1]], hit: [false, false] }, idx = E.length;
+    E.push(e);
+    for (let k = 0; k < 2; k++) {
+      const key = gcell(e.pts[k][0], e.pts[k][1]);
+      let arr = ends.get(key); if (!arr) ends.set(key, arr = []); arr.push(idx, k);
+    }
+  }
+  for (const [, w] of ways) {
+    if (w.cat !== 'road' || !w.geom || !w.geom.length) continue;
+    const g = w.geom;
+    for (let k = g.length > 1 ? 1 : 0; k < g.length; k++) {
+      const a = g[Math.max(0, k - 1)], b = g[k];
+      forCells(a, b, snapM, key => {
+        const arr = ends.get(key);
+        if (!arr) return;
+        for (let q = 0; q < arr.length; q += 2) {
+          const e = E[arr[q]], which = arr[q + 1];
+          if (!e.hit[which] && segDistM(e.pts[which][0], e.pts[which][1], a, b) <= snapM) e.hit[which] = true;
+        }
+      });
+    }
+  }
+  let inferred = 0;
+  for (const e of E) {
+    const k = e.hit[0] ? 0 : e.hit[1] ? 1 : -1;
+    if (k < 0) continue;
+    e.w.th = TRAILHEAD_INFERRED; e.w.thPt = [e.pts[k][0], e.pts[k][1]]; inferred++;
+  }
+  /* Mapped nodes: per way, the nearest node within mappedM of any point on it. Ways are filed in a
+     0.01-degree grid by their padded bounding box, so each node reads one cell. */
+  const C = 0.01, wg = new Map(), best = new Map();
+  E.forEach((e, idx) => {
+    let s = 90, n = -90, west = 180, east = -180;
+    for (const [la, lo] of e.w.geom) { if (la < s) s = la; if (la > n) n = la; if (lo < west) west = lo; if (lo > east) east = lo; }
+    const pLa = mappedM / M_LAT, pLo = mappedM / mLon(n);
+    for (let i = Math.floor((s - pLa) / C); i <= Math.floor((n + pLa) / C); i++)
+      for (let j = Math.floor((west - pLo) / C); j <= Math.floor((east + pLo) / C); j++) {
+        const key = gridKey(i, j); let arr = wg.get(key); if (!arr) wg.set(key, arr = []); arr.push(idx);
+      }
+  });
+  for (const [tLa, tLn] of trailheadNodes) {
+    for (const idx of wg.get(gridKey(Math.floor(tLa / C), Math.floor(tLn / C))) || []) {
+      const d = nearestOnWay(E[idx].w.geom, tLa, tLn).d;
+      if (d <= mappedM) { const b = best.get(idx); if (!b || d < b.d) best.set(idx, { d, pt: [tLa, tLn] }); }
+    }
+  }
+  for (const [idx, b] of best) {
+    const w = E[idx].w;
+    if (w.th === TRAILHEAD_INFERRED) inferred--;
+    w.th = TRAILHEAD_MAPPED; w.thPt = b.pt;
+  }
+  return { inferred, mapped: best.size };
+}
+
+/* Every way onto every cell within CAP, after the rules — which is why it happens here now rather than
+   during the fetch: a category decided at assembly has to be the category the cell records. Measured on
+   the stored geometry, which is also what every distance below is re-projected onto. */
+export function stampAll(state, ways) {
+  for (const [wid, w] of ways) if (w.geom && w.geom.length) stampWay(state, w.geom, w.cat, wid);
+}
+
+/* One-off, for a schema-1 checkpoint: the OSM tags that describe a road, which the old fetch read and
+   then threw away. Asked for rather than re-fetched: statewide, only the ways tagged 4wd-only, closed
+   to motor vehicles or impassable; and by id, the surface of the OSM roads that have a USFS twin —
+   the only roads for which "paved" changes anything. */
+async function backfillOsmDescriptors(ways, bbox, query, logFn = log) {
+  const st = { described: {}, paved: 0, twins_looked_up: 0, requests: 0 };
+  const take = el => {
+    const w = ways.get('o' + el.id);
+    if (!w) return;
+    const rd = osmRoughReason(el.tags);
+    if (rd && !w.rd) { w.rd = rd; const k = rd.replace(/=.*/, ''); st.described[k] = (st.described[k] || 0) + 1; }
+    if (osmPaved(el.tags) && !w.pv) { w.pv = 1; st.paved++; }
+  };
+  /* By tag alone. Adding ["highway"~...] made the planner scan every highway in the state and the
+     statewide query timed out (504) on every mirror; the tag filters are index-backed and selective, and
+     take() already ignores any way the checkpoint does not hold. An area that still fails is split
+     into quarters, as the tile fetch does, and one that fails three splits down is fatal — a silent
+     gap here would leave some roads drivable that are tagged 4wd-only. */
+  const tagQuery = (a, b, c, d) => '[out:json][timeout:300];('
+    + ['["4wd_only"="yes"]', '["motor_vehicle"="no"]', '["smoothness"~"^(impassable|very_horrible)$"]']
+      .map(f => 'way' + f + '(' + [a, b, c, d].map(v => v.toFixed(3)).join(',') + ');').join('')
+    + ');out tags;';
+  /* Logged per area, success or split: a statewide query that retries a 504 three times can sit
+     silent for fifteen minutes, and silence cannot tell a slow mirror from a wedged one. */
+  const box = (a, b, c, d) => [a, b, c, d].map(v => v.toFixed(2)).join(',');
+  const area = async (a, b, c, d, depth) => {
+    try {
+      const els = (await query(tagQuery(a, b, c, d), 330000)).elements || [];
+      for (const el of els) take(el);
+      st.requests++;
+      logFn('upgrade    tags ' + box(a, b, c, d) + ': ' + els.length.toLocaleString() + ' ways');
+    } catch (err) {
+      if (depth >= 3) throw err;
+      logFn('upgrade    tags ' + box(a, b, c, d) + ': ' + err.message + ' — splitting into quarters');
+      const mLa = (a + c) / 2, mLo = (b + d) / 2;
+      for (const q of [[a, b, mLa, mLo], [a, mLo, mLa, d], [mLa, b, c, mLo], [mLa, mLo, c, d]]) {
+        await area(q[0], q[1], q[2], q[3], depth + 1);
+        await sleep(POLITE_MS);
+      }
+    }
+  };
+  await area(bbox.lat0 - PAD, bbox.lon0 - PAD, bbox.lat1 + PAD, bbox.lon1 + PAD, 0);
+  const ids = [...findTwins(ways).keys()].map(wid => wid.slice(1));
+  st.twins_looked_up = ids.length;
+  logFn('upgrade    surface of the ' + ids.length.toLocaleString() + ' OSM roads with a USFS twin, '
+    + Math.ceil(ids.length / 400) + ' requests');
+  for (let c = 0; c < ids.length; c += 400) {
+    const q = '[out:json][timeout:180];way(id:' + ids.slice(c, c + 400).join(',') + ');out tags;';
+    for (const el of ((await query(q)).elements || [])) take(el);
+    st.requests++;
+    if (c + 400 < ids.length) await sleep(POLITE_MS);
+  }
+  logFn('upgrade    OSM descriptors: ' + JSON.stringify(st));
+  return st;
+}
+
 /* ===================== the bake ===================== */
 export async function build(opts, deps = {}) {
   const t0 = Date.now();
@@ -645,28 +1063,32 @@ export async function build(opts, deps = {}) {
     + (PAD * 111).toFixed(1) + ' km)');
 
   const doneTiles = new Set();
-  let ck = null;
+  let ck = null, needUpgrade = false, usfsDone = false, usfsPaged = false, schemaNow = CHECKPOINT_SCHEMA;
   if (opts.resume && fs.existsSync(opts.checkpoint)) {
     ck = JSON.parse(fs.readFileSync(opts.checkpoint, 'utf8'));
-    if (ck.generator_version === GENERATOR_VERSION && ck.region === opts.region) {
-      for (const [k, v] of Object.entries(ck.nearest || {})) {
-        const rec = {};
-        CATS.forEach((c, n) => { if (v[n * 3] >= 0) rec[c] = { d: v[n * 3], wid: v[n * 3 + 1], arc: v[n * 3 + 2] }; });
-        state.nearest.set(k, rec);
-      }
+    const schema = ck.schema || 1;
+    /* Compatibility is decided by the checkpoint's schema, not by the generator version. Matching the
+       version treated every checkpoint from before a version bump as "a different run", and would
+       re-fetch the state — hours of Overpass — to change a rule that only assembly reads. */
+    if (ck.region === opts.region && schema <= CHECKPOINT_SCHEMA
+        && (schema >= 2 || /^[45]\./.test(String(ck.generator_version)))) {
       for (const [wid, w] of Object.entries(ck.ways || {})) ways.set(wid, w);
       for (const t of (ck.trailheads || [])) trailheadNodes.push(t);
       for (const k of (ck.doneTiles || [])) doneTiles.add(k);
-      log('  resuming with ' + doneTiles.size + ' tiles and ' + ways.size.toLocaleString() + ' ways collected');
+      usfsDone = schema >= 2 ? !!ck.usfs : true;      // schema 1 fetched USFS per tile, alongside OSM
+      usfsPaged = ck.usfs === 'paged';                // ...unless an interrupted upgrade already re-paged it
+      needUpgrade = schema < CHECKPOINT_SCHEMA;
+      schemaNow = schema;
+      log('  resuming with ' + doneTiles.size + ' tiles and ' + ways.size.toLocaleString()
+        + ' ways collected (checkpoint schema ' + schema + ')');
     } else { log('  checkpoint is from a different run — ignoring'); ck = null; }
   }
 
+  /* What the sources said and nothing derived from it: no per-cell nearest ways, no category a rule
+     changed, no trailheads. All of that is assembly, recomputed on every run. */
   const saveCk = () => atomicWrite(opts.checkpoint, JSON.stringify({
-    generator_version: GENERATOR_VERSION, region: opts.region, doneTiles: [...doneTiles],
-    trailheads: trailheadNodes,
-    ways: Object.fromEntries(ways),
-    nearest: Object.fromEntries([...state.nearest].map(([k, rec]) => [k,
-      CATS.flatMap(c => rec[c] ? [Math.round(rec[c].d), rec[c].wid, Math.round(rec[c].arc)] : [-1, -1, -1])])),
+    generator_version: GENERATOR_VERSION, schema: schemaNow, region: opts.region, doneTiles: [...doneTiles],
+    usfs: usfsPaged ? 'paged' : usfsDone, trailheads: trailheadNodes, ways: Object.fromEntries(ways),
   }), { fatal: false });
 
   const pending = tiles.filter(t => !doneTiles.has(t.k));
@@ -682,11 +1104,10 @@ export async function build(opts, deps = {}) {
   async function worker() {
     while (queue.length) {
       const t = queue.shift();
-      let nWays = 0, nFeat = 0, nTh = 0;
-
-      /* Roads are remembered per tile so a trail ending at one can be recognised as a trailhead. */
-      const drivable = [];
-      const pendingTrails = [];
+      let nWays = 0, nTh = 0;
+      /* Only what the source says. Reconciling against USFS, inferring trailheads and stamping cells
+         all happen once, at assembly, after the rules. They used to happen here, tile by tile, against
+         whatever each source alone called drivable. */
       await fetchOsm(t.s, t.w, t.n, t.e, el => {
         if (el.type === 'node') {
           if (el.tags && el.tags.highway === 'trailhead') { trailheadNodes.push([el.lat, el.lon]); nTh++; }
@@ -695,79 +1116,27 @@ export async function build(opts, deps = {}) {
         if (el.type !== 'way' || !el.geometry) return;
         const cat = osmCategory(el.tags);
         if (!cat) return;
-        const coords = el.geometry.map(p => [p.lat, p.lon]);
         const wid = 'o' + el.id;
         if (!ways.has(wid)) {
-          ways.set(wid, { name: (el.tags.name || null), ref: (el.tags.ref || null),
-                          type: osmType(el.tags), cat, geom: simplify(coords, SIMPLIFY_M), th: TRAILHEAD_NONE });
+          const w = { name: (el.tags.name || null), ref: (el.tags.ref || null), type: osmType(el.tags), cat,
+                      geom: simplify(el.geometry.map(p => [p.lat, p.lon]), SIMPLIFY_M), th: TRAILHEAD_NONE };
+          /* The tags that describe the road, kept because assembly needs them and the fetch is the only
+             moment they are in hand. A schema-1 checkpoint threw them away, which is why upgrading one
+             has to ask Overpass for them again. */
+          if (osmPaved(el.tags)) w.pv = 1;
+          const rd = osmRoughReason(el.tags);
+          if (rd) w.rd = rd;
+          ways.set(wid, w);
         }
-        stampWay(state, coords, cat, wid);
-        if (cat === 'road') drivable.push(coords); else pendingTrails.push({ wid, coords });
         nWays++;
       });
-
-      if (!opts.skipUsfs) {
-        // Three independent endpoints on a fast server; no reason to wait for each in turn.
-        const [rd, cl, tr] = await Promise.all([
-          fetchArc(USFS_ROADS + '/0', t.s, t.w, t.n, t.e, 'objectid,name,id,oper_maint_level'),
-          fetchArc(USFS_ROADS + '/1', t.s, t.w, t.n, t.e, 'objectid,name,id'),
-          fetchArc(USFS_TRAILS, t.s, t.w, t.n, t.e, 'objectid,trail_name,trail_no'),
-        ]);
-        const addArc = (res, typeName, catOf, nameOf, refOf) => {
-          for (const f of (res.features || [])) {
-            const a = f.attributes || {};
-            const coords = (f.geometry && f.geometry.paths ? f.geometry.paths.flat() : []).map(p => [p[1], p[0]]);
-            if (!coords.length) continue;
-            const wid = 'u' + typeName + a.objectid;
-            const cat = catOf(a);
-            if (!ways.has(wid)) {
-              ways.set(wid, { name: nameOf(a) || null, ref: refOf(a) == null ? null : String(refOf(a)),
-                              type: typeName, cat, geom: simplify(coords, SIMPLIFY_M), th: TRAILHEAD_NONE });
-            }
-            stampWay(state, coords, cat, wid);
-            if (cat === 'road') drivable.push(coords); else pendingTrails.push({ wid, coords });
-            nFeat++;
-          }
-        };
-        addArc(rd, 'nfsr', a => USFS_DRIVABLE_ML.test(String(a.oper_maint_level || '')) ? 'road' : 'rough',
-          a => a.name, a => a.id);
-        addArc(cl, 'nfsr-closed', () => 'rough', a => a.name, a => a.id);
-        addArc(tr, 'nfst', () => 'trail', a => a.trail_name, a => a.trail_no);
-      }
-
-      /* Infer a trailhead where a non-road way ends at a drivable road. There is no USFS trailheads
-         dataset in EDW and OSM's highway=trailhead tag is sparse — 13 nodes across six sample tiles
-         — so relying on it alone would leave a walk figure for almost nobody. Where a trail meets a
-         road is where you leave the car; it is derivable from data already fetched; and it is
-         labelled as an inference rather than as a surveyed point.
-
-         Record WHICH end met the road, as a coordinate. The flag alone was not enough: the walk was
-         later measured from arc 0 of the stored route regardless of which end matched, so a trail
-         whose road end is its LAST vertex had its walk measured from the wrong end — on a sample of
-         25 inferred routes, 5 were wrong that way, one of them (Tyler Peak Trail) with arc 0 sitting
-         1,971 m from the nearest drivable road of any kind, OSM or USFS. Storing the point rather
-         than a flag also survives joinRoutes reversing and reordering members, which the old code
-         could not: 60% of cells on a joined route were pinned to arc 0 of the whole chain. */
-      for (const { wid, coords } of pendingTrails) {
-        const w = ways.get(wid);
-        if (!w || w.th !== TRAILHEAD_NONE) continue;
-        for (const end of [coords[0], coords[coords.length - 1]]) {
-          if (!end) continue;
-          for (const road of drivable) {
-            if (nearestOnWay(road, end[0], end[1]).d <= TH_SNAP_M) {
-              w.th = TRAILHEAD_INFERRED; w.thPt = [end[0], end[1]]; break;
-            }
-          }
-          if (w.th !== TRAILHEAD_NONE) break;
-        }
-      }
 
       doneTiles.add(t.k);
       finished++;
       const secs = Math.round((Date.now() - t0) / 1000);
       const eta = finished ? Math.round(secs / finished * (pending.length - finished) / 60) : 0;
       log('  tile ' + finished + '/' + pending.length + '  ' + t.n_cells + ' cells, ' + nWays
-        + ' OSM ways, ' + nFeat + ' USFS, ' + nTh + ' th  (' + secs + 's, ~' + eta + ' min left)');
+        + ' OSM ways, ' + nTh + ' th  (' + secs + 's, ~' + eta + ' min left)');
       if (++sinceWrite >= CHECKPOINT_EVERY) { sinceWrite = 0; saveCk(); }
       if (queue.length) await sleep(POLITE_MS);
     }
@@ -775,18 +1144,39 @@ export async function build(opts, deps = {}) {
   await Promise.all(Array.from({ length: Math.min(TILE_WORKERS, Math.max(1, queue.length)) }, worker));
   saveCk();
 
-  /* A mapped trailhead outranks an inferred one — it is a surveyed point rather than a deduction.
-     Its node is kept for the same reason the inferred end is: the trailhead's position along the
-     route is what a walk is measured from, and it has to survive joining. */
-  for (const [, w] of ways) {
-    if (w.cat === 'road' || !w.geom.length) continue;
-    let best = Infinity, pt = null;
-    for (const [tLa, tLn] of trailheadNodes) {
-      const dd = nearestOnWay(w.geom, tLa, tLn).d;
-      if (dd <= TH_MAPPED_M && dd < best) { best = dd; pt = [tLa, tLn]; }
-    }
-    if (pt) { w.th = TRAILHEAD_MAPPED; w.thPt = pt; }
+  /* A schema-1 checkpoint — every one written before the rules moved to assembly — has USFS flattened
+     to one way per feature, no trail_type, and no record of the OSM tags that describe a road. Its OSM
+     network is still good, and it is the expensive part, so it is upgraded rather than re-fetched:
+     USFS again by page (about 25 requests), then the describing tags from Overpass (a few). */
+  const upgrading = needUpgrade && !opts.noUpgrade && !opts.skipUsfs;
+  if (needUpgrade && !upgrading) log('  checkpoint schema ' + schemaNow + ' left as it is');
+  if (upgrading) {
+    log('upgrade    checkpoint schema ' + schemaNow + ' -> ' + CHECKPOINT_SCHEMA
+      + ': USFS again by page, then the OSM tags that describe a road');
+    if (!usfsPaged) {
+      for (const wid of [...ways.keys()]) if (wid[0] === 'u') ways.delete(wid);
+      usfsDone = false;
+    } else log('           USFS was already re-fetched by page before an interruption — keeping it');
   }
+  let usfsStats = null, backfill = null;
+  if (!opts.skipUsfs && !usfsDone) {
+    usfsStats = await fetchUsfs(tiles, opts.bbox, fetchArc, ways, log);
+    usfsDone = true; usfsPaged = true;
+    saveCk();
+  }
+  if (upgrading) {
+    backfill = await backfillOsmDescriptors(ways, opts.bbox, deps.overpassRaw || overpassRaw, log);
+    schemaNow = CHECKPOINT_SCHEMA;
+    saveCk();
+  }
+
+  /* ---- the rules, then trailheads, then the cells — in that order, because each reads the last ---- */
+  const ruleStats = applyRules(ways, opts.rules);
+  log('rules      ' + JSON.stringify(ruleStats));
+  const thStats = inferTrailheads(ways, trailheadNodes);
+  log('trailheads ' + thStats.inferred.toLocaleString() + ' inferred, ' + thStats.mapped.toLocaleString() + ' mapped');
+  stampAll(state, ways);
+  log('stamped    ' + ways.size.toLocaleString() + ' ways onto ' + state.nearest.size.toLocaleString() + ' cells');
 
   /* ---- assemble ---- */
   const referenced = new Set();
@@ -916,6 +1306,8 @@ export async function build(opts, deps = {}) {
                  despike: '3-point median', max_grade: MAX_GRADE },
     trailheads: { mapped_nodes: trailheadNodes.length, snap_m: TH_SNAP_M, mapped_m: TH_MAPPED_M,
                   ways_with_trailhead: withTh },
+    rules: ruleStats, trailhead_kinds: thStats, checkpoint_schema: schemaNow,
+    usfs_fetch: usfsStats, checkpoint_upgrade: backfill,
     tiles: tiles.length,
     requests: { overpass: osmRequests, overpass_retries: osmRetries,
                 overpass_mb: +(osmBytes / 1e6).toFixed(1),
@@ -926,6 +1318,9 @@ export async function build(opts, deps = {}) {
               trailheads_unplaced: thUnplaced },
     seconds: Math.round((Date.now() - t0) / 1000),
   };
+  /* The verification in docs/verification.md needs the reconciled ways and each route's trailhead
+     point, which the written file does not carry. Nothing in the bake reads this. */
+  if (opts.debug) Object.assign(opts.debug, { ways, joined, thArc, routeOf, ruleStats, thStats });
   const generated = new Date().toISOString();
   let out = { version: ACCESS_FORMAT, generated, cap_m: CAP, provenance, ways: outWays, rows };
   let geomOut = { version: ACCESS_FORMAT, generated, geom: outGeom };

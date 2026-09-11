@@ -324,3 +324,48 @@ one nearest way per cell — 11.6% of the network, 1.4% in Seattle, 1.1 ways per
 connected piece — and it took looking at Seattle to see a scatter of stubs. The
 second drew the whole network and showed 15% of it twice. Look at a dense urban
 view and a forest view before believing any map layer.
+
+## Measuring the access rules one at a time
+
+The rules that reconcile OSM with USFS all change shipped figures, and one
+before/after diff cannot say which change did what. So `build()` takes
+`opts.rules` — `{ snow, described, usfs }`, each on unless set `false` — and
+`opts.noUpgrade`, and the verification re-assembles the same checkpoint in
+stages, each about 30 s with the z10 terrain tiles cached locally:
+
+| stage | checkpoint | rules | isolates |
+| --- | --- | --- | --- |
+| B0 | — | — | the file that shipped |
+| B1 | schema 1, not upgraded | none | moving stamping and trailheads from the fetch to assembly |
+| B2 | upgraded | none | USFS re-fetched by page, one way per path |
+| B3 | upgraded | snow | over-snow routes |
+| B4 | upgraded | snow, described | the describing tags on OSM-only roads |
+| B5 | upgraded | all | USFS deciding, with its exceptions |
+
+**Measure the method change before any rule.** B0 → B1 alone renamed the way in
+1,344 cells, at a median distance change of 3 m (90th percentile 12 m): stamping
+on the stored, 25 m-simplified geometry breaks near-ties between the OSM and USFS
+copies of one road differently from the full geometry the fetch used. 245 walks
+went and 182 appeared the same way. Without B1 all of that would have been
+blamed on the rules.
+
+**Check trailheads independently of `inferTrailheads`.** Rebuild the stage's
+categories from its checkpoint with the same rules, then brute-force the nearest
+drivable way to every inferred trailhead point. Sample roads **along** their
+segments: the first version filed roads by vertex only and reported 50 failures
+that were its own — a simplified straight road can have vertices a kilometre
+apart and pass right by a trailhead.
+
+**Every approach whose trailhead stopped being one** — in every category, not
+only the named one — must now show no walk, or a walk from a different point that
+the independent check puts at a drivable road. The old figure from the old point
+is a failure, whatever else is true.
+
+**Then ask the sources live** for a spread of those cells: Overpass and USFS
+around the old point and around the new one. Query both, for the reason in
+"Do not trust a trailhead flag" above.
+
+**The upgrade's statewide tag query.** `way["highway"~...]["motor_vehicle"="no"]`
+over the whole state timed out with a 504 on every mirror. Filter by the
+selective tag alone — `take()` already ignores ways the checkpoint does not hold
+— and split an area that fails into quarters, as the tile fetch does.

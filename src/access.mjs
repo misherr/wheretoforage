@@ -347,6 +347,27 @@ export const OSM_ROUGH = new Set(['track', 'road']);
    high-clearance or closed, which is exactly the "unmaintained way" case. */
 export const USFS_DRIVABLE_ML = /^[345]/;
 
+/* Tags that DESCRIBE a road, as opposed to classifying it. highway= is a class somebody chose, and
+   USFS's maintenance level is a class too; these say what the road is actually like, and where they
+   disagree with a class, the description wins. They are separate from osmCategory because the bake
+   needs them again later, when OSM and USFS map the same road and one of them has to decide. */
+export const OSM_PAVED = /^(paved|asphalt|concrete|concrete:plates|concrete:lanes|chipseal)$/;
+export const osmPaved = tags => !!tags && OSM_PAVED.test(tags.surface || '');
+/* Why a car cannot use it, or null. All three describe the road; none of them is a class. This
+   project has twice been burned by access reading more optimistic than the ground, so any one of
+   them is enough. */
+/* Limited-access highways are the exception. On a motorway or trunk road motor_vehicle=no marks an
+   HOV, transit or express lane — 150 motorway ramps and the I-5 Express Lanes in the first run — not
+   a road closed to cars, and "walkable, probably not drivable" is the wrong thing to say about it. */
+export const LIMITED_ACCESS = /^(motorway|trunk)(_link)?$/;
+export function osmRoughReason(tags) {
+  if (!tags || LIMITED_ACCESS.test(tags.highway || '')) return null;
+  if (tags['4wd_only'] === 'yes') return '4wd_only=yes';
+  if (tags.motor_vehicle === 'no') return 'motor_vehicle=no';
+  if (/^(impassable|very_horrible)$/.test(tags.smoothness || '')) return 'smoothness=' + tags.smoothness;
+  return null;
+}
+
 export function osmCategory(tags) {
   if (!tags) return null;
   // A way tagged abandoned:/disused:/razed: is a decommissioned spur — still walkable, often the
@@ -358,8 +379,9 @@ export function osmCategory(tags) {
   if (OSM_TRAIL.has(h)) return 'trail';
   if (OSM_ROUGH.has(h)) return 'rough';
   if (OSM_DRIVE.has(h)) {
-    // A drivable classification that is gated, 4wd-only or unpaved dirt is really a rough way.
-    if (tags['4wd_only'] === 'yes') return 'rough';
+    // A drivable classification that is 4wd-only, closed to motor vehicles, impassable or unpaved
+    // dirt is really a rough way: those tags describe the road, and a description beats a class.
+    if (osmRoughReason(tags)) return 'rough';
     if (tags.surface && /^(dirt|earth|ground|mud|sand|grass)$/.test(tags.surface)) return 'rough';
     return 'road';
   }

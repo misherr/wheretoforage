@@ -56,6 +56,23 @@ git show b61b0a8:scripts/network-tiles.test.mjs
 and add the pyramid, a decoder hook and cancellation, rather than keeping 23
 tests guarding code that nothing runs.
 
+### A way with a road at both ends is walked from its first end, not the nearer one
+
+**Open — the user's call. Measured 2026-09-10, not acted on.**
+
+`inferTrailheads` checks a way's first end, then its last, and records the
+first that meets a drivable road. That is one trailhead per way, and every cell
+on the way measures its walk from it. **24,984 of 60,408 inferred-trailhead ways
+(41.4%) meet a drivable road at both ends** — mostly tracks and spurs running
+between two roads — so for the cells nearer the other end, the walk shown is
+longer than the walk that exists.
+
+The fix is to store both ends as candidate trailheads and let each cell take the
+nearer one along the way. It would shorten a large number of shipped walks,
+which is why it is not folded into a verification-sized change: it wants its own
+before/after, and a decision about whether "the nearer end" should also prefer a
+paved road over a high-clearance one when both are drivable.
+
 ### Drop Overpass for a Geofabrik extract
 
 **Not built. This is the answer if the bake gives trouble again — do not add a

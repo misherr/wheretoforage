@@ -93,6 +93,15 @@ while nothing throws.
   the network and answering "how do I reach this cell" are separate jobs; do not rebuild the first
   from the second. The OpenTopoMap credit is its licence's wording, not a courtesy.
   [docs/access.md](docs/access.md#roads-and-trails-on-the-map-are-somebody-elses-rendering)
+- **Categories and trailheads are decided at assembly, after the rules — never inherited from the
+  fetch.** Where OSM and USFS map the same road, USFS's maintenance level decides, except that OSM's
+  paved surface makes it drivable (not over the closed-roads layer) and `4wd_only=yes`,
+  `motor_vehicle=no` or `smoothness=impassable|very_horrible` make it rough. Over-snow USFS routes
+  are dropped. A USFS record is one way per path, never flattened. A trailhead is inferred only
+  after all of that, so a trail whose only road USFS calls high-clearance gets no walk rather than a
+  walk from where a car cannot go. Trailheads were once inferred during the fetch, against whatever
+  each source alone called drivable; 8.4% of them rested on such a road.
+  [docs/access.md](docs/access.md#two-sources-one-road)
 - **`access-geom.json` stays whole and lazy**, fetched for the *tapped* approach only: clipped
   geometry is right for drawing and wrong for measuring, and a clip is what truncated trails
   before v4.
@@ -208,7 +217,7 @@ node scripts/build-cells.mjs            # ~4 min: 305 terrain tiles, 579 LANDFIR
 node scripts/build-cells.mjs --resume   # after a connect timeout
 node scripts/build-cells.mjs --region=coast
 node scripts/build-access.mjs           # 40-80 min: ~316 Overpass tiles + USFS + terrain
-node scripts/build-access.mjs --resume  # re-assembles in ~3 min, zero requests
+node scripts/build-access.mjs --resume  # re-assembles in under a minute, zero requests*
 ```
 
 **Log a long bake to a file you can read while it runs.** `node
@@ -223,9 +232,14 @@ have now been degraded by Overpass one way or another. The fix is a local
 Geofabrik extract; see [ROADMAP.md](ROADMAP.md).
 
 **The access checkpoint is kept on success and re-assembling from it is free.**
-Everything after the fetch — route joining, elevation, what gets stored, the row
-format — is assembly. Deleting the checkpoint once turned an assembly change
-into a ten-hour re-fetch. Do not "tidy up" by removing it.
+Everything after the fetch — the category rules, trailhead inference, which way
+each cell is nearest, route joining, elevation, the row format — is assembly.
+The checkpoint holds only what the sources said. Deleting it once turned an
+assembly change into a ten-hour re-fetch. Do not "tidy up" by removing it.
+
+\* A checkpoint from before schema 2 is **upgraded, not refused**: USFS is
+fetched again by page (~25 requests) and the OSM tags that describe a road are
+asked for by tag (a few Overpass requests). After that, zero requests again.
 
 `data/weather.json` maintains itself — `weather.yml` runs two crons, one for both
 grids and one forecast-only. [docs/weather-archive.md](docs/weather-archive.md)

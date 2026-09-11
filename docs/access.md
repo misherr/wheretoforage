@@ -63,7 +63,11 @@ requested explicitly rather than treated as noise.
 `oper_maint_level`; 3–5 are maintained for passenger cars or better and count as
 drivable, 1–2 are high-clearance or closed and count as rough. There is a
 separate layer of roads closed to motorized use, which is decommissioned spurs
-directly. Trails come from the NFS trails layer.
+directly. Trails come from the NFS trails layer. All three are fetched by page
+for the whole region — about 25 requests, where the per-tile fetch made 948 —
+with **one way per path** of each record, and trails keep their `trail_type` so
+the over-snow routes can be dropped. See
+[Two sources, one road](#two-sources-one-road).
 
 Attribution: OSM data is ODbL, and the licence is recorded in the output's
 `provenance.sources`.
@@ -80,9 +84,15 @@ Attribution: OSM data is ODbL, and the licence is recorded in the output's
 
 ### Tags that look drivable and are not
 
-`highway=unclassified` with `4wd_only=yes`, or with a dirt/earth/ground surface,
-is reported as **rough** rather than as a road. So is `highway=road`, which means
-"classification unknown" rather than "drivable".
+A drivable `highway=` value with `4wd_only=yes`, `motor_vehicle=no`, or
+`smoothness=impassable`/`very_horrible` — or with a dirt/earth/ground surface —
+is reported as **rough** rather than as a road. Those tags describe the road, and
+a description beats a class. So is `highway=road`, which means "classification
+unknown" rather than "drivable".
+
+Where USFS also maps the road, its maintenance level decides instead, and the
+same three describing tags still override it — as does a paved surface in the
+other direction. See [Two sources, one road](#two-sources-one-road).
 
 ## What is stored
 
@@ -802,6 +812,179 @@ message, because the user would drive to it. Two consequences worth knowing:
 A pasted coordinate resolves through `showAt()`, the same function a map tap
 uses. That is deliberate: the last thing to go wrong in this area was two paths
 into `showPoint` that disagreed about a cell.
+
+## Two sources, one road
+
+OSM and USFS both map most forest roads on national forest land, and the bake
+used to keep both copies, each with its own category, each stamped onto cells and
+each able to carry a trailhead. Where they disagreed about the same road, a cell
+could read "drivable road mapped" off one copy while its rough entry was the
+other. Three fixes, applied at assembly in this order, and then everything
+downstream of a category — trailheads, which way each cell is nearest, the walks
+— is recomputed.
+
+Each was measured on its own by re-assembling the same checkpoint with one more
+rule switched on (the method is in
+[verification.md](verification.md#measuring-the-access-rules-one-at-a-time)):
+
+| step | what changed | cells whose class changed | walks gone / new |
+| --- | --- | --- | --- |
+| USFS by page, one way per path | the geometry | 1 | 10 / 1 |
+| over-snow routes dropped | 604 ways, 3,440 km | 850 | 883 / 31 |
+| describing tags on OSM-only roads | 169 roads | 6 | 5 / 7 |
+| USFS decides, with the exceptions | 1,347 roads | 894 | 722 / 427 |
+
+Against the file that shipped, cell by cell: **1,609 cells change class** — 743
+from drivable road to rough, 577 from trail to drivable road, 270 from trail to
+rough — **1,753 lose a walk and 536 gain one**, 297 get longer, 420 shorter, and
+8,150 are unchanged. The "almost certainly not the real approach" label is added
+to 96 cells and removed from 227.
+
+### Over-snow routes are not trails
+
+604 USFS "trails" (3,440 km) are `trail_type=SNOW` — groomed snowmobile and ski
+routes, many along roads, one along SR 20. In autumn they are the road, or
+nothing. Dropping them moved **850 cells**: 727 from "trail mapped" to "drivable
+road mapped", because the road the route ran along is what is there; 120 to
+rough; 3 to "mapped way nearby". 883 walks went with them, most measured from a
+trailhead inferred where the route met a road — a sno-park.
+
+### USFS decides, and a description of the road overrides it
+
+Where an OSM road or track runs along a USFS road record — within 20 m for at
+least 150 m and half the shorter of the two — the two are one road. **10,522 OSM
+ways have such a twin.** Where the USFS record covers at least half of the OSM
+way, its maintenance level decides the category: 1,093 OSM ways change from
+drivable to rough (OSM `unclassified` over a level-2 "high clearance vehicles"
+record, mostly) and 254 from rough to drivable (OSM `track` over a level-3
+"suitable for passenger cars" record).
+
+Two exceptions, because those OSM tags describe the road rather than classify
+it:
+
+- **paved** (`surface=paved`, `asphalt`, `concrete`, `chipseal`) stays drivable
+  over a level 1–2 record — 38 roads. USFS records lag; Bogachiel Road is paved
+  in OSM and gravel in USFS. Not over the closed-roads layer: paving says nothing
+  about a gate.
+- **`4wd_only=yes`, `motor_vehicle=no`, `smoothness=impassable` or
+  `very_horrible`** is rough over a level 3–5 record — 25 roads — and on an
+  OSM-only road too, which moved 6 cells. Where the two exceptions collide, rough
+  wins.
+
+And two limits, both found by checking the result against the live sources:
+
+- **USFS never decides a state or federal highway** (`motorway` to `secondary`
+  and their links) — 28 kept. The first run demoted State Route 410,
+  `highway=primary`, to rough.
+- **USFS decides only what it covers.** That same SR 410 way was 3.3 km long and
+  its "twin" a 337 m level-2 spur beside 7% of it: a genuine duplicate where they
+  overlap, and no basis for the other 93%. 533 OSM ways covered less than half by
+  their twin keep their own category.
+
+The OSM copy keeps its geometry, which is joined to the rest of the network. The
+USFS copy stays as well — it carries the road's number and covers what OSM lacks
+— and takes its twin's category only when an exception flipped the twin and the
+flipped twins cover 80% of it (22 records). 97 OSM ways run along two USFS
+records that disagree with each other and take the one they run along longest.
+253 USFS records still disagree with part of a twin, all partial overlaps.
+
+**Cost: 894 cells change class, 886 of them from drivable road to rough.** That is
+the intended direction — a level-2 road is not where a passenger car should be
+sent — and it is the rule's largest effect on walks, below.
+
+### A USFS record is one way per path
+
+An ArcGIS polyline is a list of paths, and **60 EDW records** in the bake's area
+arrive as several: 20 roads, 5 closed roads and 35 trails, 151 pieces between
+them. The old fetch flattened each into one line, which drew a straight segment
+across every gap — **91 of them, median 75 m, 90th percentile 879 m, and one of
+9,948 m on a trail**. 58 of those gaps are wider than the 40 m that joinRoutes
+bridges, so those pieces now stay separate and **43.6 km of line that was never
+road or trail is gone**. The other 33 gaps are close enough that joinRoutes
+chains the pieces again, as it would any segments of one named route.
+
+### Trailheads are inferred after all of that
+
+A trailhead is inferred where a non-road way ends within 60 m of a **drivable**
+road, so every rule above reaches it. Inferred trailheads fell from 58,661 to
+54,282; mapped ones barely moved (2,362 → 2,357, the difference being snow
+routes).
+
+**The check that mattered: no approach keeps a figure measured from a trailhead
+that is not one any more.** A trailhead counts as lost when no way, referenced by
+a cell or not, has a trailhead within 30 m of it after the rules: **1,476 of
+16,089** — 1,339 with no drivable road within 60 m any more, 137 on dropped snow
+routes. 3,301 approaches in 2,948 cells, counting every category a cell carries
+and not only the named one, walked from one of them. After the rules:
+
+| outcome | approaches |
+| --- | --- |
+| **no walk at all** — the way has no trailhead left | 2,596 |
+| a walk from a different point, longer | 266 |
+| a walk from a different point, shorter | 435 |
+| a walk from a different point, within 25 m of the old figure | 4 |
+| **the old figure, from the old point** | **0** |
+
+Every new point was checked independently of the code that chose it: of 14,957
+routes with an inferred trailhead, **0** lack a way the rules call drivable
+within 60 m of the point. 145 of the moved approaches now start at a surveyed
+trailhead node.
+
+**Why 435 got shorter**, since the expectation was longer or none:
+
+- 316 — a different way is now the nearest in that category. Typically the OSM
+  copy of a road USFS calls high-clearance is now rough, so it becomes the cell's
+  nearest rough way, with its own trailhead where it meets a road a car can use;
+  or the old way was a snow route and the next trail has a nearer trailhead.
+- 86 — the same route, walked from its **other end**. The first-end rule had put
+  the trailhead at the end that met the demoted road; that end no longer counts,
+  and the other end, at a real road, is nearer this cell. (41% of inferred-
+  trailhead ways meet a drivable road at both ends — see
+  [ROADMAP.md](../ROADMAP.md).)
+- 33 — the same route, now from a mapped trailhead node.
+
+**And against the sources themselves.** For a spread of 33 of those cells, both
+sources were asked live what lies around the old point and the new one. Every
+old point sat on a road USFS rates level 1–2 or closed — Forest Roads 41, 77, 78
+and 4104, Pinto Road, Foss River Road — or on a snow route that was dropped.
+Every new point sat on a level 3–5 road, a paved OSM road, an OSM road with no
+USFS record at all, or a surveyed trailhead node. Where a live query failed, the
+reconciled categories around the point were read instead, and agreed.
+
+The same check is what found both of the rule's limits above. The first run
+demoted **State Route 410** to rough off a 337 m spur, and made **150 motorway
+ramps and the I-5 Express Lanes** rough because they carry `motor_vehicle=no`.
+On a limited-access road that tag marks an HOV, transit or express lane, not a
+closed road, so `motorway` and `trunk` are exempt from it. `primary` and
+`secondary` are not: the closed stretch of Spirit Lake Highway is still rough.
+
+One judgement it surfaced and left standing: a paved OSM road lying along a USFS
+**closed-layer** record stays rough — All Seasons Drive near Cle Elum, 896 m
+along SPEX ARTH. A gate is not a surface, and the closed layer is the only thing
+in either source that records one.
+
+### Moving the work to assembly was not free, and it was measured first
+
+Categories, trailheads and cell stamping moved from the fetch to assembly so the
+rules could run before them. Done alone, with no rule, that renamed the way in
+**1,344 cells at a median distance change of 3 m** (90th percentile 12 m):
+stamping on the stored, 25 m-simplified geometry breaks near-ties between the
+OSM and USFS copies of one road differently from the full geometry the fetch
+used. 245 walks went — 112 because the named way flipped to a twin with no
+trailhead, 133 because a trail end fell just outside 60 m of a simplified road —
+and 182 appeared, mostly where the statewide road index found a road the per-tile
+check had not. About 0.3% of cells, measured and left, because the alternative
+is keeping full geometry in a checkpoint that is already 101 MB.
+
+### What the checkpoint holds now
+
+Schema 2: what the sources said — each OSM way's own classification plus the
+tags that describe the road (`pv` paved, `rd` the rough-describing tag), each
+USFS path with its maintenance level (`ml`) or trail type (`tt`) — and nothing a
+rule derives. A schema-1 checkpoint is upgraded on `--resume` rather than
+refused: USFS by page (about 25 requests) and the describing tags by tag (a few
+Overpass requests; the statewide query with a `highway` regex timed out on every
+mirror, so it asks by tag alone and splits an area that fails).
 
 ## Roads and trails on the map are somebody else's rendering
 
