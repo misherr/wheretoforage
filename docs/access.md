@@ -803,111 +803,98 @@ A pasted coordinate resolves through `showAt()`, the same function a map tap
 uses. That is deliberate: the last thing to go wrong in this area was two paths
 into `showPoint` that disagreed about a cell.
 
-## The trails layer draws a network, not the cells' references
+## Roads and trails on the map are somebody else's rendering
 
-The tap sheet answers "how do I reach this cell" one cell at a time. The layer
-answers "which ground has a route at all". The first version of it got that
-wrong in a way worth recording, because the mistake was conceptual rather than
-mechanical.
+The tap sheet answers "how would I reach this cell", one cell at a time, from
+`access.json`. The map answers "which ground has a route at all". Those are
+**separate jobs**, and two attempts to do the second with the data built for the
+first are why the map now draws a rendered raster instead.
 
-### What went wrong: a layer made of cell references
+### Why not our own vector layer
 
-The layer was built from `access.json`'s ways — and those are exactly **one
-nearest way per cell per category**:
+**The first version drew the cells' references.** `access.json` stores one
+nearest way per cell per category — 53,252 of the 460,370 ways the bake fetched
+(11.6%), and 597 of 43,587 in the Seattle tile (1.4%). Drawn as a map, that was a
+scatter of stubs on the square-mile lattice: 1.1 ways per connected piece, against
+5.3 in the real Seattle network. Clipping, the 2 km referencing radius and missing
+cells were each ruled out by measurement; selection was the whole cause.
 
-```js
-for (const rec of state.nearest.values())
-  for (const c of CATS) if (rec[c]) referenced.add(rec[c].wid);
-```
+**The second drew the whole network**, every fetched way, from z12 tiles, and
+showed a different fault: roads that OSM and USFS both map appeared **twice, a
+median 7 m apart, often as two different kinds**. 45,491 of the 309,394 km drawn
+(15%) was doubled. The pairs that visibly disagreed:
 
-**53,252 of the 460,370 ways the bake fetched — 11.6%.** In the Seattle tile,
-**597 of 43,587 — 1.4%.** Drawn as a map that produced short parallel stubs on a
-one-square-mile grid, trails starting and ending nowhere, and whole areas blank.
+| class | pairs | km | what the sources said (10 random samples each) |
+| --- | --- | --- | --- |
+| OSM drivable, USFS rough | 1,018 | 4,777 | OSM `unclassified`, USFS maintenance level 2 |
+| OSM rough, USFS drivable | 274 | 807 | OSM `track`, USFS maintenance level 3 |
+| a road under a USFS trail | 1,235 | 4,073 | the "trail" was a **snowmobile route**, `trail_type=SNOW` |
 
-Measured, which is what settled it:
+Where the two copies coincided the solid line hid the dashed one, so one road
+seemed to flip between drivable and rough along its length. Only 0.9% of the
+category changes between consecutive pieces of a named road were real.
 
-| | full network | the referenced set |
-| --- | --- | --- |
-| Seattle tile 164/357 | 43,587 ways in 8,184 connected pieces (**5.3 ways/piece**) | 597 in 562 pieces (**1.1**) |
-| Green River tile 166/359 | 1,862 ways in 846 pieces (2.2/piece) | 419 in 304 pieces (1.4) |
+Fixing that on a map is conflation — deciding, road by road, which of two sources'
+geometries is the road — and a renderer that draws a single source has already
+solved it for that source. The access data needed its own fixes for the same
+disagreement; they land separately, because they change figures rather than
+pixels.
 
-1.1 ways per connected piece is the whole diagnosis: almost every drawn way was
-its own island. The grid pattern was the cell lattice showing through — 226 baked
-cells in that tile, up to three categories each, one way apiece.
+### The overlay
 
-Three things it was *not*, all ruled out by measurement:
+OpenTopoMap's rendering of OSM, `https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png`,
+native to z17. Chosen from ten candidates, tile-probed at two forest sites:
 
-- **Not clipping.** 41,678 of 41,678 single-way routes matched their fetched
-  source length to within 2% or 30 m; `clipped: false`.
-- **Not the 2 km referencing radius.** 438,521 of 460,370 ways (95%) lie within
-  2 km of a baked cell. Eligibility was never the constraint; selection was.
-- **Not only sparseness.** A tile with no baked cells stores nothing at all —
-  tile 163/366 fetched 1,586 ways and kept 0, because no cell there passed the
-  habitat gate. That is why roads went missing in blocks rather than thinning out.
+- It is the only free, keyless source that draws the whole OSM network,
+  **including logging roads on private timber**. At Green River, z16, a logging
+  road plainly visible in the imagery was drawn by OpenTopoMap, faintly by Stadia,
+  and not at all by USFS, the USGS National Map transportation layer or Esri World
+  Transportation. The government sources are right where they have data, and much
+  bolete ground is private or state timber.
+- CalTopo's terms forbid use without written consent. USFS FSTopo tiles 404. USGS
+  topo and Thunderforest are opaque basemaps. Waymarked Trails draws only named
+  long-distance routes.
 
-### What replaced it
+Its tiles are opaque, so it is **multiplied** over the imagery, through a filter
+that first pushes its area fills to white so the multiply leaves the imagery
+alone: `saturate(.35) brightness(1.3) contrast(1.8)`. The satellite basemap is
+the default precisely so terrain and canopy can be read, so the tint was measured
+rather than judged: plain multiply darkened the imagery 21–22% and greened it,
+and this filter darkens it 1–1.5% over gentle forest and about 4% over steep,
+hillshaded slopes, with no colour shift. The method is in
+[verification.md](verification.md#the-roads-overlay).
 
-`data/network-tiles/12/<x>/<y>.json`, written by
-`scripts/build-network-tiles.mjs` from **every way the bake fetched**, with its
-own category per piece and its own manifest. It consults neither the cell
-references nor the ways table, and the app does not need `access.json` loaded to
-draw it. That independence is the fix: the conflation is what caused the bug.
+**Credit**: `Map data: © OpenStreetMap contributors, SRTM | Map style: ©
+OpenTopoMap (CC-BY-SA)`, the wording OpenTopoMap's terms ask for. It is one
+constant, shared by the basemap and the overlay. The old basemap credit, "©
+OpenStreetMap, SRTM | OpenTopoMap", left out the licence and the style credit.
 
-| | |
-| --- | --- |
-| ways | 257,250 (of 460,370 fetched; 203,120 urban dropped) |
-| tiles | 3,662 at z12 + a 40 KB manifest |
-| on disk | 16.0 MB |
-| a forest viewport | **8 tiles, 87 KB uncompressed, ~35 KB gzipped** |
-| a Seattle viewport | 12 tiles, 527 KB uncompressed, ~210 KB gzipped |
+**Fallback**: Stadia Maps' `stamen_terrain_lines`, transparent and lines-only,
+selectable with `?roads=stadia` or by changing `ROAD_OVERLAY`. It needs the
+domains registered with Stadia, and its free tier is non-commercial; see
+[ROADMAP.md](../ROADMAP.md).
 
-### Why z12, and why the gate moved with it
+### What it costs
 
-The total barely depends on the tile size — 5.89 MB gzipped at z10 against
-6.52 MB at z12 — but the **viewport** does, and that is what a phone pays:
+- **It cannot be tapped or filtered by category.** Accepted: it has to be correct
+  and detailed, and the tap sheet still names the way, its kind and the approach
+  for any cell.
+- **It is another service's goodwill.** OpenTopoMap is fair-use, with no uptime
+  promise.
+- **It stands down on the OpenTopoMap basemap**, where it would only darken the
+  same map, and the legend says so.
+- **What is drawn is still only what is mapped.** The menu and legend say so — a
+  rendered line is no more a promise about the ground than one of ours was.
 
-| tiling | worst 2×2 view | worst 4×4 |
-| --- | --- | --- |
-| z10 | 494 KB | 1,094 KB |
-| z11 | 224 KB | 498 KB |
-| **z12** | **83 KB** | **234 KB** |
+### What deleting the vector layer reclaimed
 
-A phone covers 8 z12 tiles at app zoom 12 and 28 at zoom 11, so the gate moved
-from z11 to **z12**. At z12 a pixel is 26 m and a square-mile cell is 62 px,
-which is where a 25 m-simplified line reads as a line anyway. Below the gate the
-legend says "zoom in to see them".
+`data/network-tiles` (3,663 files, 16.1 MB tracked), `scripts/build-network-tiles.mjs`
+and its 23 tests, `src/tile-source.mjs`, the canvas layer in `index.html` and two
+layer-only constants: about 700 lines, and 16 MB off every checkout and every
+Pages deploy. Git history keeps all of it — the pack does not shrink unless
+history is rewritten, and a mirrored branch is not worth rewriting for 16 MB.
+Recover from `b61b0a8`.
 
-### The urban street grid is left out, and the legend says so
-
-`residential` alone is 191,941 ways and 493,227 vertices — **27% of all the
-geometry**, and the entire reason a full-network viewport costs 1.1 MB in Seattle.
-This app is for timber; "which ground has a route" is never answered by a
-residential street. Excluded by type: `residential`, `living_street`,
-`service`, `cycleway`, `footway`, `steps`. Everything else survives — every
-`track`, `path`, `bridleway`, `unclassified`, the USFS layers, and the arterials
-you drive to reach them.
-
-**Filtering by name does not work.** 93% of residential ways are named, so a
-"major or named" filter keeps the entire city grid — measured at 437,743 of
-460,370 ways kept, which is no filter at all. Type is the only thing that
-separates them.
-
-The manifest carries the exclusion list, and the legend states it where the lines
-are: *"city streets left out"*, with the full sentence on hover — **"their absence
-is not missing data"**. That wording exists because the bug this replaced looked
-exactly like absent ways, and an unexplained gap would read as the same fault
-twice.
-
-### Why the checkpoint mattered, and still does
-
-None of this needed a re-fetch. `data/access.json.checkpoint.json` holds all
-460,370 fetched ways with geometry, category and type, so the tiles are a local
-transform of a file already on disk — about a minute. The bake also calls
-`writeNetworkTiles` itself from its in-memory ways, so a re-bake produces them
-without anyone remembering.
-
-That checkpoint is gitignored and 101.3 MB, which is over GitHub's hard per-file
-limit, so it cannot be committed. **The tiles are now the durable artifact**: once
-they are in the repo, losing the checkpoint costs a re-fetch only if the filter or
-the tiling scheme changes. See [ROADMAP.md](../ROADMAP.md) for the Geofabrik item
-that removes the dependency altogether.
+**The checkpoint is the only copy of the fetched network again.** The tiles had
+briefly made it redundant. Losing `data/access.json.checkpoint.json` now costs a
+full re-fetch; do not tidy it up.

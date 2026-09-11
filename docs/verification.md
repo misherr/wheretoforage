@@ -269,54 +269,58 @@ assertions for a while without being run by `npm test`. Two mutations that shoul
 have failed did not, which is how it was noticed. **After adding a test file,
 check the count in `npm test` actually went up.**
 
-## The trails layer
+## The roads overlay
 
-**The failure that got shipped was conceptual, and no assertion would have caught
-it.** The layer drew `access.json`'s ways, which are one nearest way per cell per
-category — 11.6% of the network, 1.4% in Seattle. Every test passed: the tiles
-were small, the clipping had no gaps, the stamp was carried. It took looking at
-Seattle on a map to see that the layer was a scatter of stubs on the cell lattice.
+It is a third party's raster, so there is little of ours to break — and what can
+break does it silently: a blend that multiplies against nothing, a credit that
+goes missing, a fallback that answers 401.
 
-The check that would have caught it is **connectivity**, and it is cheap:
+**The blend is on the pane, and it is applied.** With the overlay switched on:
 
 ```js
-// ways per connected component, on a 25 m endpoint join
-// the real network: 5.3 in Seattle, 2.2 in forest.  A layer showing 1.1 is not a network.
+leafletMap.getPane('roads').getAttribute('style')
+// z-index: 420; pointer-events: none; mix-blend-mode: multiply; filter: saturate(0.35) brightness(1.3) contrast(1.8);
+leafletMap.getPane('approach').style.zIndex     // 430: above the roads, or the road darkens the line
 ```
 
-Anything near 1.0 means every drawn way is an island, which is the signature of a
-selected set rather than a network. Run it on a dense urban tile, where the ratio
-is highest and any sparsification shows up worst.
+A blend set on the tile layer's own container, inside the pane, multiplies
+against the pane's empty backdrop: the tiles draw opaque and the imagery vanishes
+under a topo map.
 
-The three mechanisms to rule out separately, because they look identical on screen:
+**Measure the tint; do not eyeball it.** Composite the same tiles in a canvas —
+`globalCompositeOperation='multiply'`, `globalAlpha` and `ctx.filter` are the same
+arithmetic as the CSS — and compare mean luminance against the satellite alone.
+Esri, OpenTopoMap and Stadia all send `Access-Control-Allow-Origin: *`, so the
+canvas stays readable. Over three forest views:
 
-1. **Clipping** — compare each stored way's length against its source. 41,678 of
-   41,678 matched; `clipped: false`.
-2. **The referencing radius** — 438,521 of 460,370 ways (95%) are within 2 km of a
-   baked cell, so eligibility was never the limit.
-3. **Missing cells** — a tile with no baked cells contributes nothing. Tile
-   163/366 fetched 1,586 ways and kept 0. This is why roads vanished in blocks.
+| treatment | brightness against the satellite alone |
+| --- | --- |
+| multiply, 100% | −21 to −22%, and greened |
+| multiply at 70% / 50% | −15% / −11%, with the lines faded just as much |
+| multiply, greyscale | −22% |
+| multiply, `saturate(.35) brightness(1.15) contrast(1.6)` | −3.5 to −5.5%, but −9% on steep ground |
+| **multiply, `saturate(.35) brightness(1.3) contrast(1.8)`** | **−1 to −1.5%, −4% on steep ground, no colour shift** |
 
-**A stale tile set.** The manifest is fetched `no-cache` and its `generated`
-stamps every tile URL, so a tile set describes itself and the layer needs nothing
-from `access.json`:
+**Measure a steep view too.** The first filter looked finished on three gentle forest views and
+darkened a steep slope near Mt Baker by 9%: OpenTopoMap's hillshade is darkest exactly where the
+terrain is worth reading. An average over gentle ground hides that.
 
-```js
-performance.getEntriesByType('resource').filter(e => /network-tiles/.test(e.name)).map(e => e.name)
-// the manifest URL carries no stamp; every 12/x/y.json carries ?g=<manifest.generated>
-```
+Opacity is the wrong knob: it scales the lines and the tint together. Whitening
+the fills removes the tint and keeps the lines. Full greyscale was rejected by
+looking, not by the numbers — a blue stream becomes a black line that reads as a
+track.
 
-**A regional bake overwriting the statewide tiles.** The writer took a module
-default once, so `--out=/tmp/a.json` wrote 3 tiles over the statewide set. After
-any regional bake:
+**The credit is the licence's, not a courtesy.** Whenever OpenTopoMap is on
+screen, as basemap or overlay, the attribution control must read
+`Map data: © OpenStreetMap contributors, SRTM | Map style: © OpenTopoMap (CC-BY-SA)`.
 
-```bash
-find data/network-tiles -name "*.json" | wc -l     # 3663: 3662 tiles + index.json
-```
+**Try the fallback before relying on it.** Load `?roads=stadia` from each
+production host. Until the domains are registered with Stadia every tile is a 401
+and the overlay is simply blank, with nothing on the page to say so — check the
+network panel, not the map.
 
-**And the judgement a test cannot make.** At z12 the forest should read as road
-systems you can trace and trails that run somewhere: 8 tiles, ~35 KB gzipped.
-Seattle will be dense with arterials, which is correct — they are what you drive —
-but if it reads as a street atlas the type filter in
-`scripts/build-network-tiles.mjs` is the knob, and `residential` is 27% of all
-geometry. Look at both before believing either.
+**And the lesson the vector layers left.** Both passed every test. The first drew
+one nearest way per cell — 11.6% of the network, 1.4% in Seattle, 1.1 ways per
+connected piece — and it took looking at Seattle to see a scatter of stubs. The
+second drew the whole network and showed 15% of it twice. Look at a dense urban
+view and a forest view before believing any map layer.

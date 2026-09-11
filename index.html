@@ -134,8 +134,6 @@ body.sheet-open #tap-hint{opacity:0}
 /* A line layer's swatch is a line, not a filled square — the menu and the legend should look like
    what they switch on. */
 #layers .sep{height:1px;background:var(--line);margin:6px 4px}
-#layers .subs{display:flex;flex-wrap:wrap;gap:2px 10px;padding:0 8px 4px 30px}
-#layers label.sub{padding:3px 0;font-size:12px}
 #legends i.ln,#layers i.ln{height:3px;border-radius:2px;width:16px;flex:none}
 .bars{display:grid;grid-template-columns:118px 1fr 40px;gap:6px 10px;align-items:center;font-size:13px}
 .bars .bg{height:8px;border-radius:4px;background:var(--moss-2);overflow:hidden}
@@ -242,11 +240,8 @@ import { parseCoords, formatCoords } from './src/coords.mjs';
 import { classifyAccess, accessDetail, accessRank, accessDistance, gainLabel, externalLinks,
          NO_TRAILHEAD_NOTE, decodeRow as decodeAccessRow, decodeWay as decodeAccessWay,
          CLASSES as ACCESS_CLASSES, ACCESS_FORMAT, accessAt, CELL_SCOPE_NOTE,
-         NOT_EXAMINED_LABEL, NOT_EXAMINED_NOTE, OFF_TRAIL_NOTE, CATS as ACCESS_CATS,
-         decodeGeom as decodeAccessGeom,
-         NO_ON_TRAIL_NOTE, onRouteLabel, LINE_STYLE, LINE_CASING,
-         TRAILS_MIN_ZOOM, NETWORK_OMITS, NETWORK_OMITS_LONG } from './src/access.mjs';
-import { tileSource } from './src/tile-source.mjs';
+         NOT_EXAMINED_LABEL, NOT_EXAMINED_NOTE, OFF_TRAIL_NOTE,
+         NO_ON_TRAIL_NOTE, onRouteLabel, LINE_STYLE, LINE_CASING } from './src/access.mjs';
 /* ===================== CONFIG ===================== */
 const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
 const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400; // local refine below 1 mi when zoomed way in
@@ -523,8 +518,13 @@ async function pointEntry(lat,lon,onProgress){
 
 /* ===================== MAP ===================== */
 const map=L.map('map',{zoomControl:false,attributionControl:true}).setView([47.4,-121.2],7);
+/* OpenTopoMap is CC-BY-SA, and its terms ask for this credit: the data, the SRTM terrain, the map
+   style and the licence. "© OpenStreetMap, SRTM | OpenTopoMap" left out the licence mark and the
+   style credit. One copy, shared by the basemap and the roads overlay below. */
+const OTM_URL='https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png';
+const OTM_ATTRIBUTION='Map data: © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, SRTM | Map style: © <a href="https://opentopomap.org">OpenTopoMap</a> (<a href="https://creativecommons.org/licenses/by-sa/3.0/">CC-BY-SA</a>)';
 const bases={
-  topo:L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',{maxZoom:17,attribution:'© OpenStreetMap, SRTM | OpenTopoMap'}),
+  topo:L.tileLayer(OTM_URL,{maxZoom:17,attribution:OTM_ATTRIBUTION}),
   usgs:L.tileLayer('https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}',{maxZoom:16,attribution:'USGS'}),
   sat:L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:18,attribution:'Esri, Maxar, Earthstar'})
 };
@@ -552,18 +552,6 @@ const OVERLAYS={
     val:e=>{const x=e.A&&e.A.fut&&e.A.fut[Math.min(T,e.A.fut.length-1)]; return x?x.M:null;}}
 };
 const active=new Set(['chance']);
-/* Line layers are a different kind of thing from the fills above: no per-cell value, no bands, and
-   they draw over the top rather than tinting a square. So they get their own registry rather than
-   being bent into the OVERLAYS contract — which expects val(e) per cell — and their own legend shape.
-   lineCat is which categories are drawn; rough roads are 45% of the geometry, so they can be turned
-   off on their own without touching the rest of the layer. */
-const LINE_LAYERS={
-  trails:{name:'Forest roads and trails',
-          sub:'What is MAPPED — not passable, open or legal. City streets left out.',
-          cats:['road','rough','trail']},
-};
-const lineActive=new Set();
-const lineCat=new Set(['road','rough','trail']);
 function bandFor(ov,v){ let b=null; for(const x of ov.bands) if(v>=x[0]) b=x; return b; }
 
 /* ---- single canvas for all cells ---- */
@@ -581,116 +569,78 @@ const CellCanvas=L.Layer.extend({
 });
 const cellLayer=new CellCanvas().addTo(map);
 
-/* ---- the trails layer: lines over the fills ----
+/* ---- roads and trails: a rendered raster overlay ----
 
-   A second canvas rather than Leaflet polylines. A z11 viewport holds up to ~1,300 ways averaging
-   12 points; that is 1,300 DOM-backed layer objects against one canvas and ~16,000 line segments,
-   and the canvas wins by enough that panning stays smooth on a phone.
+   Somebody else's finished cartography, drawn over ours. Two vector layers built from the access bake
+   came first, and both were wrong in ways the data could not fix: one drew only the ways cells
+   happened to reference — a scatter of stubs on the lattice — and the next drew the whole fetched
+   network, which showed every road OSM and USFS both map as two lines of two different kinds, a few
+   metres apart. De-duplicating two sources' geometry is a conflation problem; a renderer that draws
+   one source has already solved it. The trade, accepted knowingly: a raster cannot be tapped or
+   filtered by category. How you would reach a cell still comes from the access data, in the tap
+   sheet — drawing the network and answering that question are separate jobs.
 
-   Geometry arrives by viewport from src/tile-source.mjs — 95 KB gzipped for the worst two-tile view,
-   against the 5.52 MB of access-geom.json, which stays whole and lazy for the tapped approach. */
-let trailTiles=null;
-const trailsOn=()=>lineActive.has('trails');
-/* An independent map layer. It reads data/network-tiles, which carries the whole road and trail
-   network with a category per piece, and it consults neither the cell references nor the ways table.
-   The first version of this layer drew data/access-tiles — the ways some cell pointed at, 11.6% of
-   what the bake fetched and 1.4% of it in Seattle — which produced a scatter of stubs on the cell
-   lattice rather than a network. Nothing here needs access.json to be loaded at all. */
-function trailSource(){
-  if(!trailTiles) trailTiles=tileSource({
-    base:'data/network-tiles', manifestUrl:'data/network-tiles/index.json',
-    expectVersion:ACCESS_FORMAT,
-  });
-  return trailTiles;
-}
-const TrailCanvas=L.Layer.extend({
-  onAdd(m){ this._m=m; const c=this._c=L.DomUtil.create('canvas','leaflet-zoom-hide');
-    c.style.position='absolute'; c.style.pointerEvents='none';
-    m.getPanes().overlayPane.appendChild(c);
-    m.on('moveend zoomend viewreset resize',this._reset,this); this._reset(); },
-  onRemove(m){ m.getPanes().overlayPane.removeChild(this._c); m.off('moveend zoomend viewreset resize',this._reset,this); },
-  _reset(){ const m=this._m,sz=m.getSize(),r=window.devicePixelRatio||1;
-    L.DomUtil.setPosition(this._c,m.containerPointToLayerPoint([0,0]));
-    this._c.width=sz.x*r; this._c.height=sz.y*r; this._c.style.width=sz.x+'px'; this._c.style.height=sz.y+'px';
-    /* The legend changes with the zoom, not just with the toggles: below TRAILS_MIN_ZOOM it has to
-       say "zoom in to see them" rather than listing three styles that are not being drawn. A zoom
-       change reaches this layer and nothing else, so the legend is rendered from here. */
-    this.draw(); renderLegends(); this.load(); },
-  /* Fetch what the viewport needs, then redraw. Draw first from whatever is already in memory so a
-     pan never blanks the ground the viewer was just looking at. */
-  async load(){ if(!trailsOn()||this._m.getZoom()<TRAILS_MIN_ZOOM) return;
-    const src=trailSource(); if(!src) return;
-    const b=this._m.getBounds();
-    await src.ensure({south:b.getSouth(),west:b.getWest(),north:b.getNorth(),east:b.getEast()});
-    this.draw(); renderLegends(); },
-  draw(){ const m=this._m; if(!m) return;
-    const ctx=this._c.getContext('2d'),r=window.devicePixelRatio||1;
-    ctx.setTransform(r,0,0,r,0,0); const sz=m.getSize(); ctx.clearRect(0,0,sz.x,sz.y);
-    if(!trailsOn()||m.getZoom()<TRAILS_MIN_ZOOM) return;
-    const src=trailSource(); if(!src) return;
-    const b=m.getBounds();
-    const tiles=src.ready({south:b.getSouth(),west:b.getWest(),north:b.getNorth(),east:b.getEast()});
-    if(!tiles.length) return;
-    /* Group every piece by category first, so each style is set once and the draw order is
-       deterministic rather than following whatever order the tiles happened to arrive in.
+   OpenTopoMap, because of the free, keyless sources it is the only one that draws the whole OSM
+   network, including the logging roads on private timber that USFS, USGS and Esri all leave blank.
+   Its tiles are opaque, so it is MULTIPLIED over the imagery rather than laid on top, and the filter
+   first pushes its area fills — forest green, hillshade — to white, so the multiply leaves the
+   imagery alone and only the lines darken it. Measured over three forest views against the satellite
+   alone: plain multiply darkened it 21-22% and tinted it green, and lowering the opacity only fades
+   the lines along with the tint; this filter darkens it 1-1.5% over three forest views
+   and 4% over steep, hillshaded Cascade ground, where OpenTopoMap's shading is darkest, with no colour
+   shift. The desaturation is partial on purpose — in greyscale a blue stream becomes a black line that reads as a track.
 
-       The category is in the tile. It used to be looked up in STATIC.access.ways by index, which
-       only worked because the layer was drawing that table's ways — 407,000 of the network's ways
-       have no entry in it. */
-    const byCat=new Map();
-    for(const t of tiles) for(const [ci,flat] of t.ways){
-      const cat=ACCESS_CATS[ci]; if(!cat||!lineCat.has(cat)) continue;
-      if(!byCat.has(cat)) byCat.set(cat,[]); byCat.get(cat).push(flat);
-    }
-    const cats=[...byCat.keys()].sort((a,b)=>LINE_STYLE[a].order-LINE_STYLE[b].order);
-    const path=(flat)=>{ const pts=decodeAccessGeom(flat); if(pts.length<2) return false;
-      let started=false;
-      for(const p of pts){ const q=m.latLngToContainerPoint(p);
-        if(!started){ ctx.moveTo(q.x,q.y); started=true; } else ctx.lineTo(q.x,q.y); }
-      return started; };
-    ctx.lineCap='round'; ctx.lineJoin='round';
-    for(const pass of ['casing','line']) for(const cat of cats){
-      const st=LINE_STYLE[cat];
-      ctx.beginPath();
-      for(const flat of byCat.get(cat)) path(flat);
-      if(pass==='casing'){ ctx.setLineDash([]); ctx.strokeStyle=LINE_CASING; ctx.globalAlpha=0.55; ctx.lineWidth=st.width+2.6; }
-      else { ctx.setLineDash(st.dash||[]); ctx.strokeStyle=st.colour; ctx.globalAlpha=1; ctx.lineWidth=st.width; }
-      ctx.stroke();
-    }
-    ctx.setLineDash([]); ctx.globalAlpha=1; },
-});
-const trailLayer=new TrailCanvas().addTo(map);
+   Stadia's lines-only style is the fallback: transparent, drawn light, no blend needed, and not
+   dependent on OpenTopoMap's donated servers, which are fair-use with no uptime promise. It is not
+   the default because its free tier is non-commercial and needs this site's domains registered with
+   Stadia first. ?roads=stadia tries it without a deploy; changing ROAD_OVERLAY switches everyone.
+   See ROADMAP.md. */
+const ROAD_OVERLAYS={
+  opentopomap:{name:'OpenTopoMap',url:OTM_URL,maxNativeZoom:17,attribution:OTM_ATTRIBUTION,
+    css:'mix-blend-mode:multiply;filter:saturate(.35) brightness(1.3) contrast(1.8)',
+    base:'topo'},     // the basemap that already IS this map
+  stadia:{name:'Stadia Maps',url:'https://tiles.stadiamaps.com/tiles/stamen_terrain_lines/{z}/{x}/{y}{r}.png',maxNativeZoom:18,
+    attribution:'© <a href="https://stadiamaps.com/">Stadia Maps</a> © <a href="https://stamen.com/">Stamen Design</a> © <a href="https://openmaptiles.org/">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    css:'',base:null},
+};
+const ROAD_OVERLAY=(()=>{ const q=new URLSearchParams(location.search).get('roads'); return q&&ROAD_OVERLAYS[q]?q:'opentopomap'; })();
+/* Its own pane, above the fills (400) and below the approach line. The blend and the filter go on the
+   PANE: a Leaflet pane is a stacking context, so a blend set on anything inside it would multiply
+   against an empty backdrop and change nothing. */
+const roadsPane=map.createPane('roads');
+roadsPane.style.zIndex=420; roadsPane.style.pointerEvents='none';
+roadsPane.style.cssText+=';'+ROAD_OVERLAYS[ROAD_OVERLAY].css;
+map.createPane('approach').style.zIndex=430;
+const roadLayer=L.tileLayer(ROAD_OVERLAYS[ROAD_OVERLAY].url,{pane:'roads',maxZoom:18,
+  maxNativeZoom:ROAD_OVERLAYS[ROAD_OVERLAY].maxNativeZoom,attribution:ROAD_OVERLAYS[ROAD_OVERLAY].attribution});
+let roadsWanted=false;
+/* OpenTopoMap multiplied over OpenTopoMap only darkens it, so the overlay stands down on that basemap
+   and the legend says why rather than leaving a switch that appears to do nothing. */
+const roadsRedundant=()=>ROAD_OVERLAYS[ROAD_OVERLAY].base===baseOrder[baseIdx];
+function syncRoads(){ const on=roadsWanted&&!roadsRedundant();
+  if(on&&!map.hasLayer(roadLayer)) roadLayer.addTo(map); else if(!on&&map.hasLayer(roadLayer)) roadLayer.remove(); }
 
-function renderAll(){ cellLayer.draw(); trailLayer.draw(); trailLayer.load(); renderLegends(); if(hintArmed&&cells.size){ hintArmed=false; showTapHint(); } }
+function renderAll(){ cellLayer.draw(); renderLegends(); if(hintArmed&&cells.size){ hintArmed=false; showTapHint(); } }
 function renderLegends(){
   let h=[...active].sort((a,b)=>OVERLAYS[a].order-OVERLAYS[b].order).map(k=>{const ov=OVERLAYS[k];return `<div class="lg"><b>${ov.name}</b>`+ov.bands.map(x=>`<span><i style="background:${x[2]}"></i>${x[1]}</span>`).join('')+`</div>`;}).join('');
-  if(trailsOn()){
-    /* Below the gate, say so rather than drawing nothing and leaving the viewer to wonder whether
-       there is no data or no road. */
-    const z=map.getZoom();
-    h+=`<div class="lg"><b>Mapped ways</b>`
-      +(z<TRAILS_MIN_ZOOM
-        ? `<span>zoom in to see them</span>`
-        : ['road','rough','trail'].filter(c=>lineCat.has(c))
-            .map(c=>`<span><i class="ln" style="background:${LINE_STYLE[c].colour}${LINE_STYLE[c].dash?';opacity:.85':''}"></i>${LINE_STYLE[c].label}</span>`).join('')
-          + `<span style="color:var(--pore-dim)">mapped, not confirmed passable</span>`
-          /* Said where the lines are, not only in the menu: an absent street reads exactly like the
-             missing-ways bug this layer replaced. */
-          + `<span class="caveat" title="${NETWORK_OMITS_LONG}">${NETWORK_OMITS}</span>`)
+  if(roadsWanted){
+    /* Said where the lines are: whose drawing it is, and that a drawn road is a mapped road. */
+    h+=`<div class="lg"><b>Roads and trails</b>`
+      +(roadsRedundant()
+        ? `<span>already drawn by this basemap</span>`
+        : `<span>as ${ROAD_OVERLAYS[ROAD_OVERLAY].name} draws them</span><span style="color:var(--pore-dim)">mapped, not confirmed passable or open</span>`)
       +`</div>`;
   }
   $('legends').innerHTML=h; }
 function buildLayersMenu(){
   const fills=Object.keys(OVERLAYS).sort((a,b)=>OVERLAYS[a].order-OVERLAYS[b].order).reverse().map(k=>{const ov=OVERLAYS[k];return `<label><input type="checkbox" data-o="${k}" ${active.has(k)?'checked':''}><i style="background:${ov.bands[Math.floor(ov.bands.length/2)][2]}"></i><span>${ov.name}<small>${ov.sub}</small></span></label>`;}).join('');
-  /* A line swatch rather than a filled square, because that is what it draws. */
-  const lines=Object.entries(LINE_LAYERS).map(([k,ly])=>`<label><input type="checkbox" data-l="${k}" ${lineActive.has(k)?'checked':''}><i class="ln" style="background:${LINE_STYLE.trail.colour}"></i><span>${ly.name}<small>${ly.sub}</small></span></label>`).join('');
-  /* Rough roads are 45% of the mapped geometry, so they get their own switch: with them on, the map
-     answers "what can I drive"; with them off, "where are the trails". */
-  const subs=`<div class="subs">`+['road','rough','trail'].map(c=>`<label class="sub"><input type="checkbox" data-c="${c}" ${lineCat.has(c)?'checked':''}><i class="ln" style="background:${LINE_STYLE[c].colour}"></i><span>${LINE_STYLE[c].label}</span></label>`).join('')+`</div>`;
-  $('layers').innerHTML=fills+`<div class="sep"></div>`+lines+subs;
+  /* A line swatch rather than a filled square, because that is what it draws. One switch, not three:
+     a rendered raster cannot be filtered by category, which is the trade made for somebody else's
+     finished cartography. */
+  const roads=`<label><input type="checkbox" data-r="roads" ${roadsWanted?'checked':''}><i class="ln" style="background:#4a4a40"></i><span>Forest roads and trails<small>OpenStreetMap as ${ROAD_OVERLAYS[ROAD_OVERLAY].name} draws it — what is mapped, not passable, open or legal</small></span></label>`;
+  $('layers').innerHTML=fills+`<div class="sep"></div>`+roads;
   $('layers').querySelectorAll('input[data-o]').forEach(inp=>inp.onchange=()=>{ if(inp.checked) active.add(inp.dataset.o); else active.delete(inp.dataset.o); renderAll(); });
-  $('layers').querySelectorAll('input[data-l]').forEach(inp=>inp.onchange=()=>{ if(inp.checked) lineActive.add(inp.dataset.l); else lineActive.delete(inp.dataset.l); renderAll(); });
-  $('layers').querySelectorAll('input[data-c]').forEach(inp=>inp.onchange=()=>{ if(inp.checked) lineCat.add(inp.dataset.c); else lineCat.delete(inp.dataset.c); renderAll(); }); }
+  $('layers').querySelector('input[data-r]').onchange=ev=>{ roadsWanted=ev.target.checked; syncRoads(); renderLegends(); }; }
 
 /* ---- timeline ---- */
 let playing=false, playTimer=null;
@@ -1352,12 +1302,13 @@ async function drawApproach(wayIndex,cell,link){
   const way=decodeAccessWay(STATIC.access.ways[wayIndex],geoms[wayIndex]);
   if(approachLayer){ approachLayer.remove(); approachLayer=null; }
   if(!way||!way.geom||way.geom.length<2) return;
-  /* The same palette the trails layer uses. It was #e58a2b for a road, which is the chance
-     overlay's "Good" band — a tapped line that borrows a scoring colour reads as data it is not. */
+  /* LINE_STYLE's palette. It was #e58a2b for a road, which is the chance overlay's "Good" band — a
+     tapped line that borrows a scoring colour reads as data it is not. Its own pane sits above the
+     roads overlay, which is multiplied: beneath it, the line would be darkened by the road it traces. */
   const colour = (LINE_STYLE[way.cat]||LINE_STYLE.rough).colour;
   approachLayer=L.layerGroup([
-    L.polyline(way.geom,{color:'#0f150f',weight:7,opacity:.55}),
-    L.polyline(way.geom,{color:colour,weight:3,dashArray:'7 5'}),
+    L.polyline(way.geom,{color:LINE_CASING,weight:7,opacity:.55,pane:'approach'}),
+    L.polyline(way.geom,{color:colour,weight:3,dashArray:'7 5',pane:'approach'}),
   ]).addTo(map);
   const b=L.latLngBounds(way.geom).pad(0.25);
   if(cell) b.extend([cell.lat,cell.lon]);
@@ -1457,7 +1408,7 @@ function gotoSubmit(){
 }
 $('goto-add').onclick=gotoSubmit;
 $('goto-input').addEventListener('keydown',ev=>{ if(ev.key==='Enter'){ ev.preventDefault(); gotoSubmit(); } });
-$('btn-base').onclick=()=>{ bases[baseOrder[baseIdx]].remove(); baseIdx=(baseIdx+1)%baseOrder.length; bases[baseOrder[baseIdx]].addTo(map); setStatus(['Satellite','Topo map','USGS topo'][baseIdx]); };
+$('btn-base').onclick=()=>{ bases[baseOrder[baseIdx]].remove(); baseIdx=(baseIdx+1)%baseOrder.length; bases[baseOrder[baseIdx]].addTo(map); syncRoads(); renderLegends(); setStatus(['Satellite','Topo map','USGS topo'][baseIdx]); };
 $('btn-loc').onclick=()=>{ if(!navigator.geolocation){setStatus('Location not available');return;} setStatus('Finding you…'); navigator.geolocation.getCurrentPosition(pos=>{ userLoc=[pos.coords.latitude,pos.coords.longitude]; L.circleMarker(userLoc,{radius:6,color:'#fff',weight:2,fillColor:'#4a90d9',fillOpacity:1}).addTo(map); map.setView(userLoc,9); setStatus('Centered on your location'); },()=>setStatus('Location permission denied'),{enableHighAccuracy:false,timeout:10000}); };
 
 loadState();

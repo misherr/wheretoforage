@@ -39,21 +39,14 @@ export const CLASSES = {
 export const CLASS_ORDER = ['trail', 'road', 'rough', 'near', 'unknown'];
 export const CATS = ['road', 'trail', 'rough'];      // the order they are stored in a row
 
-/* How a way is DRAWN on the trails layer.
+/* How the tapped approach line is coloured, by the category of the way it follows.
 
-   Style carries the category, not hue. The fills already occupy the palette — yellow through red for
-   chance, greens for habitat, blues for rain, olives for soil — and the approach line was using
-   #e58a2b for a road, which is exactly the chance layer's "Good" band. A line layer whose colour
-   means something on another layer is worse than no layer. So: solid means you can drive it, dashed
-   means high-clearance or unknown, dotted means you are walking, and lightness separates them a
-   second time. That survives being drawn over any fill, and it survives colour blindness.
-
-   Every line also gets a dark casing stroked underneath at nearly twice the width, the same trick
-   the tapped approach line already used, because a 2 px line over a satellite basemap disappears
-   into it otherwise.
-
-   The order is the draw order: rough first, then road, then trail on top. A trail is the thing
-   hardest to see and the thing most worth seeing. */
+   Lightness carries the category, not hue. The fills already occupy the palette — yellow through red
+   for chance, greens for habitat, blues for rain, olives for soil — and the approach line once used
+   #e58a2b for a road, which is exactly the chance layer's "Good" band. A line whose colour means
+   something on another layer is worse than no line. The dash and width fields are left over from the
+   vector trails layer, which drew every way with them; the roads-and-trails overlay is now a rendered
+   raster (see index.html), and only the approach line reads this table. */
 export const LINE_STYLE = {
   rough: { label: 'Rough road', colour: '#cfc6ae', width: 1.9, dash: [7, 5], order: 0,
            note: 'logging spurs and unmaintained roads' },
@@ -63,25 +56,6 @@ export const LINE_STYLE = {
            note: 'path, bridleway or USFS trail' },
 };
 export const LINE_CASING = '#0f150f';
-
-/* The layer is useless below this and would be a smear of ink. At z9 a pixel is 207 m and a
-   square-mile cell is 7.8 px across; at z12 a pixel is 26 m and the cell is 62 px, which is where a
-   25 m-simplified line reads as a line.
-
-   z12 rather than z11 because the layer now carries the whole network rather than one way per cell,
-   and the viewport is what costs: a phone covers 8 z12 tiles at app zoom 12 and 28 of them at zoom
-   11, which is 150-230 KB against 400-500 KB over Seattle. The app's own sub-mile refine appears at
-   z12 too, so the two agree about where "zoomed in" starts. */
-export const TRAILS_MIN_ZOOM = 12;
-
-/* What the layer does not draw, said in the legend rather than left to be discovered. An absent
-   street is indistinguishable from a bug — and the bug this replaced looked exactly like absent
-   ways — so the omission has to be stated where the lines are. 203,120 urban ways are left out of
-   257,250 kept: this app is for timber, not city blocks. */
-export const NETWORK_OMITS = 'city streets left out';
-export const NETWORK_OMITS_LONG =
-  'Residential streets, service roads and sidewalks are deliberately not drawn — this map is for '
-  + 'forest roads and trails. Their absence is not missing data.';
 
 /* What to call the on-route leg of an approach. A road is not a trail, and saying "4.8 mi on the
    trail" about a forest road is the sort of small wrongness that makes a reader discount the

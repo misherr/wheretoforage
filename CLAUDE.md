@@ -19,10 +19,9 @@ src/model/      the ecological model — the science, and nothing else
 src/grid.mjs    the cell lattice, the state outline, terrainAt, pointKey
 src/access.mjs  how you would reach a cell — a separate axis, never a score input
 src/coords.mjs  the coordinate readout and the paste parser
-src/tile-source.mjs  viewport tile loading: manifest, stamped z/x/y, LRU — reusable
 scripts/        build-cells.mjs, build-access.mjs, fetch-weather.mjs, serve.mjs
 tests/model/    the model regression suite
-data/           cells.json, weather.json, evt-names.json, access.json (+ -geom), network-tiles/ — checked in
+data/           cells.json, weather.json, evt-names.json, access.json (+ -geom) — checked in
 ```
 
 Washington is divided into ~48,000 one-square-mile cells. Each carries baked
@@ -85,17 +84,18 @@ while nothing throws.
   scored as though their trees were ideal, for days, invisibly.
 - **The model is deterministic and takes `doy` as an argument.** Nothing under
   `src/model/` may read the clock, the DOM or the network.
-- **The trails layer is a map layer, not a projection of cell references.** It draws
-  `data/network-tiles/12/<x>/<y>.json` — every way the bake fetched, minus the urban street grid,
-  with its own category per piece and its own stamp. It needs nothing from `access.json`. Building it
-  from the ways *cells referenced* (11.6% of the network, 1.4% in Seattle) produced a scatter of
-  disconnected stubs on the cell lattice; that conflation is the bug, so the independence is the fix.
-  [docs/access.md](docs/access.md#the-trails-layer-draws-a-network-not-the-cells-references)
-- **Geometry is loaded by viewport, never whole.** 8 z12 tiles and ~35 KB gzipped for a forest view,
-  against 16 MB for the whole network. `access-geom.json` stays whole and lazy for the *tapped*
-  approach: clipped geometry is right for drawing and wrong for measuring, and a clip is what
-  truncated trails before v4. `src/tile-source.mjs` is the loader and is meant to be reused by the
-  30 m rebuild.
+- **Roads and trails on the map are a rendered raster, not our data.** The overlay is OpenTopoMap's
+  rendering of OSM, multiplied over the imagery through a filter that whitens its fills
+  (`ROAD_OVERLAYS` in `index.html`). The blend and filter are set on the Leaflet **pane** — set on
+  anything inside it they multiply against nothing — and the approach line has a pane above it. Two
+  vector layers built from the access bake came first: one drew the cells' references, a scatter of
+  stubs; the next drew OSM's and USFS's copies of the same road as two lines of two kinds. Drawing
+  the network and answering "how do I reach this cell" are separate jobs; do not rebuild the first
+  from the second. The OpenTopoMap credit is its licence's wording, not a courtesy.
+  [docs/access.md](docs/access.md#roads-and-trails-on-the-map-are-somebody-elses-rendering)
+- **`access-geom.json` stays whole and lazy**, fetched for the *tapped* approach only: clipped
+  geometry is right for drawing and wrong for measuring, and a clip is what truncated trails
+  before v4.
 - **Every entry gets its access from the cell that contains it, in one place.**
   `withAccess()` in `index.html` wraps every `makeEntry` call — baked cells, the
   sub-mile refine, a live block score, an exact point. It cannot live in
@@ -209,7 +209,6 @@ node scripts/build-cells.mjs --resume   # after a connect timeout
 node scripts/build-cells.mjs --region=coast
 node scripts/build-access.mjs           # 40-80 min: ~316 Overpass tiles + USFS + terrain
 node scripts/build-access.mjs --resume  # re-assembles in ~3 min, zero requests
-node scripts/build-network-tiles.mjs    # the map layer's tiles, from the checkpoint: ~1 min
 ```
 
 **Log a long bake to a file you can read while it runs.** `node

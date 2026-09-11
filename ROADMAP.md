@@ -12,27 +12,49 @@ deferred work.
 
 ## Access
 
-### The tile loader is the seam the 30 m rebuild should reuse
+### The roads overlay rests on OpenTopoMap's goodwill
 
-`src/tile-source.mjs` knows about a manifest, `z/x/y` addressing, a bake stamp, a
-fetch budget and an LRU cap, and nothing about roads, trails or elevation. The
-trails layer is its first consumer. A 30 m raster or vector layer should be its
-second rather than a second implementation of the same thing — the last thing to
-go wrong in this app was one lookup living in one of four paths instead of a
-shared seam, and this is that lesson applied before the fact.
+**Shipped as the default. The fallback is wired in but not usable in production
+until the user registers the domains with Stadia.**
 
-What a second consumer would need that is not there yet:
+The roads-and-trails overlay is OpenTopoMap's rendering of OpenStreetMap,
+multiplied over the imagery (`ROAD_OVERLAYS` in `index.html`). OpenTopoMap runs
+on donated servers: no key, fair use "provided the server is not overly
+strained", no uptime promise, and the operators ask to be told about sustained
+use. That is fine at today's traffic and fragile if it grows. Telling them is the
+user's message to send.
 
-- **More than one zoom level.** Today the source reads `z` from its manifest and
-  serves one level. A raster pyramid wants a level per zoom and a rule for which
-  one a viewport should ask for.
-- **A decoder hook.** Tiles are assumed to be JSON. A PNG or a binary tile needs
-  the parse step injected rather than assumed.
-- **Cancellation.** Panning fast queues fetches for tiles that have already
-  scrolled away. At 9 KB a tile that is waste worth ignoring; at raster sizes it
-  is not.
+**The fallback is Stadia Maps' `stamen_terrain_lines`**: transparent, lines only,
+OSM-based, drawn light, so it needs no blend. It is already in `ROAD_OVERLAYS`
+with its credit. `?roads=stadia` tries it on any deploy, and changing
+`ROAD_OVERLAY` switches everyone — **no rebuild**, because the overlay carries no
+data of ours. It needs a free Stadia account with `wheretoforage.com` and
+`dev.wheretoforage.com` registered for domain authentication; until then Stadia
+answers 401 from those hosts. It works from `localhost` without one.
 
-None of that is worth building until there is a second consumer to shape it.
+**Neither free tier is the permanent answer.** Stadia's free tier is
+**non-commercial**, which conflicts with any premium plan on this app. If
+OpenTopoMap becomes unreliable, the durable fix is a **paid Stadia tier or
+self-hosting** — rendering OSM ourselves from a Geofabrik extract. Statewide
+z12–15 is hundreds of thousands of tiles and gigabytes, which is past what GitHub
+Pages will carry, so self-hosting also means a tile host.
+
+### The vector tile loader is deleted; recover it from `b61b0a8`
+
+`src/tile-source.mjs` — manifest, stamped `z/x/y` URLs, a fetch budget, an LRU
+cap — went with the vector trails layer, its only consumer. It had been kept as
+the seam for the 30 m rebuild, but it was the wrong shape for that: one zoom
+level, JSON-only tiles, no cancellation of tiles that had scrolled away. If the
+30 m layer is raster, Leaflet's own tile layer does all of it already. If it is
+vector, start from
+
+```bash
+git show b61b0a8:src/tile-source.mjs
+git show b61b0a8:scripts/network-tiles.test.mjs
+```
+
+and add the pyramid, a decoder hook and cancellation, rather than keeping 23
+tests guarding code that nothing runs.
 
 ### Drop Overpass for a Geofabrik extract
 
@@ -90,9 +112,10 @@ is the whole v5 verification pass again. Realistically a day, and it puts every
 cell's access figures at risk. Worth doing on its own, with its own verification;
 not worth folding into a display-layer change.
 
-**What made it less urgent.** The network tiles are now a committed artifact, so
-the 101.3 MB checkpoint is no longer the only copy of anything shipped. Losing it
-costs a re-fetch only if the tile filter or the tiling scheme changes.
+**What made it more urgent again.** The vector trails layer's tiles briefly made
+the 101.3 MB checkpoint something other than the only copy of the fetched
+network. They were deleted with the layer, so it is the only copy once more:
+losing it costs a full re-fetch, through Overpass.
 
 **What it does not change.** USFS roads and trails still come from the EDW
 ArcGIS endpoints, which have never given trouble, and the terrain tiles still

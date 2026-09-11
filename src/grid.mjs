@@ -67,8 +67,7 @@ export function terrainAt(getE,lat,lon,d,dl){
    under the bake while the app kept reading the old pixels. It is map geometry, not ecology, so it
    belongs beside the lattice and outside src/model/.
 
-   Used at z10 for Terrarium terrain tiles by both bakes, and by src/tile-source.mjs for the access
-   geometry tiles the trails layer loads. */
+   Used at z10 for Terrarium terrain tiles by both bakes and by the app. */
 export function tileXY(lat, lon, z){
   const n = 2 ** z, x = (lon + 180) / 360 * n, lr = lat * Math.PI / 180;
   return { x, y: (1 - Math.log(Math.tan(lr) + 1 / Math.cos(lr)) / Math.PI) / 2 * n };
