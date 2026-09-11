@@ -69,6 +69,31 @@ place to keep a few hundred MB, and a note in provenance saying which extract
 date the bake used, which is strictly better than "whatever Overpass returned
 that afternoon".
 
+**It has to be the PBF, not the shapefiles.** Geofabrik publishes both for
+Washington — `washington-latest.osm.pbf` at 363 MB and
+`washington-latest-free.shp.zip` at 722 MB, both rebuilt daily. The shapefiles
+would be far easier to read (fixed binary records, assembled linestrings, no
+protobuf and no node joining) but they collapse every tag into one `fclass`, and
+`osmCategory` reads `abandoned:highway`, `disused:highway`, `razed:highway` and
+the `service=*` sub-tag. Those decommissioned spurs are, in the words of the
+comment that keeps them, "often the only thing reaching cut-over ground, and the
+sort of way most apps drop entirely". Losing them would quietly degrade the access
+classification, so it is the PBF: varint and protobuf framing, a string table,
+delta-encoded DenseNodes, and two passes over 363 MB to resolve way nodes to
+coordinates.
+
+**Estimated cost, and why it is not a couple of hours.** The decoder is 4–8 hours
+with verification. The larger half is that this changes the input to the *access
+bake*, so the classification of all 46,378 cells needs re-verifying — categories,
+names, the trailhead inference, the USFS merge, the walk and climb figures — which
+is the whole v5 verification pass again. Realistically a day, and it puts every
+cell's access figures at risk. Worth doing on its own, with its own verification;
+not worth folding into a display-layer change.
+
+**What made it less urgent.** The network tiles are now a committed artifact, so
+the 101.3 MB checkpoint is no longer the only copy of anything shipped. Losing it
+costs a re-fetch only if the tile filter or the tiling scheme changes.
+
 **What it does not change.** USFS roads and trails still come from the EDW
 ArcGIS endpoints, which have never given trouble, and the terrain tiles still
 come from AWS. Only the OSM half moves.

@@ -6,14 +6,17 @@
    than forty lines inside index.html is that the last thing to go wrong in this app was one lookup
    living in one of four paths instead of a shared seam.
 
-   THE STAMP IS LOAD-BEARING
+   THE STAMP IS LOAD-BEARING, AND THE MANIFEST OWNS IT
    Tiles are fetched with `force-cache` — "use the cached copy whatever its age" — because a tile at
    a given URL never changes. That is right until the data is re-baked, at which point a returning
    viewer keeps the old tiles forever. It has already happened once here, to access-geom.json: the
-   server had v4 and the browser kept serving v3 from disk, 53,200 entries against 50,614. So every
-   URL carries the bake stamp, and the manifest's own stamp is checked against the stamp of the data
-   the app has already loaded. A tile set from a different bake would draw lines under way indices
-   that mean something else.
+   server had v4 and the browser kept serving v3 from disk, 53,200 entries against 50,614.
+
+   So the MANIFEST is fetched `no-cache` — it is small and always revalidated — and the stamp it
+   carries busts every tile URL beneath it. The caller passes no stamp at all. An earlier version
+   took the stamp from the app's loaded access.json, which coupled a map layer to the cell-access
+   data and is the same conflation that produced a layer of disconnected stubs. A tile set describes
+   itself.
 
    WHAT IT DOES NOT DO
    No rendering, no styling, no L.Layer. The caller asks which tiles a bounds needs, awaits them, and
@@ -34,7 +37,7 @@ export function tilesForBounds(bounds, z) {
   return out;
 }
 
-export function tileSource({ base, manifestUrl, stamp, fetchImpl, max = DEFAULT_MAX_TILES,
+export function tileSource({ base, manifestUrl, fetchImpl, max = DEFAULT_MAX_TILES,
                              concurrency = DEFAULT_CONCURRENCY, expectVersion = null,
                              onWarn = (m) => console.warn(m) }) {
   const doFetch = fetchImpl || ((...a) => fetch(...a));
@@ -42,26 +45,24 @@ export function tileSource({ base, manifestUrl, stamp, fetchImpl, max = DEFAULT_
   const inflight = new Map();        // "x/y" -> promise
   const missing = new Set();         // tiles the manifest does not list, or that 404'd
   let manifest = null, manifestPromise = null, broken = false;
-  const q = s => s ? (base.includes('?') ? '&' : '?') + 'g=' + encodeURIComponent(s) : '';
+  const q = s => s ? '?g=' + encodeURIComponent(s) : '';
 
   async function ensureManifest() {
     if (manifest || broken) return manifest;
     if (!manifestPromise) manifestPromise = (async () => {
       try {
-        const r = await doFetch(manifestUrl + q(stamp), { cache: 'force-cache' });
+        const r = await doFetch(manifestUrl, { cache: 'no-cache' });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const j = await r.json();
         if (expectVersion != null && j.version !== expectVersion) {
           onWarn(`tile manifest is format v${j.version}, this build reads v${expectVersion} — not loading tiles`);
           broken = true; return null;
         }
-        /* A tile set from a different bake than the loaded ways table would draw the wrong lines
-           under the right indices, which is worse than drawing nothing. */
-        if (stamp && j.generated && j.generated !== stamp) {
-          onWarn(`tile manifest is from a different bake (${j.generated}) than the loaded data (${stamp}) — not loading tiles`);
+        if (!j.z || !Array.isArray(j.tiles)) {
+          onWarn('tile manifest has no tile list — not loading tiles');
           broken = true; return null;
         }
-        manifest = { z: j.z, tiles: new Set(j.tiles || []), generated: j.generated };
+        manifest = { z: j.z, tiles: new Set(j.tiles), generated: j.generated || null, meta: j };
         return manifest;
       } catch (err) {
         onWarn('tile manifest unavailable (' + (err.message || err) + ') — the layer will draw nothing');
@@ -85,7 +86,7 @@ export function tileSource({ base, manifestUrl, stamp, fetchImpl, max = DEFAULT_
     const p = (async () => {
       const [x, y] = key.split('/');
       try {
-        const r = await doFetch(`${base}/${manifest.z}/${x}/${y}.json` + q(stamp), { cache: 'force-cache' });
+        const r = await doFetch(`${base}/${manifest.z}/${x}/${y}.json` + q(manifest.generated), { cache: 'force-cache' });
         if (!r.ok) { missing.add(key); return null; }
         const j = await r.json();
         loaded.set(key, j); evict();
@@ -120,6 +121,10 @@ export function tileSource({ base, manifestUrl, stamp, fetchImpl, max = DEFAULT_
       return tilesForBounds(bounds, manifest.z).map(k => loaded.get(k)).filter(Boolean);
     },
     get z() { return manifest ? manifest.z : null; },
+    /* The manifest itself, for a layer that wants to say what the tiles contain — the network set
+       leaves the urban street grid out, and the legend has to be able to say so from the data
+       rather than from a constant that could drift away from it. */
+    get meta() { return manifest ? manifest.meta : null; },
     get size() { return loaded.size; },
     get failed() { return broken; },
     _debug: { loaded, missing },

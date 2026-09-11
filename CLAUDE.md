@@ -22,7 +22,7 @@ src/coords.mjs  the coordinate readout and the paste parser
 src/tile-source.mjs  viewport tile loading: manifest, stamped z/x/y, LRU — reusable
 scripts/        build-cells.mjs, build-access.mjs, fetch-weather.mjs, serve.mjs
 tests/model/    the model regression suite
-data/           cells.json, weather.json, evt-names.json, access.json (+ -geom, + -tiles/) — checked in
+data/           cells.json, weather.json, evt-names.json, access.json (+ -geom), network-tiles/ — checked in
 ```
 
 Washington is divided into ~48,000 one-square-mile cells. Each carries baked
@@ -85,12 +85,17 @@ while nothing throws.
   scored as though their trees were ideal, for days, invisibly.
 - **The model is deterministic and takes `doy` as an argument.** Nothing under
   `src/model/` may read the clock, the DOM or the network.
-- **The trails layer loads geometry by viewport, never the whole file.**
-  `data/access-tiles/10/<x>/<y>.json` — 271 files, 9 KB median gzipped, about 95 KB for the worst
-  viewport at z11 and in, against 5.52 MB for `access-geom.json`. That file stays whole and lazy for
-  the tapped approach: clipped geometry is right for drawing and wrong for measuring, and a clip is
-  what truncated trails before v4. The bake writes the tiles itself; `src/tile-source.mjs` loads
-  them and is meant to be reused by the 30 m rebuild.
+- **The trails layer is a map layer, not a projection of cell references.** It draws
+  `data/network-tiles/12/<x>/<y>.json` — every way the bake fetched, minus the urban street grid,
+  with its own category per piece and its own stamp. It needs nothing from `access.json`. Building it
+  from the ways *cells referenced* (11.6% of the network, 1.4% in Seattle) produced a scatter of
+  disconnected stubs on the cell lattice; that conflation is the bug, so the independence is the fix.
+  [docs/access.md](docs/access.md#the-trails-layer-draws-a-network-not-the-cells-references)
+- **Geometry is loaded by viewport, never whole.** 8 z12 tiles and ~35 KB gzipped for a forest view,
+  against 16 MB for the whole network. `access-geom.json` stays whole and lazy for the *tapped*
+  approach: clipped geometry is right for drawing and wrong for measuring, and a clip is what
+  truncated trails before v4. `src/tile-source.mjs` is the loader and is meant to be reused by the
+  30 m rebuild.
 - **Every entry gets its access from the cell that contains it, in one place.**
   `withAccess()` in `index.html` wraps every `makeEntry` call — baked cells, the
   sub-mile refine, a live block score, an exact point. It cannot live in
@@ -204,7 +209,7 @@ node scripts/build-cells.mjs --resume   # after a connect timeout
 node scripts/build-cells.mjs --region=coast
 node scripts/build-access.mjs           # 40-80 min: ~316 Overpass tiles + USFS + terrain
 node scripts/build-access.mjs --resume  # re-assembles in ~3 min, zero requests
-node scripts/build-access-tiles.mjs     # the trails-layer tiles, from the two baked files: ~10 s
+node scripts/build-network-tiles.mjs    # the map layer's tiles, from the checkpoint: ~1 min
 ```
 
 **Log a long bake to a file you can read while it runs.** `node

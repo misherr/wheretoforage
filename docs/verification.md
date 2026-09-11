@@ -271,34 +271,52 @@ check the count in `npm test` actually went up.**
 
 ## The trails layer
 
-Three things break quietly here, and none of them shows up as an error.
+**The failure that got shipped was conceptual, and no assertion would have caught
+it.** The layer drew `access.json`'s ways, which are one nearest way per cell per
+category — 11.6% of the network, 1.4% in Seattle. Every test passed: the tiles
+were small, the clipping had no gaps, the stamp was carried. It took looking at
+Seattle on a map to see that the layer was a scatter of stubs on the cell lattice.
 
-**A gap at every tile edge.** Clipping keeps the crossing segment in both tiles;
-drop it and the map grows a faint grid of breaks that reads as missing data. The
-test asserts every consecutive pair of the original polyline appears as a
-consecutive pair in some tile — not that the pieces share endpoints, which passes
-on a broken split.
-
-**A stale tile set.** Way indices only mean something against the ways table they
-were built with, so a tile set from another bake draws real lines in the wrong
-places. Both defences are in `src/tile-source.mjs`: the stamp in every URL, and
-the manifest's `generated` checked against the loaded data's. Verify by hand:
+The check that would have caught it is **connectivity**, and it is cheap:
 
 ```js
-// every request the layer makes must carry ?g=<the bake stamp>
-performance.getEntriesByType('resource').filter(e => /access-tiles/.test(e.name)).map(e => e.name)
+// ways per connected component, on a 25 m endpoint join
+// the real network: 5.3 in Seattle, 2.2 in forest.  A layer showing 1.1 is not a network.
 ```
 
-**A regional bake overwriting the statewide tiles.** `writeTiles` took the module
-default, so `--out=/tmp/a.json` wrote 3 tiles over the 271 in `data/`. Found by
-running a regional bake and looking at what changed on disk, which is the only way
-it could have been found. After any regional bake, check:
+Anything near 1.0 means every drawn way is an island, which is the signature of a
+selected set rather than a network. Run it on a dense urban tile, where the ratio
+is highest and any sparsification shows up worst.
+
+The three mechanisms to rule out separately, because they look identical on screen:
+
+1. **Clipping** — compare each stored way's length against its source. 41,678 of
+   41,678 matched; `clipped: false`.
+2. **The referencing radius** — 438,521 of 460,370 ways (95%) are within 2 km of a
+   baked cell, so eligibility was never the limit.
+3. **Missing cells** — a tile with no baked cells contributes nothing. Tile
+   163/366 fetched 1,586 ways and kept 0. This is why roads vanished in blocks.
+
+**A stale tile set.** The manifest is fetched `no-cache` and its `generated`
+stamps every tile URL, so a tile set describes itself and the layer needs nothing
+from `access.json`:
+
+```js
+performance.getEntriesByType('resource').filter(e => /network-tiles/.test(e.name)).map(e => e.name)
+// the manifest URL carries no stamp; every 12/x/y.json carries ?g=<manifest.generated>
+```
+
+**A regional bake overwriting the statewide tiles.** The writer took a module
+default once, so `--out=/tmp/a.json` wrote 3 tiles over the statewide set. After
+any regional bake:
 
 ```bash
-find data/access-tiles -name "*.json" | wc -l     # 272: 271 tiles + index.json
+find data/network-tiles -name "*.json" | wc -l     # 3663: 3662 tiles + index.json
 ```
 
-And the count the layer is for: at z12 over the densest ground the map should read
-as routes, not as a blur. 460 pieces in the worst z10 tile, 259 of them rough
-roads — turn rough off and the same view should be legibly emptier. That is a
-judgement a test cannot make, so it is made by looking.
+**And the judgement a test cannot make.** At z12 the forest should read as road
+systems you can trace and trails that run somewhere: 8 tiles, ~35 KB gzipped.
+Seattle will be dense with arterials, which is correct — they are what you drive —
+but if it reads as a street atlas the type filter in
+`scripts/build-network-tiles.mjs` is the knob, and `residential` is 27% of all
+geometry. Look at both before believing either.

@@ -64,12 +64,24 @@ export const LINE_STYLE = {
 };
 export const LINE_CASING = '#0f150f';
 
-/* The trails layer is useless below this and would be a smear of ink. At z9 a pixel is 207 m and a
-   square-mile cell is 7.8 px across, with up to 2,228 ways in one z10 tile; at z11 a pixel is 52 m,
-   the cell is 31 px, and geometry simplified to 25 m draws as a line rather than a blur. The viewport
-   cost follows the same curve: about 95 KB gzipped at z11 and in, against 575 KB at z9. The app's own
-   sub-mile refine already appears at z12, so a gate here is consistent with how it treats zoom. */
-export const TRAILS_MIN_ZOOM = 11;
+/* The layer is useless below this and would be a smear of ink. At z9 a pixel is 207 m and a
+   square-mile cell is 7.8 px across; at z12 a pixel is 26 m and the cell is 62 px, which is where a
+   25 m-simplified line reads as a line.
+
+   z12 rather than z11 because the layer now carries the whole network rather than one way per cell,
+   and the viewport is what costs: a phone covers 8 z12 tiles at app zoom 12 and 28 of them at zoom
+   11, which is 150-230 KB against 400-500 KB over Seattle. The app's own sub-mile refine appears at
+   z12 too, so the two agree about where "zoomed in" starts. */
+export const TRAILS_MIN_ZOOM = 12;
+
+/* What the layer does not draw, said in the legend rather than left to be discovered. An absent
+   street is indistinguishable from a bug — and the bug this replaced looked exactly like absent
+   ways — so the omission has to be stated where the lines are. 203,120 urban ways are left out of
+   257,250 kept: this app is for timber, not city blocks. */
+export const NETWORK_OMITS = 'city streets left out';
+export const NETWORK_OMITS_LONG =
+  'Residential streets, service roads and sidewalks are deliberately not drawn — this map is for '
+  + 'forest roads and trails. Their absence is not missing data.';
 
 /* What to call the on-route leg of an approach. A road is not a trail, and saying "4.8 mi on the
    trail" about a forest road is the sort of small wrongness that makes a reader discount the

@@ -245,7 +245,7 @@ import { classifyAccess, accessDetail, accessRank, accessDistance, gainLabel, ex
          NOT_EXAMINED_LABEL, NOT_EXAMINED_NOTE, OFF_TRAIL_NOTE, CATS as ACCESS_CATS,
          decodeGeom as decodeAccessGeom,
          NO_ON_TRAIL_NOTE, onRouteLabel, LINE_STYLE, LINE_CASING,
-         TRAILS_MIN_ZOOM } from './src/access.mjs';
+         TRAILS_MIN_ZOOM, NETWORK_OMITS, NETWORK_OMITS_LONG } from './src/access.mjs';
 import { tileSource } from './src/tile-source.mjs';
 /* ===================== CONFIG ===================== */
 const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
@@ -558,7 +558,8 @@ const active=new Set(['chance']);
    lineCat is which categories are drawn; rough roads are 45% of the geometry, so they can be turned
    off on their own without touching the rest of the layer. */
 const LINE_LAYERS={
-  trails:{name:'Roads and trails',sub:'What is MAPPED — not whether it is passable, open or legal',
+  trails:{name:'Forest roads and trails',
+          sub:'What is MAPPED — not passable, open or legal. City streets left out.',
           cats:['road','rough','trail']},
 };
 const lineActive=new Set();
@@ -590,10 +591,15 @@ const cellLayer=new CellCanvas().addTo(map);
    against the 5.52 MB of access-geom.json, which stays whole and lazy for the tapped approach. */
 let trailTiles=null;
 const trailsOn=()=>lineActive.has('trails');
+/* An independent map layer. It reads data/network-tiles, which carries the whole road and trail
+   network with a category per piece, and it consults neither the cell references nor the ways table.
+   The first version of this layer drew data/access-tiles — the ways some cell pointed at, 11.6% of
+   what the bake fetched and 1.4% of it in Seattle — which produced a scatter of stubs on the cell
+   lattice rather than a network. Nothing here needs access.json to be loaded at all. */
 function trailSource(){
-  if(!trailTiles&&STATIC.access) trailTiles=tileSource({
-    base:'data/access-tiles', manifestUrl:'data/access-tiles/index.json',
-    stamp:accessAsOf||'', expectVersion:ACCESS_FORMAT,
+  if(!trailTiles) trailTiles=tileSource({
+    base:'data/network-tiles', manifestUrl:'data/network-tiles/index.json',
+    expectVersion:ACCESS_FORMAT,
   });
   return trailTiles;
 }
@@ -620,17 +626,20 @@ const TrailCanvas=L.Layer.extend({
   draw(){ const m=this._m; if(!m) return;
     const ctx=this._c.getContext('2d'),r=window.devicePixelRatio||1;
     ctx.setTransform(r,0,0,r,0,0); const sz=m.getSize(); ctx.clearRect(0,0,sz.x,sz.y);
-    if(!trailsOn()||m.getZoom()<TRAILS_MIN_ZOOM||!STATIC.access) return;
+    if(!trailsOn()||m.getZoom()<TRAILS_MIN_ZOOM) return;
     const src=trailSource(); if(!src) return;
     const b=m.getBounds();
     const tiles=src.ready({south:b.getSouth(),west:b.getWest(),north:b.getNorth(),east:b.getEast()});
     if(!tiles.length) return;
     /* Group every piece by category first, so each style is set once and the draw order is
-       deterministic rather than following whatever order the tiles happened to arrive in. */
+       deterministic rather than following whatever order the tiles happened to arrive in.
+
+       The category is in the tile. It used to be looked up in STATIC.access.ways by index, which
+       only worked because the layer was drawing that table's ways — 407,000 of the network's ways
+       have no entry in it. */
     const byCat=new Map();
-    for(const t of tiles) for(const [wi,flat] of t.ways){
-      const w=STATIC.access.ways[wi]; if(!w) continue;
-      const cat=ACCESS_CATS[w[3]]; if(!cat||!lineCat.has(cat)) continue;
+    for(const t of tiles) for(const [ci,flat] of t.ways){
+      const cat=ACCESS_CATS[ci]; if(!cat||!lineCat.has(cat)) continue;
       if(!byCat.has(cat)) byCat.set(cat,[]); byCat.get(cat).push(flat);
     }
     const cats=[...byCat.keys()].sort((a,b)=>LINE_STYLE[a].order-LINE_STYLE[b].order);
@@ -664,7 +673,10 @@ function renderLegends(){
         ? `<span>zoom in to see them</span>`
         : ['road','rough','trail'].filter(c=>lineCat.has(c))
             .map(c=>`<span><i class="ln" style="background:${LINE_STYLE[c].colour}${LINE_STYLE[c].dash?';opacity:.85':''}"></i>${LINE_STYLE[c].label}</span>`).join('')
-          + `<span style="color:var(--pore-dim)">mapped, not confirmed passable</span>`)
+          + `<span style="color:var(--pore-dim)">mapped, not confirmed passable</span>`
+          /* Said where the lines are, not only in the menu: an absent street reads exactly like the
+             missing-ways bug this layer replaced. */
+          + `<span class="caveat" title="${NETWORK_OMITS_LONG}">${NETWORK_OMITS}</span>`)
       +`</div>`;
   }
   $('legends').innerHTML=h; }
