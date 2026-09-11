@@ -30,7 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { everHabitat } from '../src/model/habitat.mjs';
 import { vegSummary } from '../src/model/vegetation.mjs';
 import { DLAT, DLON, BLK, BLAT, BLON, STATE, inWA, cellCenter, blockCentre, blockRange,
-         terrainAt, pointKey as key } from '../src/grid.mjs';
+         terrainAt, tileXY, pointKey as key } from '../src/grid.mjs';
 
 export const GENERATOR = 'scripts/build-cells.mjs';
 export const GENERATOR_VERSION = '1.0.0';
@@ -123,11 +123,9 @@ export function decodePNG(buf) {
 
 // Terrarium packs metres as (R*256 + G + B/256) - 32768. Identical arithmetic to the app's canvas path.
 export const terrariumMetres = (r, g, b) => r * 256 + g + b / 256 - 32768;
-export function tileXY(lat, lon, z) {
-  const n = 2 ** z, x = (lon + 180) / 360 * n, lr = lat * Math.PI / 180;
-  const y = (1 - Math.log(Math.tan(lr) + 1 / Math.cos(lr)) / Math.PI) / 2 * n;
-  return { x, y };
-}
+/* Re-exported so scripts/build-access.mjs keeps importing it from here, where it used to live.
+   The definition is in src/grid.mjs now — one copy, shared with the app. */
+export { tileXY };
 
 /* ===================== elevation ===================== */
 const tiles = new Map();      // "z/x/y" -> decoded tile

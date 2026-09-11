@@ -268,3 +268,37 @@ explicitly rather than globbing, and `scripts/coords.test.mjs` passed ten
 assertions for a while without being run by `npm test`. Two mutations that should
 have failed did not, which is how it was noticed. **After adding a test file,
 check the count in `npm test` actually went up.**
+
+## The trails layer
+
+Three things break quietly here, and none of them shows up as an error.
+
+**A gap at every tile edge.** Clipping keeps the crossing segment in both tiles;
+drop it and the map grows a faint grid of breaks that reads as missing data. The
+test asserts every consecutive pair of the original polyline appears as a
+consecutive pair in some tile — not that the pieces share endpoints, which passes
+on a broken split.
+
+**A stale tile set.** Way indices only mean something against the ways table they
+were built with, so a tile set from another bake draws real lines in the wrong
+places. Both defences are in `src/tile-source.mjs`: the stamp in every URL, and
+the manifest's `generated` checked against the loaded data's. Verify by hand:
+
+```js
+// every request the layer makes must carry ?g=<the bake stamp>
+performance.getEntriesByType('resource').filter(e => /access-tiles/.test(e.name)).map(e => e.name)
+```
+
+**A regional bake overwriting the statewide tiles.** `writeTiles` took the module
+default, so `--out=/tmp/a.json` wrote 3 tiles over the 271 in `data/`. Found by
+running a regional bake and looking at what changed on disk, which is the only way
+it could have been found. After any regional bake, check:
+
+```bash
+find data/access-tiles -name "*.json" | wc -l     # 272: 271 tiles + index.json
+```
+
+And the count the layer is for: at z12 over the densest ground the map should read
+as routes, not as a blur. 460 pieces in the worst z10 tile, 259 of them rough
+roads — turn rough off and the same view should be legibly emptier. That is a
+judgement a test cannot make, so it is made by looking.

@@ -12,6 +12,28 @@ deferred work.
 
 ## Access
 
+### The tile loader is the seam the 30 m rebuild should reuse
+
+`src/tile-source.mjs` knows about a manifest, `z/x/y` addressing, a bake stamp, a
+fetch budget and an LRU cap, and nothing about roads, trails or elevation. The
+trails layer is its first consumer. A 30 m raster or vector layer should be its
+second rather than a second implementation of the same thing — the last thing to
+go wrong in this app was one lookup living in one of four paths instead of a
+shared seam, and this is that lesson applied before the fact.
+
+What a second consumer would need that is not there yet:
+
+- **More than one zoom level.** Today the source reads `z` from its manifest and
+  serves one level. A raster pyramid wants a level per zoom and a rule for which
+  one a viewport should ask for.
+- **A decoder hook.** Tiles are assumed to be JSON. A PNG or a binary tile needs
+  the parse step injected rather than assumed.
+- **Cancellation.** Panning fast queues fetches for tiles that have already
+  scrolled away. At 9 KB a tile that is waste worth ignoring; at raster sizes it
+  is not.
+
+None of that is worth building until there is a second consumer to shape it.
+
 ### Drop Overpass for a Geofabrik extract
 
 **Not built. This is the answer if the bake gives trouble again — do not add a

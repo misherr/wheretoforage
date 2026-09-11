@@ -18,9 +18,11 @@ index.html      the app: Leaflet map, canvas overlay, tap sheet, Top spots
 src/model/      the ecological model — the science, and nothing else
 src/grid.mjs    the cell lattice, the state outline, terrainAt, pointKey
 src/access.mjs  how you would reach a cell — a separate axis, never a score input
+src/coords.mjs  the coordinate readout and the paste parser
+src/tile-source.mjs  viewport tile loading: manifest, stamped z/x/y, LRU — reusable
 scripts/        build-cells.mjs, build-access.mjs, fetch-weather.mjs, serve.mjs
 tests/model/    the model regression suite
-data/           cells.json, weather.json, evt-names.json, access.json (+ -geom) — checked in
+data/           cells.json, weather.json, evt-names.json, access.json (+ -geom, + -tiles/) — checked in
 ```
 
 Washington is divided into ~48,000 one-square-mile cells. Each carries baked
@@ -83,6 +85,12 @@ while nothing throws.
   scored as though their trees were ideal, for days, invisibly.
 - **The model is deterministic and takes `doy` as an argument.** Nothing under
   `src/model/` may read the clock, the DOM or the network.
+- **The trails layer loads geometry by viewport, never the whole file.**
+  `data/access-tiles/10/<x>/<y>.json` — 271 files, 9 KB median gzipped, about 95 KB for the worst
+  viewport at z11 and in, against 5.52 MB for `access-geom.json`. That file stays whole and lazy for
+  the tapped approach: clipped geometry is right for drawing and wrong for measuring, and a clip is
+  what truncated trails before v4. The bake writes the tiles itself; `src/tile-source.mjs` loads
+  them and is meant to be reused by the 30 m rebuild.
 - **Every entry gets its access from the cell that contains it, in one place.**
   `withAccess()` in `index.html` wraps every `makeEntry` call — baked cells, the
   sub-mile refine, a live block score, an exact point. It cannot live in
@@ -194,8 +202,9 @@ Baking data:
 node scripts/build-cells.mjs            # ~4 min: 305 terrain tiles, 579 LANDFIRE requests
 node scripts/build-cells.mjs --resume   # after a connect timeout
 node scripts/build-cells.mjs --region=coast
-node scripts/build-access.mjs           # ~10 h: ~316 Overpass tiles + USFS + terrain
-node scripts/build-access.mjs --resume  # re-assembles in 30 s, zero requests
+node scripts/build-access.mjs           # 40-80 min: ~316 Overpass tiles + USFS + terrain
+node scripts/build-access.mjs --resume  # re-assembles in ~3 min, zero requests
+node scripts/build-access-tiles.mjs     # the trails-layer tiles, from the two baked files: ~10 s
 ```
 
 **Log a long bake to a file you can read while it runs.** `node

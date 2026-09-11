@@ -131,6 +131,12 @@ body.sheet-open #tap-hint{opacity:0}
 /* A figure that is real but should not be read at face value. Muted gold, reused from the score
    bands rather than a new colour, and no icon: it is a caveat, not an error. */
 .caveat{color:var(--c-med)}
+/* A line layer's swatch is a line, not a filled square — the menu and the legend should look like
+   what they switch on. */
+#layers .sep{height:1px;background:var(--line);margin:6px 4px}
+#layers .subs{display:flex;flex-wrap:wrap;gap:2px 10px;padding:0 8px 4px 30px}
+#layers label.sub{padding:3px 0;font-size:12px}
+#legends i.ln,#layers i.ln{height:3px;border-radius:2px;width:16px;flex:none}
 .bars{display:grid;grid-template-columns:118px 1fr 40px;gap:6px 10px;align-items:center;font-size:13px}
 .bars .bg{height:8px;border-radius:4px;background:var(--moss-2);overflow:hidden}
 .bars .bg b{display:block;height:100%;border-radius:4px;background:var(--cap-light)}
@@ -230,14 +236,17 @@ import { makeEntry, applyVeg } from './src/model/cell.mjs';
 // The cell lattice, the state outline and terrainAt() are shared with scripts/build-cells.mjs, which
 // bakes data/cells.json. A second copy of this geometry would drift, and the symptom is a blank map.
 import { DLAT, DLON, BLK, BLAT, BLON, inWA, cellCenter, cellKey,
-         terrainAt, pointKey as key } from './src/grid.mjs';
+         terrainAt, tileXY, pointKey as key } from './src/grid.mjs';
 // Access is a separate axis from suitability and never touches a score — see src/access.mjs.
 import { parseCoords, formatCoords } from './src/coords.mjs';
 import { classifyAccess, accessDetail, accessRank, accessDistance, gainLabel, externalLinks,
          NO_TRAILHEAD_NOTE, decodeRow as decodeAccessRow, decodeWay as decodeAccessWay,
          CLASSES as ACCESS_CLASSES, ACCESS_FORMAT, accessAt, CELL_SCOPE_NOTE,
-         NOT_EXAMINED_LABEL, NOT_EXAMINED_NOTE, OFF_TRAIL_NOTE,
-         NO_ON_TRAIL_NOTE, onRouteLabel } from './src/access.mjs';
+         NOT_EXAMINED_LABEL, NOT_EXAMINED_NOTE, OFF_TRAIL_NOTE, CATS as ACCESS_CATS,
+         decodeGeom as decodeAccessGeom,
+         NO_ON_TRAIL_NOTE, onRouteLabel, LINE_STYLE, LINE_CASING,
+         TRAILS_MIN_ZOOM } from './src/access.mjs';
+import { tileSource } from './src/tile-source.mjs';
 /* ===================== CONFIG ===================== */
 const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
 const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400; // local refine below 1 mi when zoomed way in
@@ -325,7 +334,7 @@ async function fetchJSON(u,tries=9){
 /* ---- elevation from open terrain tiles (AWS Terrarium PNG, no key, no quota) ---- */
 const ELEV_Z=10; // 103 m per pixel at 47.5°N — plenty for square-mile cells and slope/aspect
 const tcache=new Map(); let tilesBroken=false;
-function tileXY(lat,lon,z){ const n=2**z; const x=(lon+180)/360*n; const lr=lat*Math.PI/180; const y=(1-Math.log(Math.tan(lr)+1/Math.cos(lr))/Math.PI)/2*n; return {x,y}; }
+/* tileXY now comes from src/grid.mjs, shared with both bakes — see the note there. */
 function loadTileData(url,cache,k){ if(cache.has(k)) return cache.get(k);
   const pr=(async()=>{ let lastErr; for(let k=0;k<4;k++){ try{ const r=await fetch(url,{mode:'cors'}); if(!r.ok) throw new Error('tile '+r.status);
       const bmp=await createImageBitmap(await r.blob()); const c=document.createElement('canvas'); c.width=c.height=256; const ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(bmp,0,0); return ctx.getImageData(0,0,256,256).data; }
@@ -543,6 +552,17 @@ const OVERLAYS={
     val:e=>{const x=e.A&&e.A.fut&&e.A.fut[Math.min(T,e.A.fut.length-1)]; return x?x.M:null;}}
 };
 const active=new Set(['chance']);
+/* Line layers are a different kind of thing from the fills above: no per-cell value, no bands, and
+   they draw over the top rather than tinting a square. So they get their own registry rather than
+   being bent into the OVERLAYS contract — which expects val(e) per cell — and their own legend shape.
+   lineCat is which categories are drawn; rough roads are 45% of the geometry, so they can be turned
+   off on their own without touching the rest of the layer. */
+const LINE_LAYERS={
+  trails:{name:'Roads and trails',sub:'What is MAPPED — not whether it is passable, open or legal',
+          cats:['road','rough','trail']},
+};
+const lineActive=new Set();
+const lineCat=new Set(['road','rough','trail']);
 function bandFor(ov,v){ let b=null; for(const x of ov.bands) if(v>=x[0]) b=x; return b; }
 
 /* ---- single canvas for all cells ---- */
@@ -559,10 +579,106 @@ const CellCanvas=L.Layer.extend({
     ctx.globalAlpha=1; }
 });
 const cellLayer=new CellCanvas().addTo(map);
-function renderAll(){ cellLayer.draw(); renderLegends(); if(hintArmed&&cells.size){ hintArmed=false; showTapHint(); } }
-function renderLegends(){ $('legends').innerHTML=[...active].sort((a,b)=>OVERLAYS[a].order-OVERLAYS[b].order).map(k=>{const ov=OVERLAYS[k];return `<div class="lg"><b>${ov.name}</b>`+ov.bands.map(x=>`<span><i style="background:${x[2]}"></i>${x[1]}</span>`).join('')+`</div>`;}).join(''); }
-function buildLayersMenu(){ $('layers').innerHTML=Object.keys(OVERLAYS).sort((a,b)=>OVERLAYS[a].order-OVERLAYS[b].order).reverse().map(k=>{const ov=OVERLAYS[k];return `<label><input type="checkbox" data-k="${k}" ${active.has(k)?'checked':''}><i style="background:${ov.bands[Math.floor(ov.bands.length/2)][2]}"></i><span>${ov.name}<small>${ov.sub}</small></span></label>`;}).join('');
-  $('layers').querySelectorAll('input').forEach(inp=>inp.onchange=()=>{ if(inp.checked) active.add(inp.dataset.k); else active.delete(inp.dataset.k); renderAll(); }); }
+
+/* ---- the trails layer: lines over the fills ----
+
+   A second canvas rather than Leaflet polylines. A z11 viewport holds up to ~1,300 ways averaging
+   12 points; that is 1,300 DOM-backed layer objects against one canvas and ~16,000 line segments,
+   and the canvas wins by enough that panning stays smooth on a phone.
+
+   Geometry arrives by viewport from src/tile-source.mjs — 95 KB gzipped for the worst two-tile view,
+   against the 5.52 MB of access-geom.json, which stays whole and lazy for the tapped approach. */
+let trailTiles=null;
+const trailsOn=()=>lineActive.has('trails');
+function trailSource(){
+  if(!trailTiles&&STATIC.access) trailTiles=tileSource({
+    base:'data/access-tiles', manifestUrl:'data/access-tiles/index.json',
+    stamp:accessAsOf||'', expectVersion:ACCESS_FORMAT,
+  });
+  return trailTiles;
+}
+const TrailCanvas=L.Layer.extend({
+  onAdd(m){ this._m=m; const c=this._c=L.DomUtil.create('canvas','leaflet-zoom-hide');
+    c.style.position='absolute'; c.style.pointerEvents='none';
+    m.getPanes().overlayPane.appendChild(c);
+    m.on('moveend zoomend viewreset resize',this._reset,this); this._reset(); },
+  onRemove(m){ m.getPanes().overlayPane.removeChild(this._c); m.off('moveend zoomend viewreset resize',this._reset,this); },
+  _reset(){ const m=this._m,sz=m.getSize(),r=window.devicePixelRatio||1;
+    L.DomUtil.setPosition(this._c,m.containerPointToLayerPoint([0,0]));
+    this._c.width=sz.x*r; this._c.height=sz.y*r; this._c.style.width=sz.x+'px'; this._c.style.height=sz.y+'px';
+    /* The legend changes with the zoom, not just with the toggles: below TRAILS_MIN_ZOOM it has to
+       say "zoom in to see them" rather than listing three styles that are not being drawn. A zoom
+       change reaches this layer and nothing else, so the legend is rendered from here. */
+    this.draw(); renderLegends(); this.load(); },
+  /* Fetch what the viewport needs, then redraw. Draw first from whatever is already in memory so a
+     pan never blanks the ground the viewer was just looking at. */
+  async load(){ if(!trailsOn()||this._m.getZoom()<TRAILS_MIN_ZOOM) return;
+    const src=trailSource(); if(!src) return;
+    const b=this._m.getBounds();
+    await src.ensure({south:b.getSouth(),west:b.getWest(),north:b.getNorth(),east:b.getEast()});
+    this.draw(); renderLegends(); },
+  draw(){ const m=this._m; if(!m) return;
+    const ctx=this._c.getContext('2d'),r=window.devicePixelRatio||1;
+    ctx.setTransform(r,0,0,r,0,0); const sz=m.getSize(); ctx.clearRect(0,0,sz.x,sz.y);
+    if(!trailsOn()||m.getZoom()<TRAILS_MIN_ZOOM||!STATIC.access) return;
+    const src=trailSource(); if(!src) return;
+    const b=m.getBounds();
+    const tiles=src.ready({south:b.getSouth(),west:b.getWest(),north:b.getNorth(),east:b.getEast()});
+    if(!tiles.length) return;
+    /* Group every piece by category first, so each style is set once and the draw order is
+       deterministic rather than following whatever order the tiles happened to arrive in. */
+    const byCat=new Map();
+    for(const t of tiles) for(const [wi,flat] of t.ways){
+      const w=STATIC.access.ways[wi]; if(!w) continue;
+      const cat=ACCESS_CATS[w[3]]; if(!cat||!lineCat.has(cat)) continue;
+      if(!byCat.has(cat)) byCat.set(cat,[]); byCat.get(cat).push(flat);
+    }
+    const cats=[...byCat.keys()].sort((a,b)=>LINE_STYLE[a].order-LINE_STYLE[b].order);
+    const path=(flat)=>{ const pts=decodeAccessGeom(flat); if(pts.length<2) return false;
+      let started=false;
+      for(const p of pts){ const q=m.latLngToContainerPoint(p);
+        if(!started){ ctx.moveTo(q.x,q.y); started=true; } else ctx.lineTo(q.x,q.y); }
+      return started; };
+    ctx.lineCap='round'; ctx.lineJoin='round';
+    for(const pass of ['casing','line']) for(const cat of cats){
+      const st=LINE_STYLE[cat];
+      ctx.beginPath();
+      for(const flat of byCat.get(cat)) path(flat);
+      if(pass==='casing'){ ctx.setLineDash([]); ctx.strokeStyle=LINE_CASING; ctx.globalAlpha=0.55; ctx.lineWidth=st.width+2.6; }
+      else { ctx.setLineDash(st.dash||[]); ctx.strokeStyle=st.colour; ctx.globalAlpha=1; ctx.lineWidth=st.width; }
+      ctx.stroke();
+    }
+    ctx.setLineDash([]); ctx.globalAlpha=1; },
+});
+const trailLayer=new TrailCanvas().addTo(map);
+
+function renderAll(){ cellLayer.draw(); trailLayer.draw(); trailLayer.load(); renderLegends(); if(hintArmed&&cells.size){ hintArmed=false; showTapHint(); } }
+function renderLegends(){
+  let h=[...active].sort((a,b)=>OVERLAYS[a].order-OVERLAYS[b].order).map(k=>{const ov=OVERLAYS[k];return `<div class="lg"><b>${ov.name}</b>`+ov.bands.map(x=>`<span><i style="background:${x[2]}"></i>${x[1]}</span>`).join('')+`</div>`;}).join('');
+  if(trailsOn()){
+    /* Below the gate, say so rather than drawing nothing and leaving the viewer to wonder whether
+       there is no data or no road. */
+    const z=map.getZoom();
+    h+=`<div class="lg"><b>Mapped ways</b>`
+      +(z<TRAILS_MIN_ZOOM
+        ? `<span>zoom in to see them</span>`
+        : ['road','rough','trail'].filter(c=>lineCat.has(c))
+            .map(c=>`<span><i class="ln" style="background:${LINE_STYLE[c].colour}${LINE_STYLE[c].dash?';opacity:.85':''}"></i>${LINE_STYLE[c].label}</span>`).join('')
+          + `<span style="color:var(--pore-dim)">mapped, not confirmed passable</span>`)
+      +`</div>`;
+  }
+  $('legends').innerHTML=h; }
+function buildLayersMenu(){
+  const fills=Object.keys(OVERLAYS).sort((a,b)=>OVERLAYS[a].order-OVERLAYS[b].order).reverse().map(k=>{const ov=OVERLAYS[k];return `<label><input type="checkbox" data-o="${k}" ${active.has(k)?'checked':''}><i style="background:${ov.bands[Math.floor(ov.bands.length/2)][2]}"></i><span>${ov.name}<small>${ov.sub}</small></span></label>`;}).join('');
+  /* A line swatch rather than a filled square, because that is what it draws. */
+  const lines=Object.entries(LINE_LAYERS).map(([k,ly])=>`<label><input type="checkbox" data-l="${k}" ${lineActive.has(k)?'checked':''}><i class="ln" style="background:${LINE_STYLE.trail.colour}"></i><span>${ly.name}<small>${ly.sub}</small></span></label>`).join('');
+  /* Rough roads are 45% of the mapped geometry, so they get their own switch: with them on, the map
+     answers "what can I drive"; with them off, "where are the trails". */
+  const subs=`<div class="subs">`+['road','rough','trail'].map(c=>`<label class="sub"><input type="checkbox" data-c="${c}" ${lineCat.has(c)?'checked':''}><i class="ln" style="background:${LINE_STYLE[c].colour}"></i><span>${LINE_STYLE[c].label}</span></label>`).join('')+`</div>`;
+  $('layers').innerHTML=fills+`<div class="sep"></div>`+lines+subs;
+  $('layers').querySelectorAll('input[data-o]').forEach(inp=>inp.onchange=()=>{ if(inp.checked) active.add(inp.dataset.o); else active.delete(inp.dataset.o); renderAll(); });
+  $('layers').querySelectorAll('input[data-l]').forEach(inp=>inp.onchange=()=>{ if(inp.checked) lineActive.add(inp.dataset.l); else lineActive.delete(inp.dataset.l); renderAll(); });
+  $('layers').querySelectorAll('input[data-c]').forEach(inp=>inp.onchange=()=>{ if(inp.checked) lineCat.add(inp.dataset.c); else lineCat.delete(inp.dataset.c); renderAll(); }); }
 
 /* ---- timeline ---- */
 let playing=false, playTimer=null;
@@ -1224,7 +1340,9 @@ async function drawApproach(wayIndex,cell,link){
   const way=decodeAccessWay(STATIC.access.ways[wayIndex],geoms[wayIndex]);
   if(approachLayer){ approachLayer.remove(); approachLayer=null; }
   if(!way||!way.geom||way.geom.length<2) return;
-  const colour = way.cat==='trail'?'#5dcaa5':(way.cat==='road'?'#e58a2b':'#b8b09a');
+  /* The same palette the trails layer uses. It was #e58a2b for a road, which is the chance
+     overlay's "Good" band — a tapped line that borrows a scoring colour reads as data it is not. */
+  const colour = (LINE_STYLE[way.cat]||LINE_STYLE.rough).colour;
   approachLayer=L.layerGroup([
     L.polyline(way.geom,{color:'#0f150f',weight:7,opacity:.55}),
     L.polyline(way.geom,{color:colour,weight:3,dashArray:'7 5'}),

@@ -39,6 +39,38 @@ export const CLASSES = {
 export const CLASS_ORDER = ['trail', 'road', 'rough', 'near', 'unknown'];
 export const CATS = ['road', 'trail', 'rough'];      // the order they are stored in a row
 
+/* How a way is DRAWN on the trails layer.
+
+   Style carries the category, not hue. The fills already occupy the palette — yellow through red for
+   chance, greens for habitat, blues for rain, olives for soil — and the approach line was using
+   #e58a2b for a road, which is exactly the chance layer's "Good" band. A line layer whose colour
+   means something on another layer is worse than no layer. So: solid means you can drive it, dashed
+   means high-clearance or unknown, dotted means you are walking, and lightness separates them a
+   second time. That survives being drawn over any fill, and it survives colour blindness.
+
+   Every line also gets a dark casing stroked underneath at nearly twice the width, the same trick
+   the tapped approach line already used, because a 2 px line over a satellite basemap disappears
+   into it otherwise.
+
+   The order is the draw order: rough first, then road, then trail on top. A trail is the thing
+   hardest to see and the thing most worth seeing. */
+export const LINE_STYLE = {
+  rough: { label: 'Rough road', colour: '#cfc6ae', width: 1.9, dash: [7, 5], order: 0,
+           note: 'logging spurs and unmaintained roads' },
+  road:  { label: 'Drivable road', colour: '#f2ede0', width: 2.5, dash: null, order: 1,
+           note: 'a car road, by its mapped classification' },
+  trail: { label: 'Trail', colour: '#5dcaa5', width: 1.9, dash: [2, 4], order: 2,
+           note: 'path, bridleway or USFS trail' },
+};
+export const LINE_CASING = '#0f150f';
+
+/* The trails layer is useless below this and would be a smear of ink. At z9 a pixel is 207 m and a
+   square-mile cell is 7.8 px across, with up to 2,228 ways in one z10 tile; at z11 a pixel is 52 m,
+   the cell is 31 px, and geometry simplified to 25 m draws as a line rather than a blur. The viewport
+   cost follows the same curve: about 95 KB gzipped at z11 and in, against 575 KB at z9. The app's own
+   sub-mile refine already appears at z12, so a gate here is consistent with how it treats zoom. */
+export const TRAILS_MIN_ZOOM = 11;
+
 /* What to call the on-route leg of an approach. A road is not a trail, and saying "4.8 mi on the
    trail" about a forest road is the sort of small wrongness that makes a reader discount the
    numbers next to it. The off-trail leg keeps its own name in every case: it describes the leg, not

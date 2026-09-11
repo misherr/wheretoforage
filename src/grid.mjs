@@ -58,6 +58,22 @@ export function terrainAt(getE,lat,lon,d,dl){
   return {slope,aspect};
 }
 
+/* Web-mercator tile coordinates, in fractional tiles so the caller can take the integer part for a
+   tile id and the fraction for a pixel within it.
+
+   One copy, here, for the same reason the lattice is: it lived in index.html and in
+   scripts/build-cells.mjs, and the two agreed to the bit across 20,000 random points and zooms —
+   which is luck rather than a guarantee, and a drift between them would move the terrain samples
+   under the bake while the app kept reading the old pixels. It is map geometry, not ecology, so it
+   belongs beside the lattice and outside src/model/.
+
+   Used at z10 for Terrarium terrain tiles by both bakes, and by src/tile-source.mjs for the access
+   geometry tiles the trails layer loads. */
+export function tileXY(lat, lon, z){
+  const n = 2 ** z, x = (lon + 180) / 360 * n, lr = lat * Math.PI / 180;
+  return { x, y: (1 - Math.log(Math.tan(lr) + 1 / Math.cos(lr)) / Math.PI) / 2 * n };
+}
+
 /* The elevation/weather cache key, shared by the app and the bake script.
 
    Five decimal places, matching what cellCenter() returns. It used to truncate to four, and that

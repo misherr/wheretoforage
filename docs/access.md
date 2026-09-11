@@ -802,3 +802,119 @@ message, because the user would drive to it. Two consequences worth knowing:
 A pasted coordinate resolves through `showAt()`, the same function a map tap
 uses. That is deliberate: the last thing to go wrong in this area was two paths
 into `showPoint` that disagreed about a cell.
+
+## The trails layer, and loading geometry by viewport
+
+The sheet answers "how do I reach this cell" one tap at a time. The layer answers
+"which ground has a route at all" without tapping, which is a different question
+and needs the geometry for everything in view rather than for one way.
+
+### Why not a filter over the one file
+
+`access-geom.json` is 5.52 MB and lazy — fetched once, on the first "show the
+approach", and most viewers never trigger it. A layer cannot wait for that, and
+filtering it client-side would mean downloading all of it first, which is the
+thing being avoided.
+
+### z10 tiles, the same addressing as the terrain
+
+`data/access-tiles/10/<x>/<y>.json`, plus `index.json`. Both bakes already fetch
+Terrarium at z/x/y z10 through `tileXY`, so the scheme is one the app knows and
+the loader is not specific to this data. Measured alternatives:
+
+| tiling | files | total | largest tile | worst viewport |
+| --- | --- | --- | --- | --- |
+| z7 | 11 | 6.04 MB | 1,573 KB | — |
+| z8 | 28 | 6.06 MB | 690 KB | 620 KB |
+| z9 | 81 | 6.10 MB | 240 KB | 363 KB |
+| **z10** | **271** | **6.17 MB** | **72 KB (27 KB gzipped)** | **95 KB gzipped at z11+** |
+
+Median tile: 22 KB on disk, **9 KB gzipped**. So the layer costs about 95 KB for
+the worst two-tile view, against 5.52 MB for the file it replaces — and the
+manifest that makes it possible is 601 bytes gzipped.
+
+### Geometry is clipped at tile edges, and that is only safe here
+
+Each polyline is split where it crosses an edge, **keeping the crossing segment in
+both tiles**, so the drawn line has no gap. It costs +10% in total bytes against
++40% for putting whole ways into every tile they touch, and it caps the largest
+tile at 72 KB instead of 97 KB.
+
+Clipping must never reach the tap-to-draw path. A way clipped to a radius around
+the cell is exactly the bug that truncated trails before v4, and
+`access-geom.json` stays whole for that reason. **Display and measurement have
+different contracts**: a drawn line may be cut at a boundary the viewer cannot
+see, a measured distance may not.
+
+The no-gap property is what the test asserts, and it asserts it directly: every
+consecutive pair of the original polyline must appear as a consecutive pair in
+some tile. The first version of that assertion checked shared endpoints instead,
+which passes on a split that drops the crossing segment — the failure it was
+written to catch.
+
+### A tile carries `[wayIndex, geometry]` and nothing else
+
+Category, name, type, trailhead and segment count are already in the ways table
+the app loads up front from `access.json` — 50,531 entries. Repeating them per
+tile would be bytes spent on a second copy that can disagree with the first.
+
+### The stamp, again
+
+Tiles are fetched `force-cache`, because a tile at a given URL never changes —
+right until the data is re-baked, at which point a returning viewer keeps the old
+tiles forever. That has already happened once here, to `access-geom.json`: the
+server had v4 and the browser served v3 from disk. So every URL carries the bake
+stamp, **and** the manifest's own `generated` is checked against the stamp of the
+loaded `access.json`. A tile set from a different bake would draw lines under way
+indices that mean something else, which is worse than drawing nothing — so the
+mismatch case draws nothing and says why in the console.
+
+### The zoom gate
+
+The layer is off below **z11**. At z9 a pixel is 207 m, a square-mile cell is
+7.8 px, and up to 664 pieces sit in one z10 tile: the layer would be a smear of
+ink and the viewport would want 575 KB to draw it. At z11 a pixel is 52 m, the
+cell is 31 px, and geometry simplified to 25 m draws as a line. The app's own
+sub-mile refine already appears at z12, so a gate here matches how it treats zoom
+elsewhere.
+
+Below the gate the legend says **"zoom in to see them"** rather than drawing
+nothing silently — otherwise a viewer cannot tell "no data here" from "no road
+here", which is the same distinction the *unknown* class exists to preserve.
+
+### Style carries the category, not hue
+
+The fills already own the palette: yellow through red for chance, greens for
+habitat, blues for rain, olives for soil. The tapped approach line was using
+`#e58a2b` for a road — which is exactly the chance layer's "Good" band, so a
+line was borrowing a scoring colour. A test now asserts no line colour collides
+with any fill band.
+
+| category | style | why |
+| --- | --- | --- |
+| drivable road | solid, near-white, 2.5 px | you can drive it |
+| rough road | dashed, grey-white, 1.9 px | logging spur or unmaintained |
+| trail | dotted, mint `#5dcaa5`, 1.9 px | you are walking |
+
+Each is stroked twice: a dark casing at nearly double the width, then the line,
+because a 2 px line over a satellite basemap disappears into it. Draw order is
+rough, then road, then trail on top — a trail is the hardest to see and the most
+worth seeing. The tapped approach now uses the same palette, so one way does not
+change colour depending on how you asked to see it.
+
+### Rough roads get their own switch
+
+They are **45% of the mapped geometry** — 24,398 ways of 50,531, against 9,156
+trails. With them on, the densest ground (the Green River country, 460 pieces in
+one z10 tile, 259 of them rough) reads as a logging-road network, which is
+accurate and not always what you want. With them off the same view shows the
+drivable roads and the trails alone. So each category has its own checkbox under
+the layer: **"what can I drive"** and **"where are the trails"** are one click
+apart.
+
+### What it does not change
+
+A drawn line means **mapped**. Not passable, not open, not legal, not currently
+driveable — the layer's own menu entry and legend both say so, and the tap sheet's
+Sources note is unchanged. The layer never touches a score; it is the same
+separate axis, drawn differently.

@@ -31,6 +31,7 @@ import { osmCategory, osmType, USFS_DRIVABLE_ML, CAP, CATS, encodeGeom, ROW_STRI
          OSM_DRIVE, OSM_TRAIL, OSM_ROUGH,
          TRAILHEAD_NONE, TRAILHEAD_MAPPED, TRAILHEAD_INFERRED } from '../src/access.mjs';
 import { REGIONS, decodePNG, terrariumMetres, tileXY, TERRAIN_SOURCE } from './build-cells.mjs';
+import { writeTiles, TILE_Z } from './build-access-tiles.mjs';
 
 export const GENERATOR = 'scripts/build-access.mjs';
 export const GENERATOR_VERSION = '4.0.0';
@@ -942,6 +943,11 @@ export async function build(opts, deps = {}) {
 
   /* Two files: names and distances up front, geometry only when someone asks to see a line. */
   const geomPath = opts.out.replace(/\.json$/, '') + '-geom.json';
+  /* Derived from --out for the same reason geomPath is. It was TILES_DIR, the module default,
+     which meant a regional test bake wrote three tiles over the statewide set of 271 — found by
+     running one, not by reading it. Every artifact of a bake belongs beside the file it was asked
+     to write. */
+  const tilesDir = opts.out.replace(/\.json$/, '') + '-tiles';
   if (opts.dryRun) log('dry run - not writing');
   else {
     atomicWrite(opts.out, JSON.stringify(out));
@@ -954,6 +960,15 @@ export async function build(opts, deps = {}) {
        everything after the fetch — joining, elevation, clipping decisions, the row format — is
        assembly. Deleting it last time meant a change to any of that cost a ten-hour re-fetch, which
        is exactly what happened. Re-run with --resume to re-assemble for free. */
+    /* The trails layer reads tiles, not the whole geometry file, and a stale tile set would draw a
+       previous bake's lines under this bake's way indices. Written here rather than left to a
+       second command for the same reason withAccess() exists in the app: a step that has to be
+       remembered is a step that gets forgotten. From geomOut rather than outGeom, because a
+       regional re-bake replaces it with the merged geometry a few lines above.
+
+       scripts/build-access-tiles.mjs still runs standalone, for when only the tiling scheme
+       changes — that needs no re-fetch and no re-assembly. */
+    writeTiles(out, geomOut.geom, tilesDir, TILE_Z, log);
     log('kept ' + opts.checkpoint + ' — re-run with --resume to re-assemble without re-fetching');
   }
   log('done in ' + Math.round((Date.now() - t0) / 1000) + 's - ' + osmRequests + ' Overpass ('
