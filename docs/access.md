@@ -986,6 +986,136 @@ refused: USFS by page (about 25 requests) and the describing tags by tag (a few
 Overpass requests; the statewide query with a `highway` regex timed out on every
 mirror, so it asks by tag alone and splits an area that fails).
 
+## How far in, on foot: the hike mode
+
+Three figures per cell were asked for — drive, bike and hike, each a distance, a
+climb and a difficulty bucket. **Hike is built first**, because the network, the
+buckets and the filters are shared, and it was worth getting them right on one
+mode before triplicating them. Drive and bike follow on the same network.
+
+The single-route model this sits beside — "the nearest trail, walked from its own
+trailhead, then straight to the centre" — is what put *Porter Creek Logging Road,
+609 m, drive up* on the user's Deming target, where the road was gated six miles
+short. It knew the road, not the network, and nothing about where a car stops.
+
+### The network
+
+Every way the bake fetched, joined where ways meet: ends within 15 m of each
+other, an end within 15 m of another way's side, and lines that cross — including
+at a shared vertex, which is what an OSM intersection becomes when simplification
+keeps it. Statewide: **816,915 junctions and 1,128,091 stretches of way**, from
+1.01 million end joins, 357,634 side joins and 188,942 crossings.
+
+Junctions are inferred because the checkpoint holds 25 m-simplified geometry and
+no node ids. That errs towards connecting: a trail passing under a bridge becomes
+a junction. The Geofabrik extract in [ROADMAP.md](../ROADMAP.md) would give the
+true topology.
+
+### Where a car can get to
+
+Pessimistic on purpose — this project has twice been burned by access reading
+better than the ground:
+
+- **drivable roads only** — the categories after the rules above;
+- **connected to pavement**: breadth-first from every road that is `motorway` to
+  `tertiary` or tagged paved, along drivable roads;
+- **stopping at mapped gates**: barrier nodes that lie *on* a road (asked for as
+  `node(w)` of the fetched ways, so a gate in a field beside a road never counts),
+  kept six metres off any junction so a gate on a spur never blocks the road it
+  leaves. 65,120 block cars; 739 tagged open to cars are left out; 35,748 land on
+  a drivable road;
+- **stopping where a private or permit-only road starts** — `access`,
+  `motor_vehicle` or `motorcar` of private, no, permit, forestry, agricultural or
+  delivery, most specific tag winning: 36,139 ways. They are still walked.
+
+91.2% of drivable road is reachable from pavement that way. The other 9% is
+behind a gate, a private road, or no mapped link at all.
+
+### The walk
+
+Minutes on foot along the network from wherever a car can reach, driving costing
+nothing: 4 km/h plus 10 minutes per 100 m of climb on anything mapped, then a
+straight line off trail to the cell centre at a third of the speed and twice the
+climb cost. Motorways are driven, never walked.
+
+**Which approach a cell gets.** Every stretch of way within 2.5 km is a
+candidate, not only the nearest. The approach given is the fastest one that keeps
+the off-trail leg within `BUSHWHACK_M` (800 m), and a bushwhack only when there is
+none. Picking the fastest outright made 27% of cells bushwhack — under a
+three-to-one weighting, 900 m of brush from the car beats 4 km of trail — and
+5,725 of those had an approach inside 800 m, 2,025 of them for fifteen minutes
+more or less. The bucket should describe the approach a forager would take. When
+going straight through the brush would save 15 minutes or more, the sheet says so
+beside it (3,439 cells), never instead of it.
+
+**The worst case** is the same walk from the nearest **paved** road, for when the
+gravel turns out to be gated where nobody mapped a gate. It is longer than the
+hike figure by more than five minutes in 28,105 cells.
+
+**Why the car stopped** is recorded and shown: from the road itself (20,754
+cells), where the drivable road turns rough (17,858), the end of the mapped
+drivable road (4,686), a mapped gate (2,137), a private or permit-only road
+(1,199).
+
+### The buckets
+
+The effort model and the thresholds are the user's calibration: brush at three
+times trail — their Deming day was 6 mi and 2,000 ft in 6.5 h, much of it off
+trail — and bushwhack past an 800 m off-trail leg, kept adjustable because it is
+the most sensitive knob.
+
+| bucket | rule | cells |
+| --- | --- | --- |
+| Drive-up | 10 min or less on foot | 8,869 |
+| Easy walk | 30 min or less | 9,243 |
+| Moderate hike | 2 h or less | 12,405 |
+| Long approach | over 2 h | 8,813 |
+| Bushwhack | off-trail leg over 800 m, whatever the time | 7,304 |
+
+Of 48,032 cells, 46,634 have a hike figure. **Minutes and buckets are computed in
+the app from the stored parts**, with the constants in `src/access.mjs`, so a
+threshold can move without a re-bake. Which approach a cell is *given* depends on
+`BUSHWHACK_M` at bake time, so moving that constant relabels cells at once and
+re-routes them on the next `--resume` (about 2.5 minutes).
+
+### Deming
+
+| | on the network | off trail | minutes | bucket |
+| --- | --- | --- | --- | --- |
+| hike | 0 — the car gets there, as mapped | 609 m, +85 ft | 33 | Moderate hike |
+| worst case | 7.7 mi, +3,582 ft from the pavement on Middle Fork Road | 609 m | 328 | Long approach |
+| on the ground | the road was gated ~6 mi short; approached from the south | | ~390 | |
+
+The hike figure is still wrong at Deming, because the gate is not in OSM. That is
+what "as mapped" means, and the sheet says it in those words. The worst case is
+what makes the failure visible: five and a half hours from the pavement, against
+the six and a half the user actually walked.
+
+### Filters
+
+"Within a 2-hour hike", on the map and in Top spots. **Off by default, never
+touching a score, and always saying how many cells they hide** — and how many of
+those have no mapped route, which is unmapped, not unreachable. Hard rule 8 was
+amended for this; see `CLAUDE.md`. The mode is a global setting remembered per
+device, and Top spots can override it for its own list.
+
+### Checked
+
+Every stored route adds up to its hike figure: across 25,880 routes the difference is a median 1 m, 6 m at the 99th percentile, and one route of 25,880 is off by more than 50 m (122 m). Every "mapped gate" stop lies within 31 m of a mapped gate
+(median 9 m), and every "private road" stop but one within 30 m of a restricted
+road. Live, against OSM: 8 of 8 sampled gate stops have a barrier within 40 m, and
+7 of 7 private-road stops that answered have a road tagged private, forestry or
+`access=no` right there. How: [verification.md](verification.md#the-hike-network).
+
+### What it costs
+
+- `access.json` grows from 5.3 MB to 7.75 MB up front — the mode columns for every
+  cell. `access-routes.json`, the routes for drawing, is 8.6 MB and fetched only
+  when someone asks to see one. Both are in [ROADMAP.md](../ROADMAP.md).
+- Inferred junctions: some false connections, and none of OSM's missed.
+- An unmapped gate is invisible to the hike figure. The worst case is the answer
+  to that, not a fix for it.
+
 ## Roads and trails on the map are somebody else's rendering
 
 The tap sheet answers "how would I reach this cell", one cell at a time, from

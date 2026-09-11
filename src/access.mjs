@@ -222,7 +222,8 @@ export function decodeWay(w, geomFlat) {
    trailhead to the point on the way nearest the cell and stopped there — it never included getting
    from that point to the cell, which is why 924 cells reported a walk of exactly 0 while the way was
    up to 1.9 km away. See docs/access.md. */
-export const ACCESS_FORMAT = 5;
+/* v6 appends the mode columns — hike, worst case, direct — after the three categories; see HIKE_AT. */
+export const ACCESS_FORMAT = 6;
 export const ROW_STRIDE = 5;
 export function decodeRow(row) {
   const d = {};
@@ -483,6 +484,121 @@ export const NO_TRAILHEAD_NOTE =
 export const NO_ON_TRAIL_NOTE =
   'No trailhead is mapped on this route, so there is nowhere to measure a walk along it from. '
   + 'Only the off-trail leg below is known.';
+
+/* ===================== modes: how far in, on foot =====================
+
+   Three independent figures per cell — drive, bike, hike — each a distance, a climb and a difficulty
+   bucket. Hike is built first; drive and bike follow on the same network.
+
+   The hike figure is the walk from where a car can get to — drivable roads connected to pavement,
+   stopping at mapped gates and at private or permit-only roads — along any trail, track or gated road,
+   then a straight line off trail to the cell centre. The worst case is the same walk from the nearest
+   PAVED road, for when the gravel turns out to be gated where nobody mapped a gate: the Deming failure,
+   made visible instead of hidden behind "as mapped". Both describe the route as mapped, never as it
+   will be on the day.
+
+   The effort model, agreed with the user: 4 km/h on anything mapped plus 10 minutes per 100 m of climb
+   (Naismith); off trail at a third of the speed — a mile of Cascade brush costs what three miles of
+   trail do — and twice the climb cost. The user's own Deming approach was 6 mi and 2,000 ft in 6.5 h,
+   much of it off trail. */
+export const WALK_KMH = 4;
+export const CLIMB_MIN_PER_100M = 10;
+export const OFF_TRAIL_FACTOR = 3;
+export const OFF_CLIMB_FACTOR = 2;
+
+/* The most sensitive knob, kept adjustable on purpose: at 400 m, 38% of cells were bushwhack in the
+   first measurement, at 1.2 km 12%. The user will revisit it after walking a few cells in each bucket.
+   A bucket is computed in the app from the stored parts, so changing this needs no re-bake. */
+export const BUSHWHACK_M = 800;
+
+/* Going straight through the brush is shown beside the approach, never instead of it, and only when it
+   saves at least this much. One constant for the bake, which decides whether to store it, and the
+   sheet, which decides whether to show it with the measured off-trail climb. */
+export const DIRECT_SAVES_MIN = 15;
+
+export const BUCKETS = [
+  { key: 'drive', label: 'Drive-up', maxMin: 10, blurb: 'ten minutes or less on foot from where the car stops' },
+  { key: 'easy', label: 'Easy walk', maxMin: 30, blurb: 'half an hour or less on foot' },
+  { key: 'moderate', label: 'Moderate hike', maxMin: 120, blurb: 'up to two hours on foot' },
+  { key: 'long', label: 'Long approach', maxMin: Infinity, blurb: 'more than two hours on foot' },
+  { key: 'bushwhack', label: 'Bushwhack', maxMin: null,
+    blurb: 'more than half a mile off trail, however long it takes — the most uncertain figure there is' },
+];
+
+/* Minutes on foot for a set of parts: { on, onUp, off, offUp } in metres. */
+export function footMinutes(p) {
+  if (!p) return null;
+  const perMin = WALK_KMH * 1000 / 60;
+  return p.on / perMin + p.onUp * CLIMB_MIN_PER_100M / 100
+       + p.off * OFF_TRAIL_FACTOR / perMin + p.offUp * CLIMB_MIN_PER_100M / 100 * OFF_CLIMB_FACTOR;
+}
+export function bucketOf(p) {
+  if (!p) return null;
+  if (p.off > BUSHWHACK_M) return BUCKETS[4];
+  const m = footMinutes(p);
+  return BUCKETS.find(b => b.maxMin != null && m <= b.maxMin);
+}
+export function durationLabel(min) {
+  if (min == null) return null;
+  if (min < 55) return Math.max(5, Math.round(min / 5) * 5) + ' min';
+  const h = min / 60;
+  return (h < 10 ? Math.round(h * 2) / 2 : Math.round(h)) + ' h';
+}
+
+/* Why the car stopped where the walk starts, as the bake records it. */
+export const STOP = { none: 0, gate: 1, private: 2, rough: 3, end: 4 };
+export const STOP_LABEL = {
+  [STOP.none]: 'from the road',
+  [STOP.gate]: 'from a mapped gate',
+  [STOP.private]: 'from where a private or permit-only road starts',
+  [STOP.rough]: 'from where the drivable road turns rough',
+  [STOP.end]: 'from the end of the mapped drivable road',
+};
+export const AS_MAPPED_NOTE =
+  'As mapped. A gate, washout or closure nobody mapped is not in these figures — a road gated six '
+  + 'miles short of the ground once read as a drive-up here.';
+export const WORST_CASE_NOTE =
+  'If the gravel turns out to be gated: the same walk from the nearest paved road.';
+
+/* What stops a car, read from OSM tags — shared by the fetch and the checkpoint upgrade. Pessimistic:
+   the most specific access tag wins, and anything short of a plain yes to cars is a stop. */
+const CAR_RESTRICTED = /^(private|no|permit|forestry|agricultural|delivery)$/;
+const carAccessValue = t => t.motorcar || t.motor_vehicle || t.vehicle || t.access || null;
+export function carRestriction(tags) {
+  if (!tags) return null;
+  const v = carAccessValue(tags);
+  return v && CAR_RESTRICTED.test(v) ? v : null;
+}
+export const CAR_BARRIERS = /^(gate|lift_gate|swing_gate|chain|bollard|block|jersey_barrier|log|rope|debris)$/;
+/* A barrier node stops a car unless it is tagged open to cars. 808 of 67,710 were, in the first fetch. */
+export function blocksCars(tags) {
+  if (!tags || !CAR_BARRIERS.test(tags.barrier || '')) return false;
+  return !/^(yes|permissive|designated)$/.test(carAccessValue(tags) || '');
+}
+
+/* v6 rows carry the mode columns after the three categories:
+     hike:   on, onUp, off, offUp, parkEastM, parkNorthM, stop
+     worst:  on, onUp, off, offUp
+     direct: on, onUp, off, offUp      (only when straight through the brush saves 15 min or more)
+   in metres. The park point is metres east and north of the cell centre rather than an index into a
+   table, so a regional merge has nothing to re-point. -1 in a group's first column means no figure. */
+export const HIKE_AT = 2 + 3 * 5;
+export const HIKE_STRIDE = 7;
+export const WORST_AT = HIKE_AT + HIKE_STRIDE;
+export const DIRECT_AT = WORST_AT + 4;
+export const ROW_WIDTH = DIRECT_AT + 4;
+const modeGroup = (row, at) => row[at] != null && row[at] >= 0
+  ? { on: row[at], onUp: Math.max(0, row[at + 1]), off: row[at + 2], offUp: Math.max(0, row[at + 3]) } : null;
+export function decodeModes(row, lat, lon) {
+  const hike = modeGroup(row, HIKE_AT);
+  if (hike) {
+    const dx = row[HIKE_AT + 4], dy = row[HIKE_AT + 5];
+    hike.park = lat != null && lon != null
+      ? [lat + dy / 111320, lon + dx / (111320 * Math.cos(lat * Math.PI / 180))] : null;
+    hike.stop = row[HIKE_AT + 6] >= 0 ? row[HIKE_AT + 6] : STOP.none;
+  }
+  return { hike, worst: modeGroup(row, WORST_AT), direct: modeGroup(row, DIRECT_AT) };
+}
 
 /* ===================== external links =====================
 

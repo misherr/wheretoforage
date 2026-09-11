@@ -19,9 +19,10 @@ src/model/      the ecological model — the science, and nothing else
 src/grid.mjs    the cell lattice, the state outline, terrainAt, pointKey
 src/access.mjs  how you would reach a cell — a separate axis, never a score input
 src/coords.mjs  the coordinate readout and the paste parser
-scripts/        build-cells.mjs, build-access.mjs, fetch-weather.mjs, serve.mjs
+scripts/        build-cells.mjs, build-access.mjs, fetch-weather.mjs, serve.mjs,
+                access-network.mjs (the route network), access-modes.mjs (per-cell hike figures)
 tests/model/    the model regression suite
-data/           cells.json, weather.json, evt-names.json, access.json (+ -geom) — checked in
+data/           cells.json, weather.json, evt-names.json, access.json (+ -geom, -routes) — checked in
 ```
 
 Washington is divided into ~48,000 one-square-mile cells. Each carries baked
@@ -58,8 +59,13 @@ that does not say so. File-by-file detail:
    `tests/model/purity.test.mjs` enforces them mechanically.
 8. **Access never touches a score.** It is a separate axis: its own module
    outside `src/model/`, its own data file, its own section of the tap sheet, and
-   a *sort* option in Top spots rather than a filter. Tests assert the model
-   cannot even see it. [docs/access.md](docs/access.md)
+   a *sort* option in Top spots. Tests assert the model cannot even see it.
+   **A filter is allowed only if it is explicit, counted and off by default** —
+   "within a 2-hour hike" hides cells, never changes a score, and says how many
+   it hides and how many of those simply have no mapped route. The rule exists so
+   access can never *silently* suppress ground; a filter the viewer turned on and
+   can see the cost of does not do that. (Amended 2026-09-11 at the user's
+   request, when the hike mode added filters.) [docs/access.md](docs/access.md)
 
 ## Critical invariants
 
@@ -102,6 +108,15 @@ while nothing throws.
   walk from where a car cannot go. Trailheads were once inferred during the fetch, against whatever
   each source alone called drivable; 8.4% of them rested on such a road.
   [docs/access.md](docs/access.md#two-sources-one-road)
+- **A hike figure starts where a car can get to, and says so.** Drivable roads connected to
+  pavement, stopping at mapped gates — barriers *on* roads, never beside them — and at private or
+  permit roads; then any trail, track or gated road on foot, and a straight line off trail at the
+  end. The approach given is the fastest that keeps the off-trail leg within `BUSHWHACK_M`, and a
+  bushwhack only when none does. The worst case — the same walk from the nearest paved road — is
+  always shown beside it, because a gate nobody mapped is invisible to the network: that is the
+  Deming case, and the worst case is what makes it visible. Minutes and buckets are computed in the
+  app from stored parts; never bake a threshold into the file.
+  [docs/access.md](docs/access.md#how-far-in-on-foot-the-hike-mode)
 - **`access-geom.json` stays whole and lazy**, fetched for the *tapped* approach only: clipped
   geometry is right for drawing and wrong for measuring, and a clip is what truncated trails
   before v4.

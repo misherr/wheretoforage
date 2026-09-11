@@ -58,6 +58,32 @@ git show b61b0a8:scripts/network-tiles.test.mjs
 and add the pyramid, a decoder hook and cancellation, rather than keeping 23
 tests guarding code that nothing runs.
 
+### Drive and bike modes: next, in that order
+
+**Agreed with the user, not built.** The hike mode (v6) built the shared parts —
+the route network, where a car can get to, the buckets and the filters — so both
+of these add a calculation rather than an infrastructure.
+
+- **Drive**: minutes from the nearest paved road along drivable roads to where the
+  car stops — 35 mph on pavement, 25 on USFS level 4–5, 15 on level 3 or unrated
+  gravel — which answers how deep into the forest-road network a cell sits. The
+  stopping rules already exist (gates on roads, private and permit roads); the
+  remainder becomes the walk, which the hike already computes. Filter: "within 30
+  minutes of driving", under the same off-by-default, counted rule.
+- **Bike**: level 1–2 roads and singletrack a truck cannot use, **blocked
+  absolutely** by the USFS closed-to-motorized layer, by wilderness boundaries and
+  by `bicycle=no`. Wilderness is a new source — the USFS EDW wilderness layer —
+  and is not fetched yet.
+
+### The routes file is 8.6 MB
+
+`data/access-routes.json` — 25,880 routes over 111,115 stretches of way — is what
+"Show the route" draws, and it is fetched whole on the first request. The estimate
+before building it was 1.9 MB; it counted edges but not the per-cell lists and the
+partial last edges. On a phone on a slow connection that first request is slow.
+Splitting it by region, like the geometry tiles once were, would make it a few
+hundred KB per request. Not done until it is known how often anyone asks.
+
 ### A way with a road at both ends is walked from its first end, not the nearer one
 
 **Open — the user's call. Measured 2026-09-10, not acted on.**
@@ -74,6 +100,11 @@ nearer one along the way. It would shorten a large number of shipped walks,
 which is why it is not folded into a verification-sized change: it wants its own
 before/after, and a decision about whether "the nearer end" should also prefer a
 paved road over a high-clearance one when both are drivable.
+
+**The hike figure (v6) does not have this problem**: it walks the network from
+wherever a car can reach, so a way with a road at each end is entered from
+whichever end is quicker. It remains for the per-category "Getting in" figures
+under it on the sheet.
 
 ### Drop Overpass for a Geofabrik extract
 
@@ -135,6 +166,11 @@ not worth folding into a display-layer change.
 the 101.3 MB checkpoint something other than the only copy of the fetched
 network. They were deleted with the layer, so it is the only copy once more:
 losing it costs a full re-fetch, through Overpass.
+
+**It would also give the route network real junctions.** v6 infers them — ends
+within 15 m, an end on another way's side, lines that cross — because the
+checkpoint has no node ids. A PBF has them, so the network would stop guessing
+where ways meet, and a bridge would stop being a junction.
 
 **What it does not change.** USFS roads and trails still come from the EDW
 ArcGIS endpoints, which have never given trouble, and the terrain tiles still
@@ -200,6 +236,11 @@ first and grow numbers beside them a moment later. That trade has not been made.
 If it ever is, **both** columns move together: the two climbs are added and shown
 as one total, so having one arrive late and the other immediately would be worse
 than either arrangement.
+
+**v6 made the question bigger: 5.3 MB → 7.75 MB.** The hike columns have to be up
+front — the filters and Top spots read them for every cell — but the worst case
+and the straight-in alternative are only read on a tap and could move to the
+lazily fetched routes file, about 1 MB. Also the user's call.
 
 ### ~~16,091 cells hold a walk figure that is never shown~~ — done in v5
 

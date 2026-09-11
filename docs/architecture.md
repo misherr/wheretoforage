@@ -100,10 +100,19 @@ every file, what it does, and the reasoning that is not obvious from reading it.
 - **`scripts/build-access.test.mjs`** — no network. Covers the classification,
   the polyline densification, the tiling, the regional merge, and the assertion
   that matters most: that nothing under `src/model/` can see access at all.
+- **`scripts/access-network.mjs`** — the route network: every fetched way,
+  joined where ways meet (ends, sides, crossings — inferred, because the
+  checkpoint has no node ids), where a car can get to from pavement, and the walk
+  from there. Pure: elevation is injected, nothing is fetched.
+- **`scripts/access-modes.mjs`** — per-cell mode figures from that network: the
+  hike approach, the worst case from the nearest paved road, the straight-in
+  alternative, where the car stops and why, and the routes file for drawing.
 - **`data/access.json`** — per-cell distance to the nearest mapped trail, road
-  and rough way, keyed by cell index rather than row position. Optional at
-  runtime: without it every cell reads as unknown and the app is otherwise
-  unchanged.
+  and rough way, then the mode columns (v6), keyed by cell index rather than row
+  position. Optional at runtime: without it every cell reads as unknown and the
+  app is otherwise unchanged.
+- **`data/access-routes.json`** — the route each cell's hike figure walks,
+  fetched only when "Show the route" is tapped, stamped with the bake.
 - **`scripts/serve.mjs`** — dependency-free static server for local
   development, `node scripts/serve.mjs [port]`. Exists because the app can no
   longer be opened over `file://`, and because it guarantees the `.mjs` MIME

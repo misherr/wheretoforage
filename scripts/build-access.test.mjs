@@ -295,11 +295,12 @@ test('bake: produces at most one row per cell, keyed by cell index', async () =>
      left out are exactly the ones the fixture's ways do not reach. */
   assert.ok(r.rows.length > 0 && r.rows.length <= rows.length,
     `${r.rows.length} rows for ${rows.length} cells`);
-  for (const row of r.rows) assert.equal(row.length, 2 + AC.CATS.length * AC.ROW_STRIDE,
-    'rows are [i, j] then distance/way/walk/gain per category');
+  for (const row of r.rows) assert.equal(row.length, AC.ROW_WIDTH,
+    'rows are [i, j], then distance/way/walk/gain per category, then the mode columns');
   for (const row of r.rows) {
-    const d = AC.decodeRow(row);
-    assert.ok(AC.CATS.some(c => d[c] >= 0), 'a row exists only when something was found');
+    const d = AC.decodeRow(row), m = AC.decodeModes(row);
+    assert.ok(AC.CATS.some(c => d[c] >= 0) || m.hike || m.worst,
+      'a row exists only when something was found — a nearby way, or a route over the network');
   }
   const keys = new Set(r.rows.map(x => x[0] + ':' + x[1]));
   assert.equal(keys.size, r.rows.length, 'cell indices must be unique — one row per cell, no repeats');
@@ -805,11 +806,13 @@ test('format: the bake stamps the version the app reads, from one constant', asy
   const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
   assert.match(app, /j\.version!==ACCESS_FORMAT/,
     'the app must refuse a version it does not know rather than misdecoding it');
-  assert.equal((app.match(/j\.version!==ACCESS_FORMAT/g) || []).length, 2,
-    'both access.json and access-geom.json need the check — a stale geometry file draws a wrong line');
+  assert.equal((app.match(/j\.version!==ACCESS_FORMAT/g) || []).length, 3,
+    'access.json, access-geom.json and access-routes.json all need the check — a stale geometry or routes file draws a wrong line');
 
   /* And the width really does depend on the stride, so a future change cannot forget to bump it. */
-  assert.equal(out.rows[0].length, 2 + AC.CATS.length * AC.ROW_STRIDE);
+  assert.equal(out.rows[0].length, AC.ROW_WIDTH);
+  assert.equal(AC.ROW_WIDTH, 2 + AC.CATS.length * AC.ROW_STRIDE + AC.HIKE_STRIDE + 4 + 4,
+    'the categories, then hike (7), worst case (4) and direct (4)');
   assert.equal(out.ways[0].length, 7);
   fs.rmSync(dir, { recursive: true, force: true });
 });

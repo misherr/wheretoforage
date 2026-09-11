@@ -355,7 +355,8 @@ test('checkpoint: a schema-1 checkpoint is upgraded in place, never re-fetched',
   assert.ok(ck.ways['unfsr-closed11.1'], 'by its pieces');
   assert.equal(ck.ways.o1.rd, 'motor_vehicle=no', 'the describing tag was backfilled');
   assert.equal(pages.length, 3, 'USFS by page');
-  assert.ok(queries.length >= 1 && queries.length <= 3, 'and a handful of Overpass tag queries: ' + queries.length);
+  assert.ok(queries.length >= 1 && queries.length <= 6,
+    'and a handful of Overpass tag queries — describing tags, then gates, restricted roads and paved: ' + queries.length);
   assert.equal(r.provenance.checkpoint_schema, A.CHECKPOINT_SCHEMA);
   fs.rmSync(dir, { recursive: true, force: true });
 });

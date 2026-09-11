@@ -377,3 +377,39 @@ around the old point and around the new one. Query both, for the reason in
 over the whole state timed out with a 504 on every mirror. Filter by the
 selective tag alone — `take()` already ignores ways the checkpoint does not hold
 — and split an area that fails into quarters, as the tile fetch does.
+
+## The hike network
+
+The figures are only as good as the network under them, and every part of the
+network is inferred — so each part is checked by something other than the code
+that built it.
+
+**The route adds up to the figure.** For every cell with a stored route, sum the
+decoded edges plus the partial last edge and compare with the hike figure's
+on-network metres. The first version sampled twenty points per segment to find
+where a route leaves the network, which left 44 routes more than 50 m off their
+figure — up to 231 m on long straight segments; an exact projection fixed it.
+
+**Why the car stopped is where it says.** Every "mapped gate" stop must lie within
+the gate snapping distance of a mapped gate (it lands on the road and is kept six
+metres off any junction, so 31 m at most). Every "private road" stop must lie on a
+road tagged closed to cars.
+
+**Then ask OSM live**, 40 m around a spread of those points: a barrier for each
+gate stop, an `access`/`motor_vehicle` restriction for each private-road stop.
+
+**Deming is the regression case.** 48.8003140, -122.0556248: the gate six miles
+short is unmapped, so the hike figure is a drive-up and must stay honest about
+that; the worst case must stay a long approach of roughly five and a half hours.
+If a change makes the worst case short, something has started trusting gravel.
+
+**A crossing on a vertex.** The first crossing test required the lines to cross
+strictly inside both segments. An OSM intersection is a node shared by both ways,
+and when simplification keeps it the lines meet exactly at a vertex of each — so
+every one of those was missed, and the test that caught it was a synthetic
+junction built on round numbers. Build fixtures on round numbers on purpose.
+
+**Filters state their cost.** With "within a 2 h hike" on, the legend and Top
+spots must both say how many cells are hidden and how many of those have no
+mapped route; and turning the filter off must bring back exactly the cells it
+hid, with the same scores.

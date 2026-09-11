@@ -131,6 +131,17 @@ body.sheet-open #tap-hint{opacity:0}
 /* A figure that is real but should not be read at face value. Muted gold, reused from the score
    bands rather than a new colour, and no icon: it is a caveat, not an error. */
 .caveat{color:var(--c-med)}
+/* A difficulty bucket: neutral on purpose, so it never borrows a colour that means a score. */
+.bucket{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 7px;font-size:11px;color:var(--pore)}
+#layers .modebar{padding:4px 8px 6px;font-size:12px;display:flex;flex-direction:column;gap:6px}
+#layers .modebar .pill{padding:3px 9px;font-size:12px;margin-right:4px}
+#layers .modebar small,#layers .modebar .pill small{color:var(--pore-dim)}
+#layers .modebar select{margin-left:4px;font:inherit}
+.pill[disabled]{opacity:.45;cursor:default}
+/* The menu grew a "Getting there" section and ran past the bottom of a short screen — 497 px of menu
+   in a 479 px window, with no way to scroll to the part that was cut off. Capped to the screen, and
+   to the dynamic viewport where the browser has one, so iOS's toolbars do not cut it off either. */
+#layers{max-height:calc(100vh - 84px);max-height:calc(100dvh - 84px);overflow-y:auto;overscroll-behavior:contain}
 /* A line layer's swatch is a line, not a filled square — the menu and the legend should look like
    what they switch on. */
 #layers .sep{height:1px;background:var(--line);margin:6px 4px}
@@ -241,7 +252,9 @@ import { classifyAccess, accessDetail, accessRank, accessDistance, gainLabel, ex
          NO_TRAILHEAD_NOTE, decodeRow as decodeAccessRow, decodeWay as decodeAccessWay,
          CLASSES as ACCESS_CLASSES, ACCESS_FORMAT, accessAt, CELL_SCOPE_NOTE,
          NOT_EXAMINED_LABEL, NOT_EXAMINED_NOTE, OFF_TRAIL_NOTE,
-         NO_ON_TRAIL_NOTE, onRouteLabel, LINE_STYLE, LINE_CASING } from './src/access.mjs';
+         NO_ON_TRAIL_NOTE, onRouteLabel, LINE_STYLE, LINE_CASING,
+         decodeModes, footMinutes, bucketOf, durationLabel, BUSHWHACK_M, STOP_LABEL, AS_MAPPED_NOTE,
+         WORST_CASE_NOTE, DIRECT_SAVES_MIN, decodeGeom as decodeAccessGeom } from './src/access.mjs';
 /* ===================== CONFIG ===================== */
 const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
 const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400; // local refine below 1 mi when zoomed way in
@@ -552,6 +565,32 @@ const OVERLAYS={
     val:e=>{const x=e.A&&e.A.fut&&e.A.fut[Math.min(T,e.A.fut.length-1)]; return x?x.M:null;}}
 };
 const active=new Set(['chance']);
+/* ---- how you are getting there: a global mode, with a per-view override ----
+   Hike is built; drive and bike follow on the same network (src/access.mjs). The mode is a setting,
+   remembered per device; Top spots can override it for its own list without changing the map's. */
+const MODES={hike:{label:'Hike',ready:true},drive:{label:'Drive',ready:false,soon:'next'},bike:{label:'Bike',ready:false,soon:'after drive'}};
+let MODE=(()=>{ try{ const m=localStorage.getItem('bolete.mode'); return MODES[m]&&MODES[m].ready?m:'hike'; }catch(_){ return 'hike'; } })();
+let topMode=null;                       // Top spots' own mode; null follows the map's
+const modeFor=view=>view==='top'&&topMode?topMode:MODE;
+/* Filters: "within a 2-hour hike". OFF BY DEFAULT, never touching a score, and always saying how many
+   cells they hide. Hard rule 8 was written so that access could never SILENTLY suppress ground; an
+   explicit, counted, off-by-default filter does not. A cell with no mapped route is hidden by a filter
+   too, but counted apart: unmapped is not the same as unreachable. */
+const WITHIN={hike:[30,60,120,240]};
+let mapWithin=null, topWithin=null;     // minutes; null is off, and off is the default
+const minutesIn=(e,mode)=>mode==='hike'&&e&&e.modes&&e.modes.hike?footMinutes(e.modes.hike):null;
+const withinOK=(e,mode,within)=>{ if(within==null) return true; const m=minutesIn(e,mode); return m!=null&&m<=within; };
+const withinLabel=(mode,within)=>mode==='hike'?'within a '+durationLabel(within)+' hike':'within '+durationLabel(within);
+/* What a filter hides, counted over a pool — the map's Medium-or-better cells, or Top spots' list. */
+function filterCounts(pool,mode,within){ let shown=0,far=0,none=0;
+  for(const e of pool){ if(within==null||withinOK(e,mode,within)) shown++; else if(minutesIn(e,mode)==null) none++; else far++; }
+  return {shown,far,none,total:shown+far+none}; }
+function hiddenNote(c,mode,within){
+  if(within==null) return '';
+  if(!(c.far+c.none)) return withinLabel(mode,within)+': nothing hidden';
+  return `${withinLabel(mode,within)}: showing ${c.shown.toLocaleString()} of ${c.total.toLocaleString()}, ${(c.far+c.none).toLocaleString()} hidden`
+    +(c.none?` — ${c.none.toLocaleString()} of those have no mapped route, which means unmapped, not unreachable`:''); }
+const scoredPool=()=>{ const out=[]; for(const e of cells.values()){ const v=OVERLAYS.chance.val(e); if(v!=null&&v>=25) out.push(e); } return out; };
 function bandFor(ov,v){ let b=null; for(const x of ov.bands) if(v>=x[0]) b=x; return b; }
 
 /* ---- single canvas for all cells ---- */
@@ -563,8 +602,8 @@ const CellCanvas=L.Layer.extend({
     const vb=m.getBounds().pad(0.02); const n=active.size; const order=[...active].sort((a,b)=>OVERLAYS[a].order-OVERLAYS[b].order);
     const rect=(e,dlat,dlon,col,op)=>{ const p1=m.latLngToContainerPoint([e.lat+dlat/2,e.lon-dlon/2]), p2=m.latLngToContainerPoint([e.lat-dlat/2,e.lon+dlon/2]); ctx.globalAlpha=op; ctx.fillStyle=col; ctx.fillRect(p1.x,p1.y,Math.max(1,p2.x-p1.x),Math.max(1,p2.y-p1.y)); };
     for(const k of order){ const ov=OVERLAYS[k]; const op=n>1?0.4:(k==='chance'?0.65:0.5);
-      for(const e of cells.values()){ if(e.lat<vb.getSouth()||e.lat>vb.getNorth()||e.lon<vb.getWest()||e.lon>vb.getEast()) continue; if(fineEntries.length&&fineBounds.contains([e.lat,e.lon])) continue; const v=ov.val(e); if(v==null) continue; const bd=bandFor(ov,v); if(!bd) continue; rect(e,DLAT,DLON,bd[2],op); }
-      for(const e of fineEntries){ const v=ov.val(e); if(v==null) continue; const bd=bandFor(ov,v); if(!bd) continue; rect(e,e.size,e.lonsize||e.size,bd[2],op); } }
+      for(const e of cells.values()){ if(e.lat<vb.getSouth()||e.lat>vb.getNorth()||e.lon<vb.getWest()||e.lon>vb.getEast()) continue; if(fineEntries.length&&fineBounds.contains([e.lat,e.lon])) continue; if(mapWithin!=null&&!withinOK(e,MODE,mapWithin)) continue; const v=ov.val(e); if(v==null) continue; const bd=bandFor(ov,v); if(!bd) continue; rect(e,DLAT,DLON,bd[2],op); }
+      for(const e of fineEntries){ if(mapWithin!=null&&!withinOK(e,MODE,mapWithin)) continue; const v=ov.val(e); if(v==null) continue; const bd=bandFor(ov,v); if(!bd) continue; rect(e,e.size,e.lonsize||e.size,bd[2],op); } }
     ctx.globalAlpha=1; }
 });
 const cellLayer=new CellCanvas().addTo(map);
@@ -631,6 +670,7 @@ function renderLegends(){
         : `<span>as ${ROAD_OVERLAYS[ROAD_OVERLAY].name} draws them</span><span style="color:var(--pore-dim)">mapped, not confirmed passable or open</span>`)
       +`</div>`;
   }
+  if(mapWithin!=null) h+=`<div class="lg"><b>Filter</b><span>${hiddenNote(filterCounts(scoredPool(),MODE,mapWithin),MODE,mapWithin)}</span><span style="color:var(--pore-dim)">as mapped · never changes a score</span></div>`;
   $('legends').innerHTML=h; }
 function buildLayersMenu(){
   const fills=Object.keys(OVERLAYS).sort((a,b)=>OVERLAYS[a].order-OVERLAYS[b].order).reverse().map(k=>{const ov=OVERLAYS[k];return `<label><input type="checkbox" data-o="${k}" ${active.has(k)?'checked':''}><i style="background:${ov.bands[Math.floor(ov.bands.length/2)][2]}"></i><span>${ov.name}<small>${ov.sub}</small></span></label>`;}).join('');
@@ -638,7 +678,13 @@ function buildLayersMenu(){
      a rendered raster cannot be filtered by category, which is the trade made for somebody else's
      finished cartography. */
   const roads=`<label><input type="checkbox" data-r="roads" ${roadsWanted?'checked':''}><i class="ln" style="background:#4a4a40"></i><span>Forest roads and trails<small>OpenStreetMap as ${ROAD_OVERLAYS[ROAD_OVERLAY].name} draws it — what is mapped, not passable, open or legal</small></span></label>`;
-  $('layers').innerHTML=fills+`<div class="sep"></div>`+roads;
+  const modeBtns=Object.entries(MODES).map(([k,m])=>`<button class="pill${MODE===k?' on':''}" data-mode="${k}" ${m.ready?'':'disabled'}>${m.label}${m.ready?'':' <small>'+m.soon+'</small>'}</button>`).join('');
+  const within=`<select data-within><option value="">at any distance</option>${(WITHIN[MODE]||[]).map(v=>`<option value="${v}"${mapWithin===v?' selected':''}>${withinLabel(MODE,v)}</option>`).join('')}</select>`;
+  const modes=`<div class="modebar"><b>Getting there</b><div>${modeBtns}</div><label>Show cells ${within}</label><small>Off by default. It hides cells, never changes a score, and the legend says how many it hides.</small></div>`;
+  $('layers').innerHTML=fills+`<div class="sep"></div>`+roads+`<div class="sep"></div>`+modes;
+  $('layers').querySelectorAll('button[data-mode]').forEach(b=>b.onclick=ev=>{ ev.stopPropagation(); if(b.disabled) return; MODE=b.dataset.mode;
+    try{ localStorage.setItem('bolete.mode',MODE); }catch(_){} buildLayersMenu(); renderAll(); });
+  $('layers').querySelector('select[data-within]').onchange=ev=>{ mapWithin=ev.target.value?+ev.target.value:null; renderAll(); };
   $('layers').querySelectorAll('input[data-o]').forEach(inp=>inp.onchange=()=>{ if(inp.checked) active.add(inp.dataset.o); else active.delete(inp.dataset.o); renderAll(); });
   $('layers').querySelector('input[data-r]').onchange=ev=>{ roadsWanted=ev.target.checked; syncRoads(); renderLegends(); }; }
 
@@ -671,7 +717,7 @@ const STATIC={cells:null,weather:null,access:null,tried:false}; let weatherAsOf=
    and for a long time only the first attached access, so a tap and a Top spots row on the same cell
    disagreed. Wrapping the constructor is what makes a fifth path get it for free instead of
    silently reading as "nothing mapped". */
-const withAccess=e=>{ if(e) e.access=accessAt(STATIC.access&&STATIC.access.byCell,e.lat,e.lon); return e; };
+const withAccess=e=>{ if(e){ e.access=accessAt(STATIC.access&&STATIC.access.byCell,e.lat,e.lon); e.modes=accessAt(STATIC.access&&STATIC.access.modes,e.lat,e.lon); } return e; };
 /* Did the bake look near this point at all? Unknown by omission is not the same answer as unknown
    by inspection, and the sheet has to be able to tell them apart. With no examined set — an older
    access.json, or cells.json missing — assume it did, which is the pre-existing behaviour. */
@@ -732,8 +778,12 @@ async function tryStatic(){
       /* Geometry is shared by way rather than duplicated per cell — the difference between an 8 MB
          file and a 47 MB one. Rows carry indices into j.ways; decoding is deferred to the tap so
          48,000 polylines are never built up front. */
-      STATIC.access={ways:j.ways||[],byCell:new Map(),geom:null,examined:null};
-      for(const row of j.rows) STATIC.access.byCell.set(row[0]+':'+row[1],decodeAccessRow(row));
+      STATIC.access={ways:j.ways||[],byCell:new Map(),modes:new Map(),geom:null,routes:null,examined:null};
+      for(const row of j.rows){
+        STATIC.access.byCell.set(row[0]+':'+row[1],decodeAccessRow(row));
+        const [la,lo]=cellCenter(row[0],row[1]), m=decodeModes(row,la,lo);
+        if(m.hike||m.worst) STATIC.access.modes.set(row[0]+':'+row[1],m);
+      }
       /* Which cells the bake actually walked, so a missing row can be told from a missing lookup.
          Every access row belongs to a cells.json cell (verified: 0 of 46,373 fall outside it), and
          the 1,659 baked cells with no row were examined and had nothing — those are honestly
@@ -1171,6 +1221,7 @@ function showPoint(e,t){
       h+=`<dt>Access</dt><dd>${NOT_EXAMINED_LABEL}<br>${dim(NOT_EXAMINED_NOTE)}</dd></dl>`;
       pendingWay=-1;
     } else {
+      h+=hikeBlock(e,dim);
       h+=`<dt>Access</dt><dd>`
         +(ac.wayName?`<b>${ac.wayName}</b>`:ac.label)
         +(ac.way&&ac.way.segments>1?' '+dim('('+ac.way.segments+' mapped segments joined)'):'')
@@ -1258,6 +1309,8 @@ function showPoint(e,t){
   $('sheet-body').querySelectorAll('.fc>div').forEach((el,i)=>el.onclick=()=>showPoint(e,i));
   const dw=$('sheet-body').querySelector('.drawway');
   if(dw&&pendingWay>=0) dw.onclick=ev=>{ ev.preventDefault(); dw.textContent='Loading the line…'; drawApproach(pendingWay,e,dw); };
+  const dr=$('sheet-body').querySelector('.drawroute');
+  if(dr) dr.onclick=ev=>{ ev.preventDefault(); dr.textContent='Loading the route…'; drawRoute(e,dr); };
   map.panTo([e.lat,e.lon],{animate:true});
 }
 
@@ -1324,6 +1377,76 @@ async function drawApproach(wayIndex,cell,link){
   closeSheet();
 }
 
+/* The hike figure in the tap sheet. The minutes and the bucket come from the stored parts and the
+   constants in src/access.mjs — nothing here decides a threshold. */
+function hikeBlock(e,dim){
+  const M=e.modes; if(!M||!M.hike) return '';
+  const h=M.hike, min=footMinutes(h), b=bucketOf(h);
+  const climb=up=>up>=15?' · '+(gainLabel(up)||''):'';
+  let t=`<dt>Hike</dt><dd><span class="bucket">${b.label}</span> <b>${durationLabel(min)}</b> ${dim('on foot, one way')}<br>`;
+  if(h.on>0) t+=`${accessDistance(h.on)}${climb(h.onUp)} ${dim('on trails, tracks and roads, '+STOP_LABEL[h.stop])}<br>`;
+  else t+=`${dim('Straight from the road: a car gets this close, as mapped.')}<br>`;
+  t+=`${accessDistance(h.off)}${climb(h.offUp)} <span class="caveat">off trail</span>`
+    +(h.off>BUSHWHACK_M?` ${dim('— more than '+accessDistance(BUSHWHACK_M)+' of it, which is what makes this a bushwhack')}`:'')
+    +` <a href="#" class="drawroute">Show the route</a><br>${dim(AS_MAPPED_NOTE)}</dd>`;
+  const W=M.worst;
+  if(W){ const wm=footMinutes(W);
+    t+=`<dt>If the gravel is gated</dt><dd>`+(wm>min+5
+      ? `<b>${durationLabel(wm)}</b> ${dim('· '+bucketOf(W).label)} — ${accessDistance(W.on)}${climb(W.onUp)} from the nearest paved road, then ${accessDistance(W.off)} off trail<br>${dim(WORST_CASE_NOTE)}`
+      : dim('No different: this approach does not depend on a gravel road staying open.'))+`</dd>`; }
+  /* The bake stored it against an estimated climb; shown only if it still saves enough with the measured one. */
+  const D=M.direct;
+  if(D&&footMinutes(D)<=min-DIRECT_SAVES_MIN) t+=`<dt>Straight in</dt><dd>${durationLabel(footMinutes(D))} ${dim('· '+accessDistance(D.off)+' of it off trail — shorter on paper, through ground nobody mapped')}</dd>`;
+  return t;
+}
+
+/* The route the hike figure describes: the walk over the network, where the car stops, and the
+   straight off-trail line to the cell centre. From its own lazily fetched file, stamped with the bake
+   like access-geom.json and for the same reason: force-cache on an unstamped URL kept a returning
+   viewer on a previous bake's lines. */
+let routesFetch=null;
+async function loadAccessRoutes(){
+  if(!STATIC.access) return null;
+  if(STATIC.access.routes) return STATIC.access.routes;
+  if(!routesFetch) routesFetch=(async()=>{
+    try{ const r=await fetch('data/access-routes.json?g='+encodeURIComponent(accessAsOf||''),{cache:'force-cache'});
+      if(!r.ok) return null;
+      const j=await r.json();
+      if(j.version!==ACCESS_FORMAT){ console.warn(`access-routes.json is format v${j.version} — not drawing routes`); return null; }
+      const byCell=new Map(); for(const c of j.cells) byCell.set(c[0]+':'+c[1],c);
+      STATIC.access.routes={edges:j.edges,byCell}; return STATIC.access.routes;
+    }catch(_){ return null; }
+  })();
+  return routesFetch;
+}
+async function drawRoute(cell,link){
+  const M=cell.modes; if(!M||!M.hike) return;
+  const R=await loadAccessRoutes();
+  if(link) link.textContent='Show the route';
+  if(!R){ if(link) link.textContent='Could not load the route'; return; }
+  if(approachLayer){ approachLayer.remove(); approachLayer=null; }
+  const c=R.byCell.get(cellKey(cell.lat,cell.lon));
+  const lines=c?c[2].map(k=>decodeAccessGeom(R.edges[k])).concat([decodeAccessGeom(c[3])]):[];
+  const last=lines.length?lines[lines.length-1]:null;
+  const end=last&&last.length?last[last.length-1]:M.hike.park;
+  const layers=[];
+  for(const g of lines) if(g.length>1){
+    layers.push(L.polyline(g,{color:LINE_CASING,weight:7,opacity:.55,pane:'approach'}));
+    layers.push(L.polyline(g,{color:LINE_STYLE.trail.colour,weight:3,pane:'approach'}));
+  }
+  /* the off-trail leg: a straight line and nothing more, drawn as one */
+  if(end) layers.push(L.polyline([end,[cell.lat,cell.lon]],{color:'#f2ede0',weight:2.5,dashArray:'2 6',pane:'approach'}));
+  if(M.hike.park) layers.push(L.circleMarker(M.hike.park,{radius:6,color:LINE_CASING,weight:2,fillColor:'#f2ede0',fillOpacity:1,pane:'approach'})
+    .bindTooltip('Where the car stops, as mapped: '+STOP_LABEL[M.hike.stop].replace(/^from /,'')));
+  approachLayer=L.layerGroup(layers).addTo(map);
+  const pts=lines.flat(); if(M.hike.park) pts.push(M.hike.park); pts.push([cell.lat,cell.lon]);
+  const b=L.latLngBounds(pts).pad(0.2);
+  const fit=()=>map.fitBounds(b); const sz=map.getSize();
+  if(sz.x>0&&sz.y>0) fit(); else map.once('resize',fit);
+  closeSheet();
+}
+
+const modeSummary=(e,mode)=>{ const h=mode==='hike'&&e.modes&&e.modes.hike; return h?' · '+bucketOf(h).label.toLowerCase()+', '+durationLabel(footMinutes(h)):''; };
 function showTop(){
   const pool=[...cells.values()].filter(e=>e.A&&!e.failed);
   const byK=new Map(); pool.forEach(e=>byK.set(key(e.lat,e.lon),e));
@@ -1331,28 +1454,45 @@ function showTop(){
   /* Sorting only. accessRank never enters a score — it reorders a list of cells that were already
      selected by score, so the same cells appear either way. */
   const scoreSort=(a,b)=>b.A.now.score-a.A.now.score;
-  const accessSort=(a,b)=>accessRank(a.access)-accessRank(b.access)||scoreSort(a,b);
-  const qualified=pool.filter(e=>e.A.now.score>=25);
+  const tMode=modeFor('top');
+  /* "Easiest" is the fewest minutes in the view's mode, where a figure exists; a cell with none sorts
+     after every cell with one, and the old class-and-distance order breaks the rest. Still a sort. */
+  const accessSort=(a,b)=>{ const ma=minutesIn(a,tMode), mb=minutesIn(b,tMode);
+    if(ma!=null||mb!=null) return (ma==null?Infinity:ma)-(mb==null?Infinity:mb)||scoreSort(a,b);
+    return accessRank(a.access)-accessRank(b.access)||scoreSort(a,b); };
+  /* The filter, off by default, counted over the Medium-or-better list it trims. */
+  const qualifiedAll=pool.filter(e=>e.A.now.score>=25);
+  const counts=filterCounts(qualifiedAll,tMode,topWithin);
+  const fOK=e=>withinOK(e,tMode,topWithin);
+  const qualified=qualifiedAll.filter(fOK);
   const all=spread(qualified.slice().sort(topSort==='access'?accessSort:scoreSort),8,10);
-  const rising=spread(pool.filter(e=>e.A.best&&e.A.best.score>=45&&e.A.best.score>=e.A.now.score+10).sort((a,b)=>b.A.best.score-a.A.best.score),6,10);
-  const near=userLoc? spread(pool.filter(e=>e.A.now.score>=25).sort((a,b)=>dist(userLoc,[a.lat,a.lon])-dist(userLoc,[b.lat,b.lon])),5,5):null;
+  const rising=spread(pool.filter(e=>fOK(e)&&e.A.best&&e.A.best.score>=45&&e.A.best.score>=e.A.now.score+10).sort((a,b)=>b.A.best.score-a.A.best.score),6,10);
+  const near=userLoc? spread(qualified.slice().sort((a,b)=>dist(userLoc,[a.lat,a.lon])-dist(userLoc,[b.lat,b.lon])),5,5):null;
   rising.slice(0,3).forEach(e=>{ const w=anchorHit(e.lat,e.lon).w;
     console.log(`[rising] ${e.lat}, ${e.lon}`,{fut:e.A.fut,habScore:e.hab.score,seasonNote:e.hab.seasonNote,'w.p':w&&w.p,'w.today':w&&w.today}); });
   openSheet('Where to go today',loading?'Still loading — best areas are scored first':'Best square miles across the state',true);
-  const row=(e,useBest)=>{const s=Math.round(useBest?e.A.best.score:e.A.now.score);const peak=useBest?' on '+fmtDay(e.A.best.date):(e.A.best.score>e.A.now.score+5?' · peaks '+fmtDay(e.A.best.date):'');return `<div class="spot" data-k="${key(e.lat,e.lon)}"${useBest?' data-rising="1"':''}><div class="sc" style="background:${colorOf(s)||'#556a55'}">${s}</div><div class="m"><b>${e.hab.zone}</b><span>${ft(e.elev).toLocaleString()} ft${e.terr&&e.terr.aspect!=null?' · '+compass(e.terr.aspect)+' face':''} · ${e.lat.toFixed(2)}, ${e.lon.toFixed(2)}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi':''}${peak}${STATIC.access?' · '+(accessDetail(e.access,STATIC.access.ways).wayName||ACCESS_CLASSES[classifyAccess(e.access)].label.toLowerCase()):''}</span></div></div>`;};
+  const row=(e,useBest)=>{const s=Math.round(useBest?e.A.best.score:e.A.now.score);const peak=useBest?' on '+fmtDay(e.A.best.date):(e.A.best.score>e.A.now.score+5?' · peaks '+fmtDay(e.A.best.date):'');return `<div class="spot" data-k="${key(e.lat,e.lon)}"${useBest?' data-rising="1"':''}><div class="sc" style="background:${colorOf(s)||'#556a55'}">${s}</div><div class="m"><b>${e.hab.zone}</b><span>${ft(e.elev).toLocaleString()} ft${e.terr&&e.terr.aspect!=null?' · '+compass(e.terr.aspect)+' face':''} · ${e.lat.toFixed(2)}, ${e.lon.toFixed(2)}${userLoc?' · '+Math.round(dist(userLoc,[e.lat,e.lon]))+' mi':''}${peak}${STATIC.access?' · '+(accessDetail(e.access,STATIC.access.ways).wayName||ACCESS_CLASSES[classifyAccess(e.access)].label.toLowerCase()):''}${modeSummary(e,tMode)}</span></div></div>`;};
   let h='';
   const haveAccess=!!STATIC.access;
   if(haveAccess) h+=`<div class="sortbar">Sort: `
     +`<button class="pill${topSort==='score'?' on':''}" data-sort="score">Highest chance</button>`
-    +`<button class="pill${topSort==='access'?' on':''}" data-sort="access">Easiest access</button></div>`;
-  if(!all.length) h+=`<div class="empty">Nothing at medium or better anywhere scored so far. ${rising.length?'But conditions are building — see below.':'Play the timeline to see if rain is coming.'}</div>`;
+    +`<button class="pill${topSort==='access'?' on':''}" data-sort="access">Easiest access</button></div>`
+    +`<div class="sortbar">Mode: <button class="pill${topMode==null?' on':''}" data-tmode="">As the map (${MODES[MODE].label})</button>`
+    +Object.entries(MODES).map(([k,m])=>`<button class="pill${topMode===k?' on':''}" data-tmode="${k}" ${m.ready?'':'disabled'}>${m.label}</button>`).join('')+`</div>`
+    +`<div class="sortbar">Within: <button class="pill${topWithin==null?' on':''}" data-within="">Any distance</button>`
+    +(WITHIN[tMode]||[]).map(v=>`<button class="pill${topWithin===v?' on':''}" data-within="${v}">${durationLabel(v)}</button>`).join('')+`</div>`
+    +(topWithin!=null?`<p class="note">${hiddenNote(counts,tMode,topWithin)}. The filter never changes a score.</p>`:'');
+  if(!all.length&&topWithin!=null&&counts.total) h+=`<div class="empty">Nothing ${withinLabel(tMode,topWithin)} among the ${counts.total.toLocaleString()} cells at medium or better.</div>`;
+  else if(!all.length) h+=`<div class="empty">Nothing at medium or better anywhere scored so far. ${rising.length?'But conditions are building — see below.':'Play the timeline to see if rain is coming.'}</div>`;
   else h+=`<div class="sec">Highest chance now</div>`+all.map(e=>row(e)).join('');
   if(near&&near.length) h+=`<div class="sec">Closest to you (medium or better)</div>`+near.map(e=>row(e)).join('');
   if(rising.length) h+=`<div class="sec">Coming up this week</div>`+rising.map(e=>row(e,true)).join('');
   h+=`<p class="note">Each entry is one square mile; entries are kept at least 10 mi apart so you see distinct areas. Tap one to zoom there.`
     +`${haveAccess?' Access describes what is mapped in OpenStreetMap and USFS data, not what exists on the ground, and never changes a score.':''}</p>`;
   $('sheet-body').innerHTML=h;
-  $('sheet-body').querySelectorAll('.sortbar .pill').forEach(b=>b.onclick=()=>{ topSort=b.dataset.sort; showTop(); });
+  $('sheet-body').querySelectorAll('.sortbar .pill[data-sort]').forEach(b=>b.onclick=()=>{ topSort=b.dataset.sort; showTop(); });
+  $('sheet-body').querySelectorAll('.sortbar .pill[data-tmode]').forEach(b=>b.onclick=()=>{ if(b.disabled) return; topMode=b.dataset.tmode||null; showTop(); });
+  $('sheet-body').querySelectorAll('.sortbar .pill[data-within]').forEach(b=>b.onclick=()=>{ topWithin=b.dataset.within?+b.dataset.within:null; showTop(); });
   $('sheet-body').querySelectorAll('.spot').forEach(el=>el.onclick=()=>{ const e=byK.get(el.dataset.k); map.setView([e.lat,e.lon],11); if(marker) marker.remove(); marker=L.circleMarker([e.lat,e.lon],{radius:7,color:'#fff',weight:2,fillColor:'#b8742c',fillOpacity:1}).addTo(map); if(el.dataset.rising){ const bt=bestDayIndex(e); quickPlayTo(bt,()=>showPoint(e,bt)); } else showPoint(e); });
 }
 
