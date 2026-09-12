@@ -53,7 +53,7 @@ test('duration: coarse, because the model is', () => {
 
 test('format: the mode columns decode, and a missing figure is null rather than zero', () => {
   const row = new Array(AC.ROW_WIDTH).fill(-1);
-  assert.deepEqual(AC.decodeModes(row, 47.5, -121.5), { hike: null, worst: null, direct: null, drive: null });
+  assert.deepEqual(AC.decodeModes(row, 47.5, -121.5), { hike: null, worst: null, direct: null, drive: null, bike: null });
   row[AC.HIKE_AT] = 3000; row[AC.HIKE_AT + 1] = 200; row[AC.HIKE_AT + 2] = 400; row[AC.HIKE_AT + 3] = 30;
   row[AC.HIKE_AT + 4] = 1000; row[AC.HIKE_AT + 5] = -2000; row[AC.HIKE_AT + 6] = AC.STOP.gate;
   const m = AC.decodeModes(row, 47.5, -121.5);
@@ -84,10 +84,10 @@ test('filters: they say how many cells they hide, and that unmapped is not unrea
   assert.match(app, /never changes a score/);
 });
 
-test('mode: hike and drive are built, bike says it is coming', () => {
+test('mode: all three are built', () => {
   assert.match(app, /hike:\{label:'Hike',ready:true\}/);
   assert.match(app, /drive:\{label:'Drive',ready:true\}/);
-  assert.match(app, /bike:\{label:'Bike',ready:false/);
+  assert.match(app, /bike:\{label:'Bike',ready:true\}/);
   assert.match(app, /return MODES\[m\]&&MODES\[m\]\.ready\?m:'hike'/, 'a remembered mode that is not built falls back to hike');
   assert.match(app, /const modeFor=view=>view==='top'&&topMode\?topMode:MODE;/, 'Top spots can override the map');
 });
@@ -101,7 +101,7 @@ test('sheet: the hike figure says what it is — as mapped, with the worst case 
   assert.match(worst, /If the gravel is gated/);
   assert.match(worst, /WORST_CASE_NOTE/);
   assert.match(AC.AS_MAPPED_NOTE, /gated six\s+miles short/, 'the Deming case is named, not hidden');
-  assert.match(app, /h\+=\(MODE==='drive'\?driveBlock\(e,dim\):hikeBlock\(e,dim\)\);/,
+  assert.match(app, /h\+=\(MODE==='drive'\?driveBlock\(e,dim\):MODE==='bike'\?bikeBlock\(e,dim\):hikeBlock\(e,dim\)\);/,
     'the mode on screen decides which figure the sheet leads with');
 });
 
@@ -191,4 +191,57 @@ test('rule 8: the amendment is recorded, with its reason', () => {
   const claude = read('../CLAUDE.md');
   assert.match(claude, /explicit, counted and off by default/);
   assert.match(claude, /silently/);
+});
+
+test('bike: the speeds, the climb, and what the ride is measured in', () => {
+  const per = mph => mph * 1609.34 / 60;
+  assert.deepEqual(AC.BIKE_MPH, { road: 12, rough: 8, trail: 5 });
+  assert.equal(AC.BIKE_CLIMB_MIN_PER_100M, 8);
+  const b = { road: per(12) * 30, rough: 0, trail: 0, up: 0, walk: P(0, 0) };
+  assert.ok(Math.abs(AC.rideMinutes(b) - 30) < 1e-6, 'half an hour of road is half an hour');
+  assert.ok(Math.abs(AC.rideMinutes({ road: 0, rough: 0, trail: 0, up: 100, walk: P(0, 0) }) - 8) < 1e-6,
+    '100 m of climb is eight minutes on a bike, against ten on foot');
+  assert.ok(AC.rideMinutes({ road: 1609, rough: 0, trail: 0, up: 0 })
+    < AC.rideMinutes({ road: 0, rough: 0, trail: 1609, up: 0 }), 'a road is quicker than a trail');
+  /* the whole journey from the car, for the sort and the summary */
+  const j = { road: per(12) * 30, rough: 0, trail: 0, up: 0, walk: P(4000, 0) };
+  assert.ok(Math.abs(AC.bikeTravelMinutes(j) - 90) < 1e-6, 'ride plus walk, an hour of trail after half an hour of road');
+});
+
+test('bike: blocked absolutely by wilderness, by a tag, and — the conservative call — by closed roads', () => {
+  assert.equal(AC.BIKE_BLOCKS_CLOSED_ROADS, true, 'the user asked for it; one flag, so it can be revisited');
+  assert.equal(AC.bikeRestriction({ bicycle: 'no' }), 'no');
+  assert.equal(AC.bikeRestriction({ bicycle: 'dismount' }), 'dismount', 'pushing a bike is walking');
+  assert.equal(AC.bikeRestriction({ bicycle: 'yes' }), null);
+  assert.equal(AC.bikeRestriction({}), null);
+  assert.equal(AC.STOP_LABEL[AC.STOP.wilderness], 'from the wilderness boundary, where a bicycle is illegal');
+  assert.match(AC.BIKE_PARK_NOTE, /national parks/, 'and the sheet says what the layer does not cover');
+});
+
+test('format: the bike columns decode, including where the bike is left', () => {
+  const row = new Array(AC.ROW_WIDTH).fill(-1);
+  row[AC.BIKE_AT] = 0; row[AC.BIKE_AT + 1] = 6000; row[AC.BIKE_AT + 2] = 1200; row[AC.BIKE_AT + 3] = 300;
+  row[AC.BIKE_AT + 4] = 900; row[AC.BIKE_AT + 5] = 60; row[AC.BIKE_AT + 6] = 200; row[AC.BIKE_AT + 7] = 30;
+  row[AC.BIKE_AT + 8] = 100; row[AC.BIKE_AT + 9] = 200; row[AC.BIKE_AT + 10] = -400; row[AC.BIKE_AT + 11] = 900;
+  row[AC.BIKE_AT + 12] = AC.STOP.closed;
+  const b = AC.decodeModes(row, 47.5, -121.5).bike;
+  assert.ok(b, 'a ride with no road in it is still a ride — 0 is not -1');
+  assert.equal(b.rough, 6000); assert.equal(b.walk.on, 900); assert.equal(b.stop, AC.STOP.closed);
+  assert.ok(b.park[1] > -121.5 && b.dismount[1] < -121.5, 'the car east of the centre, the dismount west of it');
+  assert.ok(b.dismount[0] > b.park[0], 'and the dismount further north');
+  assert.equal(AC.rideMetres(b), 7200);
+});
+
+test('sheet: the bike figure names the ride, the walk left, and what the layer does not cover', () => {
+  const block = app.slice(app.indexOf('function bikeBlock'), app.indexOf('/* The route the hike figure describes'));
+  assert.match(block, /rideMinutes\(b\)/, 'minutes from the stored metres');
+  assert.match(block, /BIKE_CLASS_LABEL\[/, 'and what kind of riding it is');
+  assert.match(block, /STOP_LABEL\[b\.stop\]/, 'why the ride ended');
+  assert.match(block, /BIKE_PARK_NOTE/, 'the national parks are not in the wilderness layer');
+  assert.match(block, /BIKE_NOTE/);
+  assert.match(block, /AS_MAPPED_NOTE/);
+  assert.match(block, /worstBlock\(e,dim,bikeTravelMinutes\(b\)\)/);
+  /* the ride is drawn, unlike the drive */
+  assert.match(app, /onBike&&R\.byBike\.get\(k\)/, 'the bike has its own line');
+  assert.match(app, /Where the car stops and the ride begins/, 'with the car marked where the ride starts');
 });

@@ -103,17 +103,24 @@ every file, what it does, and the reasoning that is not obvious from reading it.
 - **`scripts/access-network.mjs`** — the route network: every fetched way,
   joined where ways meet (ends, sides, crossings — inferred, because the
   checkpoint has no node ids), where a car can get to from pavement, how long the
-  drive there takes, and the walk from there. Pure: elevation is injected, nothing
+  drive there takes, what a bicycle may ride of it, and the walk from there. One
+  `vehicleReach`/`vehicleApproaches` pair serves the car and the bike: they differ
+  in which edges they may use, how fast each kind of way is and where they start,
+  and in nothing else. Pure: elevation is injected, nothing
   is fetched. `onJoin` is an audit seam — every inferred join is offered to it and
   can be vetoed, which is how the false-junction rate is measured
   ([verification.md](verification.md#the-false-junction-rate-measured)).
 - **`scripts/access-modes.mjs`** — per-cell mode figures from that network: the
-  hike approach, the drive and the walk left after it, the worst case from the
-  nearest paved road, the straight-in alternative, where the car stops and why,
-  and the routes file for drawing.
+  hike approach, the drive and the walk left after it, the bike ride and the walk
+  left after that, the worst case from the nearest paved road, the straight-in
+  alternative, where each vehicle stops and why, and the routes file for drawing.
+  It copies each way into the network by hand, so **every field a rule stamps has
+  to be added to that copy** — `ml`, `bk` and `closed` were once missing from it,
+  which made the drive's 25 mph class unreachable and 9,106 `bicycle=no` ways
+  block nothing.
 - **`data/access.json`** — per-cell distance to the nearest mapped trail, road
-  and rough way, then the mode columns — hike, worst case, straight-in, drive
-  (v7) — keyed by cell index rather than row position. Optional at runtime:
+  and rough way, then the mode columns — hike, worst case, straight-in, drive,
+  bike (v8) — keyed by cell index rather than row position. Optional at runtime:
   without it every cell reads as unknown and the app is otherwise unchanged.
   9.0 MB, 2.2 MB over the wire, since Pages serves it gzipped.
 - **`data/access-routes.json`** — the route each cell's figure walks, fetched only

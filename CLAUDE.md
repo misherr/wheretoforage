@@ -20,7 +20,7 @@ src/grid.mjs    the cell lattice, the state outline, terrainAt, pointKey
 src/access.mjs  how you would reach a cell — a separate axis, never a score input
 src/coords.mjs  the coordinate readout and the paste parser
 scripts/        build-cells.mjs, build-access.mjs, fetch-weather.mjs, serve.mjs,
-                access-network.mjs (the route network and the drive), access-modes.mjs (per-cell figures)
+                access-network.mjs (the network, the drive and the bike), access-modes.mjs (per-cell figures)
 tests/model/    the model regression suite
 data/           cells.json, weather.json, evt-names.json, access.json (+ -geom, -routes) — checked in
 ```
@@ -127,6 +127,18 @@ while nothing throws.
   of the drivable network this code calls unpaved is `highway=residential` — timing those at 15 mph is
   not pessimism, it is wrong about a street.
   [docs/access.md](docs/access.md#getting-there-by-car-the-drive-mode)
+- **A bike is carried to where the car stops, then rides what it is allowed to ride.** Everything a
+  walker may use except three absolutes: designated wilderness (federal law, from the USFS EDW layer,
+  marked per EDGE because a trail crosses a boundary mid-way), `bicycle=no|private|dismount`, and —
+  the user's call, deliberately conservative — roads the Forest Service has closed to motorized use,
+  which `BIKE_BLOCKS_CLOSED_ROADS` holds in one place. A bicycle is not a motor vehicle; riding past a
+  gate is the point of taking one, and lifting that block would make 8.8% of cells quicker by a median
+  12 minutes. **"Carried" is load-bearing**: the bike's sources are network NODES and a car stops
+  anywhere along an edge, so without the carried predicate the bike rode the last 500 m of a road the
+  car could have driven and 9,157 cells read slower by bike than on foot. A bike figure must never be
+  worse than the hike's. The wilderness layer covers the Forest Service and not the national parks,
+  where bicycles are banned on nearly every trail; `BIKE_PARK_NOTE` says so on the sheet.
+  [docs/access.md](docs/access.md#by-bike-the-third-mode)
 - **Where the data ends, the sheet says so.** The bake holds Washington's roads and about 2.8 km
   past them, so a cell near a LAND border can be handed the long way round: the state's deepest
   drive, 141 minutes and 35 miles, is a cell 2.7 km from Idaho whose nearest pavement is four miles

@@ -70,3 +70,43 @@ test('routes: a cell whose figures need no walking has no route to draw', async 
   const out = M.routesFile(w.net, new Map([['3:4', { route: N.routeOf(w.net, w.hike, hA), driveRoute: null }]]));
   assert.equal(out.cells.length, 0, 'nothing to draw, and nothing stored');
 });
+
+test('the rules reach the network: a maintenance level times the drive, a bicycle tag stops the bike', async () => {
+  /* computeModes copies each way into the network by hand, and three fields the rules stamp were once
+     missing from that copy: the drive's 25 mph class was unreachable and 9,106 bicycle=no ways blocked
+     nothing at all. This is the end-to-end guard for the passthrough. */
+  const ways = new Map([
+    ['ohwy', { geom: line(0, 0, 1000, 0), cat: 'road', type: 'secondary' }],
+    ['ograded', { geom: line(1000, 0, 1000, 3000, 12), cat: 'road', type: 'unclassified', ml: '4' }],
+    ['orough', { geom: line(1000, 0, 4000, 0, 12), cat: 'road', type: 'unclassified' }],
+    ['otrail', { geom: line(1000, 3000, 1000, 5000, 8), cat: 'trail', type: 'path', bk: 'no' }],
+  ]);
+  const cells = new Map([['1:1', [...at(1000, 3000), 500]], ['2:2', [...at(1000, 4900), 500]]]);
+  const m = await M.computeModes(ways, cells, { gates: [], elevationOf: null, offTrailClimb: async () => -1 });
+  /* the graded road and the rough road are both 3 km from the same junction, and the graded one is
+     quicker — which can only happen if ml arrived */
+  const graded = m.modes.get('1:1').drive, rough = m.modes.get('2:2');
+  assert.ok(graded.graded > 2800, 'the drive down the level-4 road is in the graded class: ' + JSON.stringify(graded));
+  assert.equal(graded.rough, 0, 'and none of it in the rough class');
+  /* the trail beyond it is tagged bicycle=no, so the bike must walk it rather than ride it */
+  assert.ok(m.stats.bike_blocks.bicycle > 0, 'the bicycle tag blocks edges');
+  assert.ok(rough.bike.walk.on > 500, 'and the bike walks the tagged trail instead of riding it');
+  assert.equal(rough.bike.stop, 6, 'STOP.bicycle — the map says no bicycles');
+});
+
+test('the bike is carried by the car, not ridden to where the car could have driven', async () => {
+  /* The bike's ride starts at a NODE, but a car stops anywhere along an edge. Without saying so, the
+     bike rode the last few hundred metres of a road the car could have driven and 9,157 cells read
+     slower by bike than on foot. The bike figure must never be worse than the hike's. */
+  const ways = new Map([
+    ['ohwy', { geom: line(0, 0, 1000, 0), cat: 'road', type: 'secondary' }],
+    ['ofr', { geom: line(1000, 0, 5000, 0, 16), cat: 'road', type: 'unclassified' }],
+  ]);
+  const cells = new Map([['1:1', [...at(3000, 200), 500]]]);       // beside the middle of the forest road
+  const m = await M.computeModes(ways, cells, { gates: [], elevationOf: null, offTrailClimb: async () => -1 });
+  const rec = m.modes.get('1:1');
+  assert.equal(rec.hike.on, 0, 'the hike calls it a drive-up');
+  assert.equal(rec.bike.road + rec.bike.rough + rec.bike.trail, 0, 'so there is nothing to ride');
+  assert.equal(rec.bike.walk.on, 0, 'and nothing to walk but the last stretch off the road');
+  assert.equal(rec.bike.walk.off, rec.hike.off, 'the same off-trail leg as the hike');
+});

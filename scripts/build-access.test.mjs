@@ -811,8 +811,9 @@ test('format: the bake stamps the version the app reads, from one constant', asy
 
   /* And the width really does depend on the stride, so a future change cannot forget to bump it. */
   assert.equal(out.rows[0].length, AC.ROW_WIDTH);
-  assert.equal(AC.ROW_WIDTH, 2 + AC.CATS.length * AC.ROW_STRIDE + AC.HIKE_STRIDE + 4 + 4 + AC.DRIVE_STRIDE,
-    'the categories, then hike (7), worst case (4), direct (4) and the drive (11)');
+  assert.equal(AC.ROW_WIDTH, 2 + AC.CATS.length * AC.ROW_STRIDE + AC.HIKE_STRIDE + 4 + 4
+    + AC.DRIVE_STRIDE + AC.BIKE_STRIDE,
+    'the categories, then hike (7), worst case (4), direct (4), the drive (11) and the bike (13)');
   assert.equal(out.ways[0].length, 7);
   fs.rmSync(dir, { recursive: true, force: true });
 });

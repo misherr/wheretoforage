@@ -498,3 +498,39 @@ cheap and catches what a spot check would not:
   all of it in the 15 mph class and 98.1% of every drive was "rough gravel". After
   moving streets to the graded class the split is 1.8% / 17.7% / 80.5%, which is
   what the model was meant to say.
+
+## The bike, checked
+
+Two bugs came out of checking the bike against the figures beside it rather than
+against itself, and both were silent:
+
+- **A bike figure can never be worse than the hike figure**, because the bike is
+  carried to where the car stops and can always walk from there. 9,157 cells said
+  otherwise. The cause was not the ride: the bike's sources are network NODES,
+  while a car stops anywhere along an edge, so the bike was made to ride the last
+  few hundred metres of a road the car could have driven. After adding the carried
+  predicate, 222 cells (0.5%) — the off-trail-climb estimate, the same residue the
+  drive has. **Run this check after any change to either mode's selection.**
+- **Every field a rule stamps has to reach the network.** `computeModes` copies
+  each way by hand, and `ml`, `bk` and `closed` were missing from that copy: the
+  drive's 25 mph class was unreachable — 98% of every drive read as "rough gravel" —
+  and 9,106 `bicycle=no` ways blocked exactly nothing, while the log cheerfully
+  reported finding them. The tell was a statistic that was too round: `"bicycle": 0`
+  in the blocks summary with 9,106 tagged ways in the upgrade log two screens
+  above. `scripts/access-modes.test.mjs` now bakes a four-way fixture end to end
+  and asserts both.
+
+And two checks that confirmed what they should:
+
+- **The wilderness polygons against the live service.** Eight points inside the
+  eight largest areas and four points walked 2 km out of them, each asked of the
+  USFS query endpoint one at a time: 12 of 12 agree with the stored rings. A first
+  attempt at this checked whether the *dismount* points were inside, which is the
+  wrong question — the dismount is the last junction OUTSIDE the boundary. Measured
+  against the rings instead, a wilderness dismount sits a median of 40 m from the
+  line (p90 146 m), which is the granularity of the junctions, not an error.
+- **The price of a conservative rule, by re-baking with it off.** Letting bikes ride
+  the closed-roads layer makes 4,109 cells (8.8%) quicker by a median 12 minutes.
+  That is the number the decision should be revisited against; `--out` to a
+  scratch path with `--checkpoint` pointed at the real one makes such a variant
+  bake free of consequences.

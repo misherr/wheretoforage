@@ -235,3 +235,123 @@ test('gates: a gate never lands on a junction, so it cannot block the road it br
   const spur = approach(w, 1050, 1400);
   assert.ok(spur.on > 1300, 'the spur itself is gated');
 });
+
+/* a rectangular wilderness, in metres east/north of the origin */
+const wildBox = (x0, y0, x1, y1, name = 'Test Wilderness', hole = null) => ({
+  name,
+  rings: [[at(x0, y0), at(x1, y0), at(x1, y1), at(x0, y1), at(x0, y0)]]
+    .concat(hole ? [[at(hole[0], hole[1]), at(hole[2], hole[1]), at(hole[2], hole[3]), at(hole[0], hole[3]), at(hole[0], hole[1])]] : []),
+});
+
+test('bike: wilderness blocks it absolutely, and an inholding inside one does not', async () => {
+  const net = await build([
+    way('hwy', line(0, 0, 1000, 0), { type: 'secondary' }),
+    way('trail', line(1000, 0, 1000, 4000, 40), { cat: 'trail', type: 'path' }),
+  ]);
+  const mask = N.wildernessMask([wildBox(500, 2000, 1500, 5000)]);
+  assert.ok(mask(...at(1000, 3000)), 'inside');
+  assert.ok(!mask(...at(1000, 1000)), 'outside');
+  assert.equal(mask(...at(1000, 3000)), 'Test Wilderness', 'and it names the area');
+  /* a hole in the polygon is not wilderness: an inholding is private land, not federal */
+  const holed = N.wildernessMask([wildBox(500, 2000, 1500, 5000, 'Holed', [800, 2800, 1200, 3200])]);
+  assert.ok(!holed(...at(1000, 3000)), 'inside the hole is outside the wilderness');
+  assert.ok(holed(...at(1000, 4000)), 'but the rest of it still is');
+
+  const blocks = N.bikeBlocks(net, { wilderness: [wildBox(500, 2000, 1500, 5000)] });
+  assert.ok(blocks.stats.wilderness > 0, 'some edges are inside');
+  const blocked = [...blocks.why].filter(x => x === N.BLOCK.wilderness).length;
+  assert.equal(blocked, blocks.stats.wilderness);
+});
+
+test('bike: a closed road stops it only because we chose that, and a bicycle tag always does', async () => {
+  const net = await build([
+    way('hwy', line(0, 0, 1000, 0), { type: 'secondary' }),
+    way('closed', line(1000, 0, 1000, 2000, 8), { cat: 'rough', type: 'nfsr-closed' }),
+    way('nobikes', line(1000, 0, 3000, 0, 8), { cat: 'trail', type: 'path', bk: 'no' }),
+  ]);
+  const on = N.bikeBlocks(net, {});
+  assert.ok(on.stats.closed > 0, 'the closed-roads layer blocks the bike by default');
+  assert.ok(on.stats.bicycle > 0, 'and so does bicycle=no');
+  const off = N.bikeBlocks(net, { blockClosed: false });
+  assert.equal(off.stats.closed, 0, 'one flag turns the closed roads back on for a bike');
+  assert.ok(off.stats.bicycle > 0, 'the tag is not a flag — it always blocks');
+});
+
+test('bike: the ride starts where the car stops, and the walk starts where the ride must', async () => {
+  /* pavement, a gravel road gated at 2 km, on to 6 km, with wilderness from 4 km — and a spur at the
+     boundary, because an edge is blocked whole: without a junction there the 4 km edge straddling the
+     line would be lost entirely, which is the granularity this works at and is asserted below. */
+  const w = await world([
+    way('hwy', line(0, 0, 1000, 0), { type: 'secondary' }),
+    way('fr', line(1000, 0, 1000, 6000, 60), { type: 'unclassified' }),
+    way('spur', line(1000, 4000, 1400, 4000, 4), { cat: 'rough', type: 'track' }),
+  ], [at(1000, 2000)]);
+  const blocks = N.bikeBlocks(w.net, { wilderness: [wildBox(0, 4000, 3000, 9000)] });
+  const carNodes = [...Array(w.net.nNodes).keys()].filter(n => w.car.reach[n] === 1);
+  const ride = N.bikeRide(w.net, carNodes, blocks);
+  const rideWalk = N.walkFrom(w.net, [...Array(w.net.nNodes).keys()].filter(n => isFinite(ride.min[n])),
+    () => false, n => ride.min[n]);
+  const ask = (x, y) => { const [la, lo] = at(x, y); return N.vehicleApproaches(w.net, ride, rideWalk, la, lo, null).primary; };
+
+  const past = ask(1100, 3500);                       // past the gate, short of the wilderness
+  assert.equal(past.on, 0, 'the bike rides past the gate to the closest point: no walking');
+  assert.ok(past.drive.rough > 1400 && past.drive.rough < 1600,
+    'and the ride is measured from the gate, not from the pavement: 1.5 km, not 3.5');
+  assert.ok(past.source, 'which it also remembers, so the sheet can mark the car');
+
+  const inside = ask(1100, 5000);                     // inside the wilderness
+  assert.ok(inside.on > 500, 'inside the wilderness the bike is left behind and the walk goes on');
+  assert.equal(N.rideStopReason(w.net, inside.stopNode, blocks), 5, 'STOP.wilderness');
+
+  /* and without the wilderness the same cell is a ride all the way */
+  const openBlocks = N.bikeBlocks(w.net, {});
+  const openRide = N.bikeRide(w.net, carNodes, openBlocks);
+  const openWalk = N.walkFrom(w.net, [...Array(w.net.nNodes).keys()].filter(n => isFinite(openRide.min[n])),
+    () => false, n => openRide.min[n]);
+  const [la, lo] = at(1100, 5000);
+  const open = N.vehicleApproaches(w.net, openRide, openWalk, la, lo, null).primary;
+  assert.equal(open.on, 0, 'no wilderness, no dismount');
+});
+
+test('bike: an edge that straddles a wilderness boundary is blocked whole', async () => {
+  /* The granularity, stated: blocks are per edge, and an edge runs from junction to junction. A long
+     stretch of trail that crosses the line loses all of itself rather than half — pessimistic, which
+     is the right direction for a legal boundary, and worth knowing when reading a figure. */
+  const net = await build([
+    way('hwy', line(0, 0, 1000, 0), { type: 'secondary' }),
+    way('long', line(1000, 0, 1000, 6000, 60), { cat: 'trail', type: 'path' }),
+  ]);
+  /* one edge, 0 to 6 km, so its midpoint is at 3 km */
+  const blocks = N.bikeBlocks(net, { wilderness: [wildBox(0, 2000, 3000, 9000)] });
+  assert.equal(blocks.stats.wilderness, 1, 'all 6 km of it, because the midpoint is inside');
+  const outside = N.bikeBlocks(net, { wilderness: [wildBox(0, 3500, 3000, 9000)] });
+  assert.equal(outside.stats.wilderness, 0, 'and none of it when the midpoint is outside, though 2.5 km is in');
+});
+
+test('a vehicle prices walking to a point as well as riding to it, and takes the cheaper', async () => {
+  /* A loop of rough road, 44 km round, with a 2 km trail cutting across it that the map closes to
+     bicycles. The cell sits on the far leg, 3 km from where the trail meets it and well out of reach
+     of any other candidate — so the only question is how to arrive at THIS edge: ride 34 km round, or
+     ride 5 km, walk the closed trail and walk 3 km along the far leg. Taking the first branch that
+     applied — the point is rideable, so ride to it — is how 9,242 cells read worse by bike than on
+     foot, one of them riding 48 miles to avoid a 17 km walk. */
+  const w = await world([
+    way('hwy', line(0, 0, 1000, 0), { type: 'secondary' }),
+    way('loopE', line(1000, 0, 21000, 0, 40), { cat: 'rough', type: 'track' }),
+    way('loopN', line(21000, 0, 21000, 2000, 8), { cat: 'rough', type: 'track' }),
+    way('loopW', line(21000, 2000, 1000, 2000, 40), { cat: 'rough', type: 'track' }),
+    way('shortcut', line(6000, 0, 6000, 2000, 8), { cat: 'trail', type: 'path', bk: 'no' }),
+  ]);
+  const blocks = N.bikeBlocks(w.net, {});
+  const carNodes = [...Array(w.net.nNodes).keys()].filter(n => w.car.reach[n] === 1);
+  const ride = N.bikeRide(w.net, carNodes, blocks);
+  const rideWalk = N.walkFrom(w.net, [...Array(w.net.nNodes).keys()].filter(n => isFinite(ride.min[n])),
+    () => false, n => ride.min[n]);
+  const [la, lo] = at(9000, 2100);
+  const a = N.vehicleApproaches(w.net, ride, rideWalk, la, lo, null).primary;
+  assert.ok(a, 'it is reachable');
+  assert.ok(a.drive.rough > 4000 && a.drive.rough < 7000,
+    'it rides as far as the shortcut and no further: ' + Math.round(a.drive.rough) + ' m');
+  assert.ok(a.on > 4000, 'and walks the rest: ' + Math.round(a.on) + ' m');
+  assert.ok(a.total < 130, 'about two hours all in, not four: ' + Math.round(a.total) + ' min');
+});

@@ -58,20 +58,36 @@ git show b61b0a8:scripts/network-tiles.test.mjs
 and add the pyramid, a decoder hook and cancellation, rather than keeping 23
 tests guarding code that nothing runs.
 
-### Bike mode: the third one, and the only one needing a new source
+### Bikes on roads closed to motorized use: the user's call, now with a number
 
-**Agreed with the user, not built.** Hike (v6) and drive (v7) built the shared
-parts — the route network, where a car can get to, the drive to it, the buckets and
-the filters — so bike adds a calculation and one fetch.
+**Open — the user's, revisitable.** The bike figure (v8) blocks roads the Forest
+Service has closed to motorized use, which is what was asked for and is the
+conservative reading. It is also, legally, the wrong one in most cases: **a bicycle
+is not a motor vehicle**, a closed forest road is generally open to it, and riding
+past a gate is the whole reason to put a bike on the car.
 
-- **Bike**: level 1–2 roads and singletrack a truck cannot use, **blocked
-  absolutely** by the USFS closed-to-motorized layer, by wilderness boundaries and
-  by `bicycle=no`. Wilderness is a new source — the USFS EDW wilderness layer —
-  and is not fetched yet. The closed-to-motorized layer is already in the
-  checkpoint (`nfsr-closed`, 10,820 ways).
-- Unlike the drive, bike routes will not mostly coincide with the hike's: a bike
-  rides the ways a car cannot and walks the rest, so expect its own per-cell lists
-  in the routes file rather than the drive's 6.8%.
+**Measured by re-baking with `BIKE_BLOCKS_CLOSED_ROADS` off:** 4,109 cells (8.8%)
+become quicker, by a median 12 minutes, p90 51, max 361; where the ride ends changes
+for 2,430 cells and the walk bucket for 1,691 (3.6%). It is one constant in
+`src/access.mjs` and an assembly-only re-bake, so flipping it costs three minutes.
+
+The middle answer, if the absolute one ever grates: block only where the closure
+names bicycles or non-motorized use as well. The EDW closed-roads layer does not
+carry that, so it would need another source or another field.
+
+### The wilderness layer is the Forest Service's, and bikes are banned in the parks too
+
+**Known, said on the sheet, not fixed.** The USFS EDW wilderness layer holds 28
+areas intersecting Washington and not one of them is a national park wilderness —
+the Olympic and North Cascades designations are NPS. Bicycles are banned on nearly
+every national park trail regardless of wilderness status, so the bike figure is
+optimistic inside the three parks. `BIKE_PARK_NOTE` says so wherever a bike figure
+is shown.
+
+The fix is a boundary source for the parks. The NPS ArcGIS endpoints that used to
+serve them 404 now, and OSM tags US national parks as `boundary=protected_area`
+relations, which this bake does not fetch. Worth doing when relations are fetched
+for route names anyway (below).
 
 ### The three modes share storage; they do not triple it
 
@@ -79,11 +95,11 @@ the filters — so bike adds a calculation and one fetch.
 modes mean three copies. They do not, and the numbers matter more than the
 architecture:
 
-| file | v6 (hike) | v7 (+ drive) | with bike, projected |
+| file | v6 (hike) | v7 (+ drive) | v8 (+ bike) |
 | --- | --- | --- | --- |
-| `access.json`, over the wire | 2.08 MB | **2.43 MB** | ~2.8 MB |
-| `access.json`, raw | 7.75 MB | 9.0 MB | ~10.3 MB |
-| `access-routes.json`, over the wire | 2.41 MB | **2.55 MB** | ~3.2 MB |
+| `access.json`, over the wire | 2.08 MB | 2.43 MB | **2.76 MB** |
+| `access.json`, raw | 7.75 MB | 9.0 MB | 10.8 MB |
+| `access-routes.json`, over the wire | 2.41 MB | 2.55 MB | **3.26 MB** |
 | `access-geom.json`, over the wire (lazy) | 2.22 MB | 2.22 MB | 2.22 MB |
 
 Over the wire is the number that matters: GitHub Pages serves these gzipped, which
@@ -92,7 +108,9 @@ viewer revalidates and pays nothing until the bake changes. Measure against the
 deployed host (`curl -H 'Accept-Encoding: gzip'`); `gzip -9` locally reads about 8%
 smaller than Pages sends.
 
-Where the drive's 0.35 MB went, and what is left to pull if it ever needs pulling:
+The projection before building the bike was ~2.8 MB and ~3.2 MB; it came in at 2.76 and 3.26,
+which is the first size estimate in this file that did not turn out optimistic. Where it went, and
+what is left to pull if it ever needs pulling:
 
 - **The routes file already shares.** One table of way stretches serves every
   mode; only the per-cell lists are per mode, and the drive's walk is stored only
@@ -190,10 +208,10 @@ keep it in the network without stamping cells from it. It is a re-fetch of new
 tiles — hours of Overpass — so it waits for the Geofabrik extract, which would make
 it a bbox change rather than a fetch.
 
-### The routes file is fetched whole: 8.8 MB, 2.4 MB over the wire
+### The routes file is fetched whole: 12.8 MB, 3.3 MB over the wire
 
-`data/access-routes.json` — 25,880 hike routes and 1,764 drive walks over 115,691
-stretches of way — is what "Show the route" draws, and it is fetched whole on the
+`data/access-routes.json` — 25,880 hike routes, 1,758 drive walks and 13,741
+rides over 141,886 stretches of way — is what "Show the route" draws, and it is fetched whole on the
 first request. The estimate before building it was 1.9 MB; it counted edges but not
 the per-cell lists and the partial last edges. On a phone on a slow connection that
 first request is slow, and it happens at the moment a forager is standing at a

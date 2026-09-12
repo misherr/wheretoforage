@@ -22,7 +22,8 @@
  * Everything here describes the network AS MAPPED. A gate nobody mapped is not in it. */
 
 import { WALK_KMH, CLIMB_MIN_PER_100M, OFF_TRAIL_FACTOR as OTF, OFF_CLIMB_FACTOR as OCF, BUSHWHACK_M, DIRECT_SAVES_MIN,
-         DRIVE_MPH, DRIVE_CLASSES, driveMinutes } from '../src/access.mjs';
+         DRIVE_MPH, DRIVE_CLASSES, driveMinutes, BIKE_MPH, BIKE_CLASSES, BIKE_CLIMB_MIN_PER_100M,
+         BIKE_BLOCKS_CLOSED_ROADS, rideMinutes, STOP } from '../src/access.mjs';
 export { DIRECT_SAVES_MIN };
 
 const M_LAT = 111320;
@@ -306,7 +307,7 @@ export function carReach(net) {
 
    Pavement is whatever `paved` already calls pavement, so "from the nearest paved road" means the
    same thing in the drive figure and in the worst case beside it. */
-const STREET = /^(residential|living_street)$/;
+export const STREET = /^(residential|living_street)$/;
 export const driveClassOf = w => paved(w) ? 'paved'
   : /^[45]/.test(String(w.ml || '')) || STREET.test(w.type || '') ? 'graded' : 'rough';
 const DRIVE_M_PER_MIN = {};
@@ -316,36 +317,158 @@ for (const c of DRIVE_CLASSES) DRIVE_M_PER_MIN[c] = DRIVE_MPH[c] * 1609.34 / 60;
    class and the climb, so the app can recompute the minutes from stored parts. Same stopping rules as
    carReach: drivable roads only, a gate is reached and never passed, and a private or permit road is
    not drivable at all. */
-export function carDrive(net) {
-  const { W, eW, eU, eV, eLen, eUpF, eUpB, deg, adj, nNodes, E, gateNode } = net;
+/* A vehicle: which edges it may use, how fast it is on each kind of way, where it starts and what
+   stops it. `vehicleReach` is the same Dijkstra for both, tracking minutes, metres per speed class,
+   climb, and which source it came from — the last so a bike's figure can say where the car was left.
+
+   Costs are minutes, so a slower class is not a detour: the router will take three kilometres of
+   graded road over two of ruts if that is quicker, which is what a driver or a rider does. */
+export function vehicleReach(net, veh) {
+  const { eW, eU, eV, eLen, eUpF, eUpB, deg, adj, nNodes } = net;
   const min = new Float64Array(nNodes).fill(Infinity);
-  const legs = { paved: new Float64Array(nNodes), graded: new Float64Array(nNodes), rough: new Float64Array(nNodes), up: new Float64Array(nNodes) };
+  const from = new Int32Array(nNodes).fill(-1);       // the source it came from
+  const via = new Int32Array(nNodes).fill(-1);        // and the edge it arrived by, so a ride can be drawn
+  const legs = { up: new Float64Array(nNodes) };
+  for (const c of veh.classes) legs[c] = new Float64Array(nNodes);
   const heap = [], push = (c, n) => { heap.push([c, n]); let i = heap.length - 1;
     while (i > 0) { const p = (i - 1) >> 1; if (heap[p][0] <= heap[i][0]) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
   const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; let i = 0;
     for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } } return top; };
   let seeds = 0;
-  for (let e = 0; e < E; e++) if (paved(W[eW[e]])) for (const n of [eU[e], eV[e]])
-    if (min[n] === Infinity && !gateNode.has(n)) { min[n] = 0; seeds++; push(0, n); }
+  for (const n of veh.sources) if (min[n] === Infinity) { min[n] = 0; from[n] = n; seeds++; push(0, n); }
   while (heap.length) {
     const [c, n] = pop(); if (c > min[n]) continue;
-    if (gateNode.has(n)) continue;                       // you may drive to a gate, never through it
+    if (veh.stop && veh.stop(n)) continue;               // you may drive to a gate, never through it
     for (let k = deg[n]; k < deg[n + 1]; k++) {
-      const e = adj[k], w = W[eW[e]]; if (!drivable(w)) continue;
+      const e = adj[k]; if (!veh.can(e)) continue;
       const fwd = eU[e] === n, m = fwd ? eV[e] : eU[e];
-      const cls = driveClassOf(w), nc = c + eLen[e] / DRIVE_M_PER_MIN[cls];
+      const cls = veh.classOf(net.W[eW[e]]);
+      const up = fwd ? eUpF[e] : eUpB[e];
+      const nc = c + eLen[e] / veh.mPerMin[cls] + Math.max(0, up) * (veh.climbMinPer100m || 0) / 100;
       if (nc < min[m] - 1e-9) {
-        min[m] = nc;
-        for (const q of DRIVE_CLASSES) legs[q][m] = legs[q][n];
+        min[m] = nc; from[m] = from[n]; via[m] = e;
+        for (const q of veh.classes) legs[q][m] = legs[q][n];
         legs[cls][m] += eLen[e];
-        legs.up[m] = legs.up[n] + (fwd ? eUpF[e] : eUpB[e]);
+        legs.up[m] = legs.up[n] + up;
         push(nc, m);
       }
     }
   }
-  return { min, legs, seeds };
+  return { min, legs, from, via, seeds, classes: veh.classes, classOf: veh.classOf, mPerMin: veh.mPerMin,
+           can: veh.can, climbMinPer100m: veh.climbMinPer100m || 0, minutesOf: veh.minutesOf,
+           carried: veh.carried || null };
 }
-const legsAt = (drv, n) => ({ paved: drv.legs.paved[n], graded: drv.legs.graded[n], rough: drv.legs.rough[n], up: drv.legs.up[n] });
+
+/* The car: from every node on a paved public road, along drivable roads, never through a gate. */
+export function carDrive(net) {
+  const { W, eW, eU, eV, E, gateNode } = net;
+  const sources = [];
+  const seen = new Uint8Array(net.nNodes);
+  for (let e = 0; e < E; e++) if (paved(W[eW[e]])) for (const n of [eU[e], eV[e]])
+    if (!seen[n] && !gateNode.has(n)) { seen[n] = 1; sources.push(n); }
+  return vehicleReach(net, { classes: DRIVE_CLASSES, classOf: driveClassOf, mPerMin: DRIVE_M_PER_MIN,
+    sources, can: e => drivable(W[eW[e]]), stop: n => gateNode.has(n), minutesOf: driveMinutes });
+}
+
+/* ---------- by bike ---------- */
+
+const BIKE_M_PER_MIN = {};
+for (const c of BIKE_CLASSES) BIKE_M_PER_MIN[c] = BIKE_MPH[c] * 1609.34 / 60;
+/* A singletrack is not a graded road and neither is a rutted spur. Same fields the drive reads. */
+export const bikeClassOf = w => w.cat === 'trail' ? 'trail'
+  : paved(w) || /^[45]/.test(String(w.ml || '')) || STREET.test(w.type || '') ? 'road' : 'rough';
+
+/* Why a bike may not use an edge. Stored per EDGE rather than per way, because a trail crosses a
+   wilderness boundary in the middle of a way and blocking the whole way would either forbid a legal
+   ride or allow an illegal one. */
+export const BLOCK = { none: 0, wilderness: 1, bicycle: 2, closed: 3, unwalkable: 4 };
+export const BLOCK_STOP = { [BLOCK.wilderness]: STOP.wilderness, [BLOCK.bicycle]: STOP.bicycle, [BLOCK.closed]: STOP.closed };
+export function bikeBlocks(net, { wilderness = null, blockClosed = BIKE_BLOCKS_CLOSED_ROADS } = {}) {
+  const { W, eW, eA0, eA1, cum, E } = net;
+  const why = new Uint8Array(E);
+  const st = { edges: E, wilderness: 0, bicycle: 0, closed: 0, unwalkable: 0 };
+  const inWild = wilderness ? wildernessMask(wilderness) : null;
+  for (let e = 0; e < E; e++) {
+    const w = W[eW[e]];
+    if (!walkable(w)) { why[e] = BLOCK.unwalkable; st.unwalkable++; continue; }
+    if (w.bk) { why[e] = BLOCK.bicycle; st.bicycle++; continue; }
+    if (blockClosed && (w.type === 'nfsr-closed' || w.closed)) { why[e] = BLOCK.closed; st.closed++; continue; }
+    if (inWild) {
+      const wi = eW[e], c = cum[wi];
+      const mid = pointAt(W[wi].geom, c, (eA0[e] + eA1[e]) / 2);
+      if (inWild(mid[0], mid[1])) { why[e] = BLOCK.wilderness; st.wilderness++; }
+    }
+  }
+  return { why, stats: st };
+}
+
+/* Wilderness, as an even-odd test over each area's rings so that an inholding inside one is not
+   wilderness. Indexed by a coarse grid of bounding boxes: 28 areas cover a third of the Cascades and
+   a linear scan per edge would be 1.1 million polygon tests against them all. */
+export function wildernessMask(areas) {
+  const GKEY = (i, j) => i * 1e6 + (j + 500000);
+  const grid = new Map();
+  const boxed = areas.map(a => {
+    let s = 90, w = 180, n = -90, e = -180;
+    for (const ring of a.rings) for (const [la, lo] of ring) {
+      if (la < s) s = la; if (la > n) n = la; if (lo < w) w = lo; if (lo > e) e = lo;
+    }
+    return { ...a, b: [s, w, n, e] };
+  });
+  for (const a of boxed) for (let i = Math.floor(a.b[0] / 0.05); i <= Math.floor(a.b[2] / 0.05); i++)
+    for (let j = Math.floor(a.b[1] / 0.06); j <= Math.floor(a.b[3] / 0.06); j++) {
+      const k = GKEY(i, j); let arr = grid.get(k); if (!arr) grid.set(k, arr = []); arr.push(a);
+    }
+  const odd = (la, lo, rings) => { let c = false;
+    for (const g of rings) for (let i = 0, j = g.length - 1; i < g.length; j = i++) {
+      const yi = g[i][0], xi = g[i][1], yj = g[j][0], xj = g[j][1];
+      if (((yi > la) !== (yj > la)) && (lo < (xj - xi) * (la - yi) / ((yj - yi) || 1e-12) + xi)) c = !c;
+    } return c; };
+  return (la, lo) => {
+    const arr = grid.get(GKEY(Math.floor(la / 0.05), Math.floor(lo / 0.06)));
+    if (!arr) return null;
+    for (const a of arr) if (la >= a.b[0] && la <= a.b[2] && lo >= a.b[1] && lo <= a.b[3] && odd(la, lo, a.rings)) return a.name || 'wilderness';
+    return null;
+  };
+}
+
+/* The bike: from wherever the car stopped, along everything it is allowed to ride. A gate does not
+   stop it — riding round a gate is the whole point — but the closed-roads layer does, which is the
+   conservative call recorded in src/access.mjs. */
+export function bikeRide(net, carNodes, blocks, carried = null) {
+  return vehicleReach(net, { classes: BIKE_CLASSES, classOf: bikeClassOf, mPerMin: BIKE_M_PER_MIN,
+    climbMinPer100m: BIKE_CLIMB_MIN_PER_100M, sources: carNodes,
+    can: e => blocks.why[e] === BLOCK.none, stop: null, minutesOf: rideMinutes,
+    /* Where the car could have carried it: any point on a drivable road the car can reach, mid-edge
+       included, which is what the hike calls a drive-up. */
+    carried });
+}
+
+/* The edges a vehicle travelled to reach a node, source first. The drive does not draw its roads —
+   the overlay already shows them — but a ride up a gated road is the whole point of the bike figure,
+   so that one is drawn. */
+export function vehiclePathTo(net, veh, node) {
+  const out = [];
+  let n = node, guard = 0;
+  while (n >= 0 && veh.via[n] >= 0 && veh.from[n] !== n && guard++ < 100000) {
+    const e = veh.via[n]; out.push(e); n = net.eU[e] === n ? net.eV[e] : net.eU[e];
+  }
+  return out.reverse();
+}
+
+/* Why the ride ended here: the first reason among the edges leaving this node that the bike may not
+   use. A node with nothing blocked around it is simply the end of the mapped way. */
+export function rideStopReason(net, node, blocks) {
+  if (node < 0) return STOP.none;
+  let best = 0;
+  for (let k = net.deg[node]; k < net.deg[node + 1]; k++) {
+    const b = blocks.why[net.adj[k]];
+    if (BLOCK_STOP[b] && (!best || b < best)) best = b;
+  }
+  return best ? BLOCK_STOP[best] : STOP.end;
+}
+
+const legsAt = (veh, n) => { const o = { up: veh.legs.up[n] }; for (const c of veh.classes) o[c] = veh.legs[c][n]; return o; };
 const plusLeg = (l, cls, m, up) => { const o = { ...l }; o[cls] += m; o.up += Math.max(0, up); return o; };
 
 /* ---------- on foot ---------- */
@@ -502,12 +625,16 @@ function scanApproaches(net, walk, free, lat, lon, elevAt, radiusM, limitM) {
   return { fastest: best, within };
 }
 
-/* The drive figure's approach: the one that makes the WHOLE journey fastest, drive plus walk, a
-   minute of each counted the same. Where the road nearest the cell is one a car can get to, the car
-   goes to the point itself and no walking is left; otherwise the walk starts wherever the drive
-   ended, and the drive legs reported are that parking point's. Same bushwhack preference as the hike:
-   the fastest approach that keeps the off-trail leg inside limitM, and only otherwise the fastest. */
-export function driveApproaches(net, drv, driveWalk, lat, lon, elevAt, radiusM = 2500, limitM = BUSHWHACK_M) {
+/* A vehicle's approach: the one that makes the WHOLE journey fastest, vehicle plus walk, a minute of
+   each counted the same. Where the way nearest the cell is one the vehicle can reach, it goes to the
+   point itself and no walking is left; otherwise the walk starts wherever the vehicle stopped, and the
+   legs reported are that stopping point's. Same bushwhack preference as the hike: the fastest approach
+   that keeps the off-trail leg inside limitM, and only otherwise the fastest.
+
+   Shared by the drive and the bike. `driveApproaches` is the name the drive came with. */
+export const driveApproaches = (net, drv, walk, lat, lon, elevAt, radiusM, limitM) =>
+  vehicleApproaches(net, drv, walk, lat, lon, elevAt, radiusM, limitM);
+export function vehicleApproaches(net, drv, driveWalk, lat, lon, elevAt, radiusM = 2500, limitM = BUSHWHACK_M) {
   const { W, cum, eW, eA0, eA1, eU, eV, climbAt, up, down, nodePt } = net;
   const hCell = elevAt ? elevAt(lat, lon) : null;
   let best = null, within = null;
@@ -516,29 +643,48 @@ export function driveApproaches(net, drv, driveWalk, lat, lon, elevAt, radiusM =
     const wi = eW[e], w = W[wi], c = cum[wi], u = eU[e], v = eV[e];
     const upU = climbAt(up[wi], c, ba) - climbAt(up[wi], c, eA0[e]);
     const upV = climbAt(down[wi], c, eA1[e]) - climbAt(down[wi], c, ba);
-    let legs, walkOn = 0, walkUp = 0, reach, park, from, stopNode = -1;
-    if (drivable(w) && isFinite(drv.min[u]) && isFinite(drv.min[v])) {
-      const cls = driveClassOf(w), mpm = DRIVE_M_PER_MIN[cls];
-      const viaU = drv.min[u] + (ba - eA0[e]) / mpm, viaV = drv.min[v] + (eA1[e] - ba) / mpm;
-      const atU = viaU <= viaV;
-      legs = plusLeg(legsAt(drv, atU ? u : v), cls, atU ? ba - eA0[e] : eA1[e] - ba, atU ? upU : upV);
-      reach = Math.min(viaU, viaV); park = cn.point; from = 'drive';
-    } else {
-      const viaU = driveWalk.cost[u] + walkMinutes(ba - eA0[e], upU), viaV = driveWalk.cost[v] + walkMinutes(eA1[e] - ba, upV);
-      if (!isFinite(viaU) && !isFinite(viaV)) continue;
-      const atU = viaU <= viaV, n = atU ? u : v;
-      const s = driveWalk.start[n];
-      if (s < 0 || !isFinite(drv.min[s])) continue;
-      legs = legsAt(drv, s);
-      walkOn = driveWalk.metres[n] + (atU ? ba - eA0[e] : eA1[e] - ba);
-      walkUp = driveWalk.climb[n] + (atU ? upU : upV);
-      reach = atU ? viaU : viaV; park = nodePt[s]; from = n; stopNode = s;
+    /* Three ways to arrive, and the cheapest wins. Taking the first that applied is how a bike came to
+       ride 48 miles round a ridge rather than walk 17 km, and how it came to ride the last 500 m of a
+       road the car could have driven. */
+    let best2 = null;
+    const take = o => { if (o && (!best2 || o.reach < best2.reach - 1e-9)) best2 = o; };
+    if (drv.carried && drv.carried(e, u, v)) {
+      const zero = { up: 0 }; for (const c of drv.classes) zero[c] = 0;
+      take({ reach: 0, walkOn: 0, walkUp: 0, park: cn.point, from: 'drive', stopNode: -1, source: -1,
+             edgeFrom: -1, legs: zero });
     }
+    if (drv.can(e) && isFinite(drv.min[u]) && isFinite(drv.min[v])) {
+      /* The vehicle goes to the point itself. Its own climb cost applies to the partial edge, the
+         same way the Dijkstra charged it for the whole ones. */
+      const cls = drv.classOf(w), mpm = drv.mPerMin[cls];
+      const partU = ba - eA0[e], partV = eA1[e] - ba;
+      const climb = drv.climbMinPer100m / 100;
+      const viaU = drv.min[u] + partU / mpm + Math.max(0, upU) * climb;
+      const viaV = drv.min[v] + partV / mpm + Math.max(0, upV) * climb;
+      const atU = viaU <= viaV;
+      take({ reach: Math.min(viaU, viaV), walkOn: 0, walkUp: 0, park: cn.point, from: 'drive',
+             stopNode: -1, source: drv.from[atU ? u : v], edgeFrom: atU ? u : v,
+             legs: plusLeg(legsAt(drv, atU ? u : v), cls, atU ? partU : partV, atU ? upU : upV) });
+    }
+    {
+      const viaU = driveWalk.cost[u] + walkMinutes(ba - eA0[e], upU), viaV = driveWalk.cost[v] + walkMinutes(eA1[e] - ba, upV);
+      const atU = viaU <= viaV, n = atU ? u : v, reach = atU ? viaU : viaV;
+      const s = isFinite(reach) ? driveWalk.start[n] : -1;
+      if (s >= 0 && isFinite(drv.min[s])) {
+        take({ reach, walkOn: driveWalk.metres[n] + (atU ? ba - eA0[e] : eA1[e] - ba),
+               walkUp: driveWalk.climb[n] + (atU ? upU : upV), park: nodePt[s], from: n,
+               stopNode: s, source: drv.from[s], edgeFrom: n, legs: legsAt(drv, s) });
+      }
+    }
+    if (!best2) continue;
+    const { legs, walkOn, walkUp, reach, park, from, stopNode, source, edgeFrom } = best2;
     const total = reach + offMinutes(bd, offClimbEst(net, e, ba, hCell));
     const better = b => !b || total < b.total - 1e-9 || (Math.abs(total - b.total) < 1e-9 && bd < b.off);
     if (better(best) || (bd <= limitM && better(within))) {
-      const x = { total, drive: legs, driveMin: driveMinutes(legs), on: walkOn, onUp: walkUp, off: bd,
-                  edge: e, arc: ba, from, park, point: cn.point, stopNode };
+      const x = { total, drive: legs, driveMin: (drv.minutesOf || driveMinutes)(legs), on: walkOn, onUp: walkUp,
+                  off: bd, edge: e, arc: ba, from, park, point: cn.point, stopNode, edgeFrom,
+                  /* where the vehicle started: the pavement for a car, where the car was left for a bike */
+                  source: source >= 0 ? nodePt[source] : null };
       if (better(best)) best = x;
       if (bd <= limitM && better(within)) within = x;
     }

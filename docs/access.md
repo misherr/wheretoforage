@@ -1301,6 +1301,107 @@ the state line; the shipped file is always statewide.
 - Bike will add about as much again. The size plan, with the levers measured, is
   in [ROADMAP.md](../ROADMAP.md#the-three-modes-share-storage-they-do-not-triple-it).
 
+## By bike: the third mode
+
+Built after the drive (v8), on the same network and the same two-phase shape: the
+vehicle goes as far as it may, and whatever is left is a walk. What makes the bike
+worth a mode of its own is that it rides the ways a truck cannot — level 1–2 roads,
+tracks, singletrack — which is exactly the ground a gated forest road leads to.
+
+### The ride
+
+| class | speed | what is in it |
+| --- | --- | --- |
+| road | 12 mph | pavement, a graded forest road (level 4–5), a street |
+| rough | 8 mph | level 3 and below, tracks, and every forest road nobody rated |
+| trail | 5 mph | singletrack and paths |
+
+Plus **8 minutes per 100 m of climb** — steeper than that and most people push,
+which is about the same speed either way. As with the other modes the metres are
+stored per class and the minutes computed in the app, so a speed can be retuned
+without a re-bake. Of the metres actually ridden: 2.2% road, 79.0% rough, 18.8%
+trail. Half a mile of singletrack costs what a mile and a half of graded road does,
+which is the point of splitting the classes.
+
+### The bike is carried, not ridden, to where the car stops
+
+The ride starts from **every node a car can reach**, at zero cost: the bike is on
+the back of the car. But a car does not stop at a node — it stops anywhere along a
+road — so the bike is also **carried to any point on a drivable, car-reachable
+edge**, which is the same predicate the hike uses for its drive-ups.
+
+Without that, the bike was made to *ride* the last few hundred metres of a road the
+car could have driven, and **9,157 cells (20%) read slower by bike than on foot** —
+which cannot be true of the same route. With it, 222 cells (0.5%) do, all of them
+the off-trail climb being estimated when a candidate is chosen and measured
+afterwards, the same wrinkle the drive has. The invariant to keep: **a bike figure
+is never worse than the hike figure.**
+
+### Three things stop a bike, and one of them is a judgement call
+
+- **Designated wilderness.** A bicycle inside one is illegal by federal law, not by
+  a gate. 28 areas intersect Washington, from the USFS EDW wilderness layer, kept
+  in the checkpoint as rings simplified to 60 m and tested **even-odd per area**, so
+  an inholding inside a wilderness is not wilderness. 26,785 edges blocked.
+- **`bicycle=no`, `private` or `dismount` in OpenStreetMap** — 9,106 ways, 28,450
+  edges. `dismount` counts because pushing a bike is walking, and the figure then
+  walks that stretch, which is exactly right.
+- **Roads the Forest Service has closed to motorized use** — 92,026 edges, the
+  largest block of the three. **This is the user's instruction and it is
+  deliberately conservative**: a bicycle is not a motor vehicle, a closed forest
+  road is usually legal to ride, and riding past a gate is the whole reason to take
+  a bike. It is one flag, `BIKE_BLOCKS_CLOSED_ROADS`, so the decision can be
+  revisited against a number rather than an argument. **Measured, by re-baking with
+  it off: 4,109 cells (8.8%) would be quicker, by a median 12 minutes, p90 51, max
+  361; where the ride ends changes for 2,430 cells and the walk bucket for 3.6%.**
+
+Blocks are marked **per edge**, not per way, because a trail crosses a boundary in
+the middle of a way. An edge runs junction to junction, so an edge that straddles
+the line is blocked whole — pessimistic, which is the right direction for a legal
+boundary, and worth knowing when reading a figure. In practice a wilderness
+dismount sits a median of **40 m** from the boundary (p90 146 m).
+
+**What the wilderness layer does not cover: the national parks.** It is a Forest
+Service layer; the Olympic and North Cascades park wildernesses are not in it, and
+bicycles are banned on nearly every national park trail whether or not it is
+wilderness. `BIKE_PARK_NOTE` says exactly that on the sheet, because the data
+cannot.
+
+### What it is worth
+
+- **24,902 cells (53.4%) are quicker by bike than on foot**, saving a median 32
+  minutes and 114 at the 90th percentile.
+- **21,254 (46%) have nothing to ride** — the car gets as far as a bike would — and
+  in 21,007 of those the walk left is exactly the hike figure, which is the
+  passthrough check for the whole mode.
+- Where the ride ends: 39,644 at the road (nothing blocked it), 2,958 at a
+  wilderness boundary, 2,344 at a road closed to motorized use, 1,690 where the map
+  says no bicycles.
+
+### The one vehicle, twice
+
+The drive and the bike are one pair of functions — `vehicleReach` and
+`vehicleApproaches` — given different descriptors: which edges the vehicle may use,
+how fast each class is, where it starts, and what stops it. The rest, including the
+"arrive at a mid-edge point" case and the walk seeded with the vehicle's own cost,
+is shared. Writing the bike as a copy of the drive would have been half the work
+and would have drifted by the second change.
+
+**A bug the sharing exposed:** for a candidate the vehicle could reach, the scan took
+the ride-to-the-point branch and never priced *walking* there instead — so a bike
+rode 48 miles round a ridge rather than walk 17 km. All three ways to arrive are now
+priced and the cheapest wins.
+
+### What it costs
+
+- `access.json`: 9.0 MB to **10.8 MB**, which is 2.43 MB to **2.76 MB over the
+  wire**.
+- `access-routes.json`: 8.8 MB to **12.8 MB**, 2.55 MB to **3.26 MB over the wire**
+  — the bike's line is stored for 13,741 cells, because unlike the drive's walk it
+  is rarely the hike's, and because the ride itself is drawn. The drive's roads are
+  not drawn: the overlay already shows them, while nobody believes a ride past a
+  gate until they see the line.
+
 ## Roads and trails on the map are somebody else's rendering
 
 The tap sheet answers "how would I reach this cell", one cell at a time, from

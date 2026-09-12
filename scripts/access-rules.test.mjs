@@ -299,7 +299,7 @@ test('bake: USFS is paged for the region, every page fatal on failure', async ()
   const opts = A.parseArgs([`--cells=${cellsFile(dir)}`, `--out=${path.join(dir, 'a.json')}`,
     '--bbox=47.4,-121.7,47.6,-121.5', '--skip-elevation']);
   const r = await A.build(opts, deps(pages));
-  assert.equal(pages.length, 3, 'one page per layer here, not three requests per tile');
+  assert.equal(pages.length, 4, 'one page per layer — three road and trail layers, then wilderness — not three requests per tile');
   assert.ok(pages.every(p => p.offset === 0 && p.fatal === true), 'paged, and a failed page throws');
   const u = r.provenance.usfs_fetch;
   assert.equal(u.multi_path, 1); assert.equal(u.pieces, 4, 'road, two closed pieces, snow route');
@@ -354,7 +354,7 @@ test('checkpoint: a schema-1 checkpoint is upgraded in place, never re-fetched',
   assert.ok(!ck.ways['unfsr-closed11'], 'the flattened record is replaced');
   assert.ok(ck.ways['unfsr-closed11.1'], 'by its pieces');
   assert.equal(ck.ways.o1.rd, 'motor_vehicle=no', 'the describing tag was backfilled');
-  assert.equal(pages.length, 3, 'USFS by page');
+  assert.equal(pages.length, 4, 'USFS by page, and the wilderness layer with it');
   assert.ok(queries.length >= 1 && queries.length <= 6,
     'and a handful of Overpass tag queries — describing tags, then gates, restricted roads and paved: ' + queries.length);
   assert.equal(r.provenance.checkpoint_schema, A.CHECKPOINT_SCHEMA);

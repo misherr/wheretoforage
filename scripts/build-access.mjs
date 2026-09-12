@@ -30,12 +30,13 @@ import { cellIndex } from '../src/grid.mjs';
 import { osmCategory, osmType, osmPaved, osmRoughReason, LIMITED_ACCESS, USFS_DRIVABLE_ML, CAP, CATS, encodeGeom,
          ROW_STRIDE, ACCESS_FORMAT,
          OSM_DRIVE, OSM_TRAIL, OSM_ROUGH, OSM_PAVED, carRestriction, blocksCars, CAR_BARRIERS, ROW_WIDTH,
+         bikeRestriction, BIKE_FORBIDDEN,
          TRAILHEAD_NONE, TRAILHEAD_MAPPED, TRAILHEAD_INFERRED } from '../src/access.mjs';
 import { REGIONS, decodePNG, terrariumMetres, tileXY, TERRAIN_SOURCE } from './build-cells.mjs';
 import { computeModes, routesFile, modeColumns, mergeRoutes } from './access-modes.mjs';
 
 export const GENERATOR = 'scripts/build-access.mjs';
-export const GENERATOR_VERSION = '7.0.0';
+export const GENERATOR_VERSION = '8.0.0';
 /* What a checkpoint holds, which is not the same question as which generator wrote it. Schema 2 keeps
    what the sources SAY — USFS maintenance level and trail_type, one way per USFS path, the OSM tags
    that describe a road — and nothing the rules derive, because the rules now run at assembly. A
@@ -43,7 +44,7 @@ export const GENERATOR_VERSION = '7.0.0';
    Overpass to change a rule that only assembly reads. */
 /* Schema 3 adds what a car needs to know: barriers ON roads, and on every OSM way the tags that close it
    to the public by car (ac) or say it is paved (pv) — schema 2 kept pv only for USFS twins. */
-export const CHECKPOINT_SCHEMA = 3;
+export const CHECKPOINT_SCHEMA = 4;
 
 const UA = 'king-bolete-forecast/1.0 (github.com/misherr/wheretoforage)';
 
@@ -63,6 +64,7 @@ export const OVERPASS_MIRRORS = process.env.OVERPASS_URL ? [process.env.OVERPASS
 ];
 const USFS_ROADS = 'https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_RoadBasic_01/MapServer';
 const USFS_TRAILS = 'https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_TrailNFSPublish_01/MapServer/0';
+const USFS_WILDERNESS = 'https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_Wilderness_01/MapServer/0';
 
 const TILE = 0.25;            // degrees
 const PAD = 0.025;            // ~2.5 km, so a way just outside a tile still reaches cells inside it
@@ -76,6 +78,7 @@ const USFS_PAGE = 1000;       // USFS records per page; a 2,000-record trails pa
 const TWIN_STEP_M = 25;       // sampling step when measuring how far two ways run together
 const TWIN_TOL_M = 20;        // copies of one road sit a median 7 m apart, before 25 m simplification
 const TWIN_MIN_M = 150;       // ...and must run together at least this far to be one road
+const WILD_SIMPLIFY_M = 60;   // a wilderness boundary, simplified: finer than a cell is wide by 25x
 const MIRROR_TRIES = 3;       // per area, across mirrors, before asking for a smaller area instead
 const MAX_SPLIT_DEPTH = 4;    // a 0.3 deg tile can become 256 pieces; metro tiles need about 16
 const ATTEMPTS = 6;           // USFS only — its endpoints are stable and do not need subdividing
@@ -89,6 +92,7 @@ export const SOURCES = {
   osm: { name: 'OpenStreetMap via Overpass', endpoint: OVERPASS_MIRRORS[0], licence: 'ODbL' },
   usfs_roads: { name: 'USFS National Forest System Roads (EDW)', endpoint: USFS_ROADS },
   usfs_trails: { name: 'USFS National Forest System Trails (EDW)', endpoint: USFS_TRAILS },
+  usfs_wilderness: { name: 'USFS National Wilderness Areas (EDW)', endpoint: USFS_WILDERNESS },
 };
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -675,6 +679,35 @@ export function usfsWays(f, type) {
   });
 }
 
+/* Designated wilderness, as polygons. A bicycle inside one is illegal by federal law rather than by a
+   gate, so this is the only absolute block in the bike figure — and the layer is FOREST SERVICE ONLY:
+   28 areas intersect Washington and not one of them is a national park wilderness. Bicycles are banned
+   on nearly every national park trail too, which the sheet says rather than the data.
+
+   Rings are kept per area and tested even-odd, so an inholding inside a wilderness is not wilderness.
+   Simplified at 60 m: a boundary drawn to survey precision costs megabytes and the question being
+   asked of it is which side of it a trail is on. */
+export async function fetchWilderness(bbox, fetchArc, logFn = log) {
+  const s = bbox.lat0 - PAD, n = bbox.lat1 + PAD, w = bbox.lon0 - PAD, e = bbox.lon1 + PAD;
+  const areas = [];
+  let features = 0, points = 0;
+  for (let offset = 0; ; offset += USFS_PAGE) {
+    const j = await fetchArc(USFS_WILDERNESS, s, w, n, e, 'wildernessname,objectid', { offset, fatal: true });
+    const feats = j.features || [];
+    for (const fe of feats) {
+      const rings = ((fe.geometry && fe.geometry.rings) || [])
+        .map(r => simplify(r.map(q => [q[1], q[0]]), WILD_SIMPLIFY_M)).filter(r => r.length >= 4);
+      if (!rings.length) continue;
+      points += rings.reduce((a, r) => a + r.length, 0);
+      areas.push({ name: (fe.attributes && fe.attributes.wildernessname) || null, rings });
+    }
+    features += feats.length;
+    if (!j.exceededTransferLimit || !feats.length) break;
+  }
+  logFn('wilderness ' + areas.length + ' areas, ' + points.toLocaleString() + ' boundary points');
+  return { areas, features, points };
+}
+
 /* Is a point inside any queried tile's padded box — the area the per-tile fetch used to cover — so
    paging the region's bounding box does not quietly widen the bake into Oregon and British Columbia. */
 function tileMembership(tiles) {
@@ -870,7 +903,7 @@ export function reconcileUsfs(ways) {
   const twins = findTwins(ways);
   const st = { osm_ways_with_twin: twins.size, pairs: 0, to_rough: 0, to_road: 0, paved: 0, described: 0,
                conflicting_twins: 0, usfs_adopted: 0, usfs_still_disagreeing: 0,
-               kept_highway: 0, kept_partial: 0, ml_carried: 0 };
+               kept_highway: 0, kept_partial: 0, ml_carried: 0, closed_carried: 0 };
   for (const [owid, list] of twins) {
     const o = ways.get(owid), top = ways.get(list[0].uwid);
     st.pairs += list.length;
@@ -889,6 +922,9 @@ export function reconcileUsfs(ways) {
        road was timed as unrated gravel, and the drive took whichever copy the network happened to
        join — the same road at two speeds. */
     if (o.ml == null && top.ml != null) { o.ml = top.ml; st.ml_carried++; }
+    /* And whether the Forest Service has closed the road to motorized use, for the same reason: the
+       bike figure blocks those, and it must block both copies of one road or neither. */
+    if (!o.closed && list.some(x => (ways.get(x.uwid) || {}).type === 'nfsr-closed')) { o.closed = 1; st.closed_carried++; }
   }
   const byU = new Map();
   for (const [owid, list] of twins) for (const t of list) {
@@ -1073,6 +1109,23 @@ async function overpassByArea(queryFor, box, onElements, query, logFn, label, de
    by car; and a paved surface on every way — schema 2 had surface only for USFS twins. By tag,
    statewide: three requests when the mirror is healthy — 67,710, 226,009 and 470,227 elements in the
    first run. */
+/* One-off, for a schema-3 checkpoint: where a bicycle is forbidden by a tag. By tag, statewide — the
+   same shape as the schema-2 and schema-3 backfills, and for the same reason: adding ["highway"~...]
+   makes the planner scan every road in the state and the query times out. */
+async function backfillBikeInputs(ways, bbox, query, logFn = log) {
+  const st = { no: 0, private: 0, dismount: 0, requests: 0 };
+  const bb = (a, b, c, d) => [a, b, c, d].map(v => v.toFixed(3)).join(',');
+  const area = [bbox.lat0 - PAD, bbox.lon0 - PAD, bbox.lat1 + PAD, bbox.lon1 + PAD];
+  st.requests += await overpassByArea((a, b, c, d) => '[out:json][timeout:300];way["highway"]["bicycle"~"'
+      + BIKE_FORBIDDEN.source + '"](' + bb(a, b, c, d) + ');out tags;', area,
+    els => { for (const el of els) {
+      const w = ways.get('o' + el.id), bk = bikeRestriction(el.tags);
+      if (w && bk && !w.bk) { w.bk = bk; st[bk] = (st[bk] || 0) + 1; }
+    } }, query, logFn, 'bicycle');
+  logFn('upgrade    where a bicycle is forbidden: ' + JSON.stringify(st));
+  return st;
+}
+
 async function backfillHikeInputs(ways, gateNodes, bbox, query, logFn = log) {
   const bb = (a, b, c, d) => [a, b, c, d].map(v => v.toFixed(3)).join(',');
   const st = { gates: 0, gates_open_to_cars: 0, restricted_ways: 0, paved_ways: 0, requests: 0 };
@@ -1130,6 +1183,7 @@ export async function build(opts, deps = {}) {
   const ways = new Map();           // wid -> { name, ref, type, cat, geom (simplified), th }
   const trailheadNodes = [];        // [lat, lon] from OSM highway=trailhead
   const gateNodes = [], gateIds = new Set();   // [lat, lon] of barriers ON roads that stop a car
+  let wilderness = [];              // [{ name, rings }] — where a bicycle is illegal
 
   const tiles = tilesFor(cellsFile.rows.map(r => ({ lat: r[0], lon: r[1] })), opts.bbox);
   log('  ' + tiles.length + ' tiles to query (cut to the cells they contain, padded '
@@ -1148,6 +1202,7 @@ export async function build(opts, deps = {}) {
       for (const [wid, w] of Object.entries(ck.ways || {})) ways.set(wid, w);
       for (const t of (ck.trailheads || [])) trailheadNodes.push(t);
       for (const g of (ck.gates || [])) gateNodes.push(g);
+      for (const a of (ck.wilderness || [])) wilderness.push(a);
       for (const k of (ck.doneTiles || [])) doneTiles.add(k);
       usfsDone = schema >= 2 ? !!ck.usfs : true;      // schema 1 fetched USFS per tile, alongside OSM
       usfsPaged = ck.usfs === 'paged';                // ...unless an interrupted upgrade already re-paged it
@@ -1162,7 +1217,8 @@ export async function build(opts, deps = {}) {
      changed, no trailheads. All of that is assembly, recomputed on every run. */
   const saveCk = () => atomicWrite(opts.checkpoint, JSON.stringify({
     generator_version: GENERATOR_VERSION, schema: schemaNow, region: opts.region, doneTiles: [...doneTiles],
-    usfs: usfsPaged ? 'paged' : usfsDone, trailheads: trailheadNodes, gates: gateNodes, ways: Object.fromEntries(ways),
+    usfs: usfsPaged ? 'paged' : usfsDone, trailheads: trailheadNodes, gates: gateNodes,
+    wilderness, ways: Object.fromEntries(ways),
   }), { fatal: false });
 
   const pending = tiles.filter(t => !doneTiles.has(t.k));
@@ -1203,6 +1259,10 @@ export async function build(opts, deps = {}) {
           if (rd) w.rd = rd;
           const ac = carRestriction(el.tags);
           if (ac) w.ac = ac;
+          /* Where a bicycle is forbidden by a tag. Read here because the fetch is the only moment the
+             tags are in hand; a schema-3 checkpoint has to ask Overpass for them again. */
+          const bk = bikeRestriction(el.tags);
+          if (bk) w.bk = bk;
           ways.set(wid, w);
         }
         nWays++;
@@ -1235,7 +1295,7 @@ export async function build(opts, deps = {}) {
       usfsDone = false;
     } else log('           USFS was already re-fetched by page before an interruption — keeping it');
   }
-  let usfsStats = null, backfill = null, hikeInputs = null;
+  let usfsStats = null, backfill = null, hikeInputs = null, bikeInputs = null, wildStats = null;
   if (!opts.skipUsfs && !usfsDone) {
     usfsStats = await fetchUsfs(tiles, opts.bbox, fetchArc, ways, log);
     usfsDone = true; usfsPaged = true;
@@ -1246,11 +1306,24 @@ export async function build(opts, deps = {}) {
     schemaNow = 2;
     saveCk();
   }
+  /* Wilderness is new in schema 4 and is not part of "the OSM network", so it is fetched whenever the
+     checkpoint holds none — on a fresh run and on a resumed one alike. A few ArcGIS pages. */
+  if (!opts.skipUsfs && !wilderness.length) {
+    wildStats = await fetchWilderness(opts.bbox, fetchArc, log);
+    wilderness = wildStats.areas;
+    saveCk();
+  }
   if (upgrading && schemaNow < 3) {
     log('upgrade    schema 3: gates on roads, and the tags that close a road to cars or pave it');
     gateNodes.length = 0;
     hikeInputs = await backfillHikeInputs(ways, gateNodes, opts.bbox, deps.overpassRaw || overpassRaw, log);
     schemaNow = 3;
+    saveCk();
+  }
+  if (upgrading && schemaNow < 4) {
+    log('upgrade    schema 4: the tag that forbids a bicycle');
+    bikeInputs = await backfillBikeInputs(ways, opts.bbox, deps.overpassRaw || overpassRaw, log);
+    schemaNow = 4;
     saveCk();
   }
 
@@ -1351,7 +1424,7 @@ export async function build(opts, deps = {}) {
   }
   let modes = new Map(), modeNet = null, modeStats = null;
   if (!opts.skipModes) {
-    const m = await computeModes(ways, cellsWithElev, { gates: gateNodes, log,
+    const m = await computeModes(ways, cellsWithElev, { gates: gateNodes, wilderness, log,
       elevationOf: opts.skipElevation ? null : async g => despike(await elevationProfile(g, deps.tileFetch)),
       offTrailClimb: opts.skipElevation ? async () => -1 : (from, to) => offTrailGain(from, to, deps.tileFetch) });
     modes = m.modes; modeNet = m.net; modeStats = m.stats;
@@ -1416,6 +1489,10 @@ export async function build(opts, deps = {}) {
                   ways_with_trailhead: withTh },
     rules: ruleStats, trailhead_kinds: thStats, checkpoint_schema: schemaNow,
     usfs_fetch: usfsStats, checkpoint_upgrade: backfill, checkpoint_upgrade_3: hikeInputs,
+    checkpoint_upgrade_4: bikeInputs,
+    wilderness: wildStats ? { areas: wildStats.areas.length, features: wildStats.features, points: wildStats.points,
+                              simplify_m: WILD_SIMPLIFY_M }
+                          : { areas: wilderness.length, from: 'checkpoint' },
     modes: modeStats, row_width: ROW_WIDTH,
     tiles: tiles.length,
     requests: { overpass: osmRequests, overpass_retries: osmRetries,
@@ -1459,8 +1536,9 @@ export async function build(opts, deps = {}) {
     atomicWrite(geomPath, JSON.stringify(geomOut));
     if (routesOut) {
       atomicWrite(routesPath, JSON.stringify(routesOut));
-      log('wrote ' + routesPath + ' - ' + routesOut.cells.length.toLocaleString() + ' hike routes plus '
-        + (routesOut.driveCells || []).length.toLocaleString() + ' where the drive walks differently, over '
+      log('wrote ' + routesPath + ' - ' + routesOut.cells.length.toLocaleString() + ' hike routes, '
+        + (routesOut.driveCells || []).length.toLocaleString() + ' drive walks and '
+        + (routesOut.bikeCells || []).length.toLocaleString() + ' rides, over '
         + routesOut.edges.length.toLocaleString() + ' edges, ' + (fs.statSync(routesPath).size / 1e6).toFixed(2)
         + ' MB, fetched only when an approach is shown');
     }

@@ -222,8 +222,8 @@ export function decodeWay(w, geomFlat) {
    trailhead to the point on the way nearest the cell and stopped there — it never included getting
    from that point to the cell, which is why 924 cells reported a walk of exactly 0 while the way was
    up to 1.9 km away. See docs/access.md. */
-/* v7 appends the drive columns to v6's hike, worst case and direct; see HIKE_AT and DRIVE_AT. */
-export const ACCESS_FORMAT = 7;
+/* v8 appends the bike columns to v7's hike, worst case, direct and drive; see HIKE_AT and BIKE_AT. */
+export const ACCESS_FORMAT = 8;
 export const ROW_STRIDE = 5;
 export function decodeRow(row) {
   const d = {};
@@ -545,14 +545,18 @@ export function durationLabel(min) {
   return (h < 10 ? Math.round(h * 2) / 2 : Math.round(h)) + ' h';
 }
 
-/* Why the car stopped where the walk starts, as the bake records it. */
-export const STOP = { none: 0, gate: 1, private: 2, rough: 3, end: 4 };
+/* Why the vehicle stopped where the walk starts, as the bake records it. The last three are a
+   bicycle's reasons; the first five a car's. */
+export const STOP = { none: 0, gate: 1, private: 2, rough: 3, end: 4, wilderness: 5, bicycle: 6, closed: 7 };
 export const STOP_LABEL = {
   [STOP.none]: 'from the road',
   [STOP.gate]: 'from a mapped gate',
   [STOP.private]: 'from where a private or permit-only road starts',
   [STOP.rough]: 'from where the drivable road turns rough',
   [STOP.end]: 'from the end of the mapped drivable road',
+  [STOP.wilderness]: 'from the wilderness boundary, where a bicycle is illegal',
+  [STOP.bicycle]: 'from where the map says no bicycles',
+  [STOP.closed]: 'from a road the Forest Service has closed to motorized use',
 };
 export const AS_MAPPED_NOTE =
   'As mapped. A gate, washout or closure nobody mapped is not in these figures — a road gated six '
@@ -570,6 +574,13 @@ export function carRestriction(tags) {
   return v && CAR_RESTRICTED.test(v) ? v : null;
 }
 export const CAR_BARRIERS = /^(gate|lift_gate|swing_gate|chain|bollard|block|jersey_barrier|log|rope|debris)$/;
+/* Where a bicycle is forbidden by a tag, beside carRestriction and read the same way. `dismount`
+   counts: pushing a bike is walking, and the bike figure then walks that stretch, which is right. */
+export const BIKE_FORBIDDEN = /^(no|private|dismount)$/;
+export function bikeRestriction(tags) {
+  const v = tags && tags.bicycle;
+  return v && BIKE_FORBIDDEN.test(v) ? v : null;
+}
 /* A barrier node stops a car unless it is tagged open to cars. 808 of 67,710 were, in the first fetch. */
 export function blocksCars(tags) {
   if (!tags || !CAR_BARRIERS.test(tags.barrier || '')) return false;
@@ -661,11 +672,62 @@ export const borderNote = d => d
     + ' from here at the ' + d.who + ' line — a shorter way in from ' + d.who + ' would not be in this figure.'
   : '';
 
-/* v7 rows carry the mode columns after the three categories:
+/* ===================== the bike =====================
+
+   The bike rides from where the car stops — level 1-2 roads, tracks and singletrack, the ways a truck
+   cannot use — and walks whatever is left. Three speeds, because a graded road and a singletrack are
+   not the same ride:
+
+     road   12 mph   pavement, a graded forest road (level 4-5), a street
+     rough   8 mph   level 3 and below, tracks, and every forest road nobody rated
+     trail   5 mph   singletrack and paths
+
+   plus 8 minutes per 100 m of climb, which is a steep forest road at a pace most people push rather
+   than ride. As with the other modes the metres are stored per class and the minutes computed here,
+   so a speed can be retuned without a re-bake.
+
+   Three things stop a bike, and one of them is a judgement call:
+
+     - **Designated wilderness.** A bicycle is illegal inside one by federal law, not by a gate. From
+       the USFS EDW wilderness layer, and marked per EDGE rather than per way, because a trail crosses
+       a boundary in the middle of a way. The layer is FOREST SERVICE ONLY: it does not hold the
+       national park wildernesses, and bicycles are banned on nearly every national park trail as
+       well — BIKE_PARK_NOTE says so on the sheet.
+     - **bicycle=no or bicycle=private in OSM.**
+     - **Roads the Forest Service has closed to motorized use**, which is BIKE_BLOCKS_CLOSED_ROADS
+       below. This is the user's instruction and it is deliberately conservative: a bicycle is NOT a
+       motor vehicle, and a closed forest road is usually both legal to ride and the best thing on the
+       map for it — riding past a gate is the whole point of taking a bike. It is one flag so the
+       decision can be revisited against a measurement rather than an argument. */
+export const BIKE_MPH = { road: 12, rough: 8, trail: 5 };
+export const BIKE_CLASSES = ['road', 'rough', 'trail'];
+export const BIKE_CLASS_LABEL = { road: 'road', rough: 'rough road or track', trail: 'trail' };
+export const BIKE_CLIMB_MIN_PER_100M = 8;
+/* The conservative choice, on purpose and in one place. Flipping it to false lets the bike ride the
+   closed-roads layer; docs/access.md records what that changes. */
+export const BIKE_BLOCKS_CLOSED_ROADS = true;
+export function rideMinutes(b) {
+  if (!b) return null;
+  let m = 0;
+  for (const c of BIKE_CLASSES) m += (b[c] || 0) / (BIKE_MPH[c] * 1609.34 / 60);
+  return m + Math.max(0, b.up || 0) * BIKE_CLIMB_MIN_PER_100M / 100;
+}
+export const rideMetres = b => b ? BIKE_CLASSES.reduce((s, c) => s + (b[c] || 0), 0) : null;
+export const bikeTravelMinutes = b => b ? rideMinutes(b) + footMinutes(b.walk) : null;
+export const BIKE_NOTE =
+  'The ride is from where a car stops, at 12 mph on a road, 8 on a rough one and 5 on a trail, plus '
+  + '8 minutes per 100 m of climb. Whether a trail is rideable at all is not in the map.';
+export const BIKE_PARK_NOTE =
+  'Wilderness and closed roads come from the Forest Service layer. It does not cover the national '
+  + 'parks, and bicycles are banned on nearly every trail in them.';
+
+/* v8 rows carry the mode columns after the three categories:
      hike:   on, onUp, off, offUp, parkEastM, parkNorthM, stop
      worst:  on, onUp, off, offUp
      direct: on, onUp, off, offUp      (only when straight through the brush saves 15 min or more)
      drive:  pavedM, gradedM, roughM, driveUp, on, onUp, off, offUp, parkEastM, parkNorthM, stop
+     bike:   roadM, roughM, trailM, rideUp, on, onUp, off, offUp, parkEastM, parkNorthM,
+             dismountEastM, dismountNorthM, stop
    in metres. The park point is metres east and north of the cell centre rather than an index into a
    table, so a regional merge has nothing to re-point. -1 in a group's first column means no figure. */
 export const HIKE_AT = 2 + 3 * 5;
@@ -674,7 +736,9 @@ export const WORST_AT = HIKE_AT + HIKE_STRIDE;
 export const DIRECT_AT = WORST_AT + 4;
 export const DRIVE_AT = DIRECT_AT + 4;
 export const DRIVE_STRIDE = 11;
-export const ROW_WIDTH = DRIVE_AT + DRIVE_STRIDE;
+export const BIKE_AT = DRIVE_AT + DRIVE_STRIDE;
+export const BIKE_STRIDE = 13;
+export const ROW_WIDTH = BIKE_AT + BIKE_STRIDE;
 const modeGroup = (row, at) => row[at] != null && row[at] >= 0
   ? { on: row[at], onUp: Math.max(0, row[at + 1]), off: row[at + 2], offUp: Math.max(0, row[at + 3]) } : null;
 const parkAt = (row, at, lat, lon) => lat != null && lon != null
@@ -693,7 +757,16 @@ export function decodeModes(row, lat, lon) {
               up: Math.max(0, row[DRIVE_AT + 3]), walk: modeGroup(row, DRIVE_AT + 4) || { on: 0, onUp: 0, off: 0, offUp: 0 },
               park: parkAt(row, DRIVE_AT + 8, lat, lon), stop: row[DRIVE_AT + 10] >= 0 ? row[DRIVE_AT + 10] : STOP.none };
   }
-  return { hike, worst: modeGroup(row, WORST_AT), direct: modeGroup(row, DIRECT_AT), drive };
+  /* The bike's first column is metres of road, legitimately 0 for a ride that is all singletrack, so
+     an absent figure is -1 here too. */
+  let bike = null;
+  if (row.length > BIKE_AT && row[BIKE_AT] != null && row[BIKE_AT] >= 0) {
+    bike = { road: row[BIKE_AT], rough: row[BIKE_AT + 1], trail: row[BIKE_AT + 2], up: Math.max(0, row[BIKE_AT + 3]),
+             walk: modeGroup(row, BIKE_AT + 4) || { on: 0, onUp: 0, off: 0, offUp: 0 },
+             park: parkAt(row, BIKE_AT + 8, lat, lon), dismount: parkAt(row, BIKE_AT + 10, lat, lon),
+             stop: row[BIKE_AT + 12] >= 0 ? row[BIKE_AT + 12] : STOP.none };
+  }
+  return { hike, worst: modeGroup(row, WORST_AT), direct: modeGroup(row, DIRECT_AT), drive, bike };
 }
 
 /* ===================== external links =====================

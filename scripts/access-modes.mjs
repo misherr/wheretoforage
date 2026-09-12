@@ -1,8 +1,9 @@
 /* Per-cell mode figures, from the route network in access-network.mjs.
  *
- * Hike and drive; bike follows on the same network. For every cell:
+ * All three modes. For every cell:
  *   hike    — the walk from wherever a car can get to, the way a forager would take it
  *   drive   — the drive from the nearest paved road, and the walk that is left after it
+ *   bike    — the ride from where the car stops, and the walk that is left after that
  *   worst   — the same walk from the nearest paved road, for when the gravel is gated after all
  *   direct  — straight through the brush, when that saves DIRECT_SAVES_MIN or more over `hike`
  * each as { on, onUp, off, offUp } in metres, plus where the car stops, why, and the route walked,
@@ -14,7 +15,8 @@
  *
  * The minutes and the difficulty bucket are NOT stored: the app computes them from these parts with
  * the constants in src/access.mjs, so the thresholds can move without a re-bake. */
-import { buildNetwork, carReach, carDrive, walkFrom, approaches, driveApproaches, routeOf, stopReason,
+import { buildNetwork, carReach, carDrive, walkFrom, approaches, driveApproaches, vehicleApproaches,
+         bikeRide, bikeBlocks, rideStopReason, vehiclePathTo, routeOf, stopReason,
          drivable, paved } from './access-network.mjs';
 import { STOP, encodeGeom } from '../src/access.mjs';
 
@@ -23,9 +25,14 @@ const mLon = lat => 111320 * Math.cos(lat * Math.PI / 180);
 
 /* ways: Map id -> way (after the rules). cells: Map "i:j" -> [lat, lon, elevationM].
    deps: elevationOf(geom) -> metres per vertex; offTrailClimb(from, to) -> metres or -1. */
-export async function computeModes(ways, cells, { gates = [], elevationOf, offTrailClimb, log = () => {}, onJoin = null } = {}) {
+export async function computeModes(ways, cells, { gates = [], wilderness = null, elevationOf, offTrailClimb,
+                                                  log = () => {}, onJoin = null } = {}) {
   const list = [];
-  for (const [id, w] of ways) list.push({ id, geom: w.geom, cat: w.cat, type: w.type, pv: w.pv, ac: w.ac, name: w.name, ref: w.ref });
+  /* Every field the network reads, and it reads more than the categories: `ml` decides a drive's
+     speed, `bk` and `closed` whether a bike may use the way at all. Copying by hand is how three of
+     them went missing once — if you add a rule that stamps a way, add it here. */
+  for (const [id, w] of ways) list.push({ id, geom: w.geom, cat: w.cat, type: w.type, pv: w.pv, ac: w.ac,
+                                          ml: w.ml, bk: w.bk, closed: w.closed, name: w.name, ref: w.ref });
   const net = await buildNetwork(list, { gates, elevationOf, log, onJoin });   // onJoin: the audit seam, see access-network.mjs
   const car = carReach(net);
   const inR = n => car.reach[n] === 1;
@@ -41,14 +48,23 @@ export async function computeModes(ways, cells, { gates = [], elevationOf, offTr
      here — going deeper by road costs road minutes, which is the whole point of the figure. */
   const drv = carDrive(net);
   const driveWalk = walkFrom(net, all.filter(n => isFinite(drv.min[n])), () => false, n => drv.min[n]);
+  /* The bike starts where the car stops, rides what it is allowed to ride, and walks the rest. The
+     blocks are per edge — a trail crosses a wilderness boundary mid-way. */
+  const blocks = bikeBlocks(net, { wilderness });
+  const ride = bikeRide(net, all.filter(inR), blocks, hikeFree);   // carried by the car to any point it can reach
+  const rideWalk = walkFrom(net, all.filter(n => isFinite(ride.min[n])), () => false, n => ride.min[n]);
+  log('modes      bike blocks: ' + JSON.stringify(blocks.stats));
 
   let drvE = 0, drvReached = 0;
   for (let e = 0; e < net.E; e++) if (drivable(net.W[net.eW[e]])) { drvE++; if (inR(net.eU[e]) && inR(net.eV[e])) drvReached++; }
   const stats = { ...net.st, car_reached_nodes: car.reach.reduce((a, b) => a + b, 0), paved_seeds: car.seeds,
     drivable_edges: drvE, drivable_edges_reached: drvReached, cells: 0, hike: 0, worst: 0, direct: 0,
     drive: 0, drive_to_the_point: 0, drive_same_park: 0,
+    bike: 0, bike_no_ride: 0, bike_blocks: null,
     stops: { none: 0, gate: 0, private: 0, rough: 0, end: 0 },
-    drive_stops: { none: 0, gate: 0, private: 0, rough: 0, end: 0 } };
+    drive_stops: { none: 0, gate: 0, private: 0, rough: 0, end: 0 },
+    bike_stops: {} };
+  stats.bike_blocks = blocks.stats;
   log('modes      car reaches ' + (100 * drvReached / Math.max(1, drvE)).toFixed(1) + '% of drivable road from pavement');
 
   const out = new Map();
@@ -59,10 +75,11 @@ export async function computeModes(ways, cells, { gates = [], elevationOf, offTr
     const hA = approaches(net, hike, hikeFree, lat, lon, () => elev);
     const wA = approaches(net, worst, worstFree, lat, lon, () => elev);
     const dA = driveApproaches(net, drv, driveWalk, lat, lon, () => elev);
-    if (!hA.primary && !wA.primary && !dA.primary) continue;
+    const bA = vehicleApproaches(net, ride, rideWalk, lat, lon, () => elev);
+    if (!hA.primary && !wA.primary && !dA.primary && !bA.primary) continue;
     const rec = { hike: await parts(hA.primary, lat, lon), worst: await parts(wA.primary, lat, lon),
                   direct: await parts(hA.direct, lat, lon), park: null, stop: STOP.none, route: null,
-                  drive: null, driveRoute: null };
+                  drive: null, driveRoute: null, bike: null, bikeRoute: null };
     if (hA.primary) {
       stats.hike++;
       const s = hA.primary.from === 'here' ? -1 : hike.start[hA.primary.from];
@@ -89,6 +106,25 @@ export async function computeModes(ways, cells, { gates = [], elevationOf, offTr
       if (rec.park && rec.drive.park[0] === rec.park[0] && rec.drive.park[1] === rec.park[1]) stats.drive_same_park++;
       rec.driveRoute = routeOf(net, driveWalk, d);
     }
+    if (bA.primary) {
+      const b = bA.primary;
+      stats.bike++;
+      const why = b.stopNode >= 0 ? rideStopReason(net, b.stopNode, blocks) : STOP.none;
+      const sameEnd = hA.primary && hA.primary.edge === b.edge && Math.abs(hA.primary.arc - b.arc) < 1;
+      const at = p => [Math.round((p[1] - lon) * mLon(lat)), Math.round((p[0] - lat) * M_LAT)];
+      rec.bike = { road: Math.round(b.drive.road), rough: Math.round(b.drive.rough), trail: Math.round(b.drive.trail),
+                   up: Math.round(b.drive.up), stop: why,
+                   park: at(b.source || b.park), dismount: at(b.park),
+                   walk: { on: Math.round(b.on), onUp: Math.round(b.onUp), off: Math.round(b.off),
+                           offUp: sameEnd && rec.hike ? rec.hike.offUp : await offTrailClimb(b.point, [lat, lon]) } };
+      stats.bike_stops[why] = (stats.bike_stops[why] || 0) + 1;
+      if (rec.bike.road + rec.bike.rough + rec.bike.trail === 0) stats.bike_no_ride++;
+      /* The ride IS drawn, unlike the drive: riding past a gate is what the figure is about. */
+      rec.bikeRoute = { edges: [...vehiclePathTo(net, ride, b.stopNode >= 0 ? b.stopNode : b.edgeFrom),
+                                ...(b.from === 'drive' ? [] : routeOf(net, rideWalk, b).edges)],
+                        last: b.edge, lastFrom: b.edgeFrom >= 0 ? b.edgeFrom : null, end: b.point,
+                        start: b.source || b.park };
+    }
     if (rec.worst) stats.worst++;
     if (rec.direct) stats.direct++;
     out.set(key, rec);
@@ -114,7 +150,7 @@ function edgeLine(net, e, a0, a1) {
    partial last edge up to where the off-trail line leaves. Fetched by the app only when someone asks
    to see an approach — 91,054 edges and ~1.9 MB of geometry statewide at the first measurement. */
 export function routesFile(net, modes) {
-  const index = new Map(), edges = [], cellsOut = [], driveOut = [];
+  const index = new Map(), edges = [], cellsOut = [], driveOut = [], bikeOut = [];
   const encodeRoute = (key, r) => {
     if (!r || r.lastFrom == null) return null;
     const ids = r.edges.map(e => { let k = index.get(e); if (k === undefined) { k = edges.length; index.set(e, k); edges.push(encodeGeom(edgeLine(net, e, net.eA0[e], net.eA1[e]))); } return k; });
@@ -149,10 +185,13 @@ export function routesFile(net, modes) {
     const drive = encodeRoute(key, rec.driveRoute);
     const same = r => JSON.stringify(r[2]) + '|' + JSON.stringify(r[3]);
     if (drive && (!hike || same(drive) !== same(hike))) driveOut.push(drive);
+    /* The bike's line is the ride and then the walk, so it is rarely the hike's; stored whenever it
+       differs, on the same rule. */
+    const bike = encodeRoute(key, rec.bikeRoute);
+    if (bike && (!hike || same(bike) !== same(hike))) bikeOut.push(bike);
   }
-  cellsOut.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  driveOut.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  return { edges, cells: cellsOut, driveCells: driveOut };
+  for (const list of [cellsOut, driveOut, bikeOut]) list.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  return { edges, cells: cellsOut, driveCells: driveOut, bikeCells: bikeOut };
 }
 
 /* A regional re-bake's routes replace its own cells' and carry the rest through, with the carried
@@ -172,17 +211,21 @@ export function mergeRoutes(prev, fresh, mine) {
   };
   const cells = carry(prev.cells, fresh.cells);
   const driveCells = carry(prev.driveCells, fresh.driveCells);
-  return { edges, cells, driveCells };
+  const bikeCells = carry(prev.bikeCells, fresh.bikeCells);
+  return { edges, cells, driveCells, bikeCells };
 }
 
 /* A v6 row's mode columns for one cell, in the order src/access.mjs decodes them. */
 export function modeColumns(rec) {
-  const h = rec && rec.hike, w = rec && rec.worst, d = rec && rec.direct, v = rec && rec.drive;
+  const h = rec && rec.hike, w = rec && rec.worst, d = rec && rec.direct, v = rec && rec.drive, k = rec && rec.bike;
   return [
     ...(h ? [h.on, h.onUp, h.off, h.offUp, rec.park ? rec.park[0] : 0, rec.park ? rec.park[1] : 0, rec.stop] : [-1, -1, -1, -1, 0, 0, -1]),
     ...(w ? [w.on, w.onUp, w.off, w.offUp] : [-1, -1, -1, -1]),
     ...(d ? [d.on, d.onUp, d.off, d.offUp] : [-1, -1, -1, -1]),
     ...(v ? [v.paved, v.graded, v.rough, v.up, v.walk.on, v.walk.onUp, v.walk.off, v.walk.offUp,
              v.park[0], v.park[1], v.stop] : [-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, -1]),
+    ...(k ? [k.road, k.rough, k.trail, k.up, k.walk.on, k.walk.onUp, k.walk.off, k.walk.offUp,
+             k.park[0], k.park[1], k.dismount[0], k.dismount[1], k.stop]
+          : [-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, -1]),
   ];
 }
