@@ -1394,9 +1394,9 @@ priced and the cheapest wins.
 
 ### What it costs
 
-- `access.json`: 9.0 MB to **10.8 MB**, which is 2.43 MB to **2.76 MB over the
-  wire**.
-- `access-routes.json`: 8.8 MB to **12.8 MB**, 2.55 MB to **3.26 MB over the wire**
+- `access.json`: 9.0 MB to **10.8 MB**, which is 2.43 MB to **2.93 MB over the
+  wire**, measured against the deployed host.
+- `access-routes.json`: 8.8 MB to **12.8 MB**, 2.55 MB to **3.46 MB over the wire**
   — the bike's line is stored for 13,741 cells, because unlike the drive's walk it
   is rarely the hike's, and because the ride itself is drawn. The drive's roads are
   not drawn: the overlay already shows them, while nobody believes a ride past a

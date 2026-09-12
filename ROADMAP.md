@@ -97,9 +97,9 @@ architecture:
 
 | file | v6 (hike) | v7 (+ drive) | v8 (+ bike) |
 | --- | --- | --- | --- |
-| `access.json`, over the wire | 2.08 MB | 2.43 MB | **2.76 MB** |
+| `access.json`, over the wire | 2.08 MB | 2.43 MB | **2.93 MB** |
 | `access.json`, raw | 7.75 MB | 9.0 MB | 10.8 MB |
-| `access-routes.json`, over the wire | 2.41 MB | 2.55 MB | **3.26 MB** |
+| `access-routes.json`, over the wire | 2.41 MB | 2.55 MB | **3.46 MB** |
 | `access-geom.json`, over the wire (lazy) | 2.22 MB | 2.22 MB | 2.22 MB |
 
 Over the wire is the number that matters: GitHub Pages serves these gzipped, which
@@ -108,9 +108,8 @@ viewer revalidates and pays nothing until the bake changes. Measure against the
 deployed host (`curl -H 'Accept-Encoding: gzip'`); `gzip -9` locally reads about 8%
 smaller than Pages sends.
 
-The projection before building the bike was ~2.8 MB and ~3.2 MB; it came in at 2.76 and 3.26,
-which is the first size estimate in this file that did not turn out optimistic. Where it went, and
-what is left to pull if it ever needs pulling:
+The projection before building the bike was ~2.8 MB and ~3.2 MB; it came in at 2.93 and 3.46 — a
+little optimistic again, which is this file's tradition. Where it went, and what is left to pull:
 
 - **The routes file already shares.** One table of way stretches serves every
   mode; only the per-cell lists are per mode, and the drive's walk is stored only
@@ -130,8 +129,13 @@ what is left to pull if it ever needs pulling:
   on whatever signal a forager has at a trailhead. In 0.5° blocks that becomes 60–120
   KB per tap, at the cost of duplicating the few edges shared across a block edge.
 
-None of this is urgent at 2.24 MB. The trigger to act is `access.json` over the
-wire passing 3 MB, or anyone reporting that "Show the route" hangs.
+**The trigger this plan set has arrived.** `access.json` is 2.93 MB over the wire
+with three modes, against the 3 MB that was named as the point to act, and the
+routes file is 3.46 MB on a single tap. So: **the next change that adds columns or
+a mode should ship with the sharding, not before it.** In order of value —
+geographic sharding of the routes file first (it is the one fetched whole at a
+trailhead), then per-mode files for `access.json`, then the quantising and the
+redundant worst case, which together are worth about 20% and need no new plumbing.
 
 ### QUEUED: ask Overpass for node ids, and stop inferring junctions
 
@@ -208,7 +212,7 @@ keep it in the network without stamping cells from it. It is a re-fetch of new
 tiles — hours of Overpass — so it waits for the Geofabrik extract, which would make
 it a bbox change rather than a fetch.
 
-### The routes file is fetched whole: 12.8 MB, 3.3 MB over the wire
+### The routes file is fetched whole: 12.8 MB, 3.5 MB over the wire
 
 `data/access-routes.json` — 25,880 hike routes, 1,758 drive walks and 13,741
 rides over 141,886 stretches of way — is what "Show the route" draws, and it is fetched whole on the
