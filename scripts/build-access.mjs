@@ -36,7 +36,7 @@ import { REGIONS, decodePNG, terrariumMetres, tileXY, TERRAIN_SOURCE } from './b
 import { computeModes, routesFile, modeColumns, mergeRoutes } from './access-modes.mjs';
 
 export const GENERATOR = 'scripts/build-access.mjs';
-export const GENERATOR_VERSION = '8.0.0';
+export const GENERATOR_VERSION = '8.1.0';
 /* What a checkpoint holds, which is not the same question as which generator wrote it. Schema 2 keeps
    what the sources SAY — USFS maintenance level and trail_type, one way per USFS path, the OSM tags
    that describe a road — and nothing the rules derive, because the rules now run at assembly. A

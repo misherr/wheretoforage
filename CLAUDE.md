@@ -128,12 +128,11 @@ while nothing throws.
   not pessimism, it is wrong about a street.
   [docs/access.md](docs/access.md#getting-there-by-car-the-drive-mode)
 - **A bike is carried to where the car stops, then rides what it is allowed to ride.** Everything a
-  walker may use except three absolutes: designated wilderness (federal law, from the USFS EDW layer,
-  marked per EDGE because a trail crosses a boundary mid-way), `bicycle=no|private|dismount`, and —
-  the user's call, deliberately conservative — roads the Forest Service has closed to motorized use,
-  which `BIKE_BLOCKS_CLOSED_ROADS` holds in one place. A bicycle is not a motor vehicle; riding past a
-  gate is the point of taking one, and lifting that block would make 8.8% of cells quicker by a median
-  12 minutes. **"Carried" is load-bearing**: the bike's sources are network NODES and a car stops
+  walker may use except two absolutes: designated wilderness (federal law, from the USFS EDW layer,
+  marked per EDGE because a trail crosses a boundary mid-way) and `bicycle=no|private|dismount`.
+  **A road closed to MOTORIZED use does not stop a bicycle** — `BIKE_BLOCKS_CLOSED_ROADS` is false
+  since v9, reversed at the user's request on the measurement (8.8% of cells quicker, median 12 min).
+  Do not re-tighten it from the original instruction; ROADMAP.md records the reversal. **"Carried" is load-bearing**: the bike's sources are network NODES and a car stops
   anywhere along an edge, so without the carried predicate the bike rode the last 500 m of a road the
   car could have driven and 9,157 cells read slower by bike than on foot. A bike figure must never be
   worse than the hike's. The wilderness layer covers the Forest Service and not the national parks,

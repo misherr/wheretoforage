@@ -18,7 +18,7 @@
 import { buildNetwork, carReach, carDrive, walkFrom, approaches, driveApproaches, vehicleApproaches,
          bikeRide, bikeBlocks, rideStopReason, vehiclePathTo, routeOf, stopReason,
          drivable, paved } from './access-network.mjs';
-import { STOP, encodeGeom } from '../src/access.mjs';
+import { STOP, encodeGeom, routeShardKey } from '../src/access.mjs';
 
 const M_LAT = 111320;
 const mLon = lat => 111320 * Math.cos(lat * Math.PI / 180);
@@ -192,6 +192,29 @@ export function routesFile(net, modes) {
   }
   for (const list of [cellsOut, driveOut, bikeOut]) list.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
   return { edges, cells: cellsOut, driveCells: driveOut, bikeCells: bikeOut };
+}
+
+/* The routes, split into the regional files the app fetches one of. Each shard carries its own edge
+   table: an edge used from two shards is stored twice, which measured at 2% of the total and buys a
+   tap that costs kilobytes instead of megabytes. */
+export function shardRoutes(routes) {
+  const out = new Map();
+  const put = (list, c) => {
+    const key = routeShardKey(c[0], c[1]);
+    let s = out.get(key);
+    if (!s) out.set(key, s = { edges: [], index: new Map(), cells: [], driveCells: [], bikeCells: [] });
+    const ids = c[2].map(e => {
+      let n = s.index.get(e);
+      if (n === undefined) { n = s.edges.length; s.index.set(e, n); s.edges.push(routes.edges[e]); }
+      return n;
+    });
+    s[list].push([c[0], c[1], ids, c[3]]);
+  };
+  for (const c of routes.cells) put('cells', c);
+  for (const c of (routes.driveCells || [])) put('driveCells', c);
+  for (const c of (routes.bikeCells || [])) put('bikeCells', c);
+  for (const s of out.values()) delete s.index;
+  return out;
 }
 
 /* A regional re-bake's routes replace its own cells' and carry the rest through, with the carried

@@ -208,8 +208,11 @@ test('bike: the speeds, the climb, and what the ride is measured in', () => {
   assert.ok(Math.abs(AC.bikeTravelMinutes(j) - 90) < 1e-6, 'ride plus walk, an hour of trail after half an hour of road');
 });
 
-test('bike: blocked absolutely by wilderness, by a tag, and — the conservative call — by closed roads', () => {
-  assert.equal(AC.BIKE_BLOCKS_CLOSED_ROADS, true, 'the user asked for it; one flag, so it can be revisited');
+test('bike: blocked by wilderness and by a tag — and NOT by a road closed to motor vehicles', () => {
+  /* Reversed in v9 at the user's request, on the measurement: a bicycle is not a motor vehicle, and
+     riding past a gate is the point of bringing one. The assertion is here so that re-reading the
+     original instruction cannot quietly re-tighten it. */
+  assert.equal(AC.BIKE_BLOCKS_CLOSED_ROADS, false, 'lifted on purpose in v9 — see ROADMAP.md');
   assert.equal(AC.bikeRestriction({ bicycle: 'no' }), 'no');
   assert.equal(AC.bikeRestriction({ bicycle: 'dismount' }), 'dismount', 'pushing a bike is walking');
   assert.equal(AC.bikeRestriction({ bicycle: 'yes' }), null);

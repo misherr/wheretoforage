@@ -58,22 +58,26 @@ git show b61b0a8:scripts/network-tiles.test.mjs
 and add the pyramid, a decoder hook and cancellation, rather than keeping 23
 tests guarding code that nothing runs.
 
-### Bikes on roads closed to motorized use: the user's call, now with a number
+### ~~Bikes may ride roads closed to motor vehicles~~ — DECIDED, and reversed on purpose
 
-**Open — the user's, revisitable.** The bike figure (v8) blocks roads the Forest
-Service has closed to motorized use, which is what was asked for and is the
-conservative reading. It is also, legally, the wrong one in most cases: **a bicycle
-is not a motor vehicle**, a closed forest road is generally open to it, and riding
-past a gate is the whole reason to put a bike on the car.
+**Settled 2026-09-12. Do not re-tighten this by re-reading the original
+instruction.** The first instruction for the bike mode was that the USFS
+closed-to-motorized layer blocks it absolutely, and v8 did that. The user reversed
+it themselves after seeing the measurement, in their words: *"a bicycle isn't a
+motor vehicle, a gated forest road is generally legal to ride, and riding past a
+gate is exactly why you'd bring one. That's what I did at Deming."*
 
-**Measured by re-baking with `BIKE_BLOCKS_CLOSED_ROADS` off:** 4,109 cells (8.8%)
-become quicker, by a median 12 minutes, p90 51, max 361; where the ride ends changes
-for 2,430 cells and the walk bucket for 1,691 (3.6%). It is one constant in
-`src/access.mjs` and an assembly-only re-bake, so flipping it costs three minutes.
+So since v9 `BIKE_BLOCKS_CLOSED_ROADS` is **false**, and the bike is stopped only by
+designated wilderness and by `bicycle=no|private|dismount`. What it bought, measured
+by baking it both ways: **4,109 cells (8.8%) quicker, by a median 12 minutes**, p90
+51, max 361; where the ride ends changes for 2,430 cells and the walk bucket for
+1,691 (3.6%).
 
-The middle answer, if the absolute one ever grates: block only where the closure
-names bicycles or non-motorized use as well. The EDW closed-roads layer does not
-carry that, so it would need another source or another field.
+The flag itself stays rather than being deleted, for two reasons: the **dirt bike**
+mode is the one that layer really does stop, and a rule this project has changed its
+mind about should be visible in the code rather than buried in a commit. The test in
+`scripts/modes-ui.test.mjs` asserts it is false and says why, so a well-meaning
+re-read of the original request fails the suite rather than shipping.
 
 ### The wilderness layer is the Forest Service's, and bikes are banned in the parks too
 

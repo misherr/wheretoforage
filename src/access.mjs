@@ -621,6 +621,26 @@ export const DRIVE_NOTE =
   'The drive is from the nearest paved road, at 35 mph on pavement, 25 on a graded forest road and 15 '
   + 'on anything rougher. Snow, washouts, a locked gate nobody mapped and mud are not in it.';
 
+/* ===================== where a route is stored =====================
+
+   The routes are drawn from their own files, and there are 264 of them rather than one, because the
+   one was 3.4 MB and it is fetched at the moment somebody standing at a trailhead taps "show the
+   route" — the worst connection and the least patience in the whole app. Sharded 16 cells square,
+   about 26 km, a tap costs a median 8 KB and at worst 52 KB.
+
+   The size was measured rather than guessed, on the real file: 16, 24, 32, 48 and 64 cells square all
+   cost the same in TOTAL (within 2%, because an edge is nearly always used by cells in one shard
+   only), so the choice is purely about the size of one fetch. 16 won on the p90: 32 KB against 121 KB
+   at 32 cells.
+
+   The key is derived from the cell index, so the bake and the app agree by construction. A missing
+   file means "no routes in this block of the state", which is a real answer — most of the Columbia
+   basin has none — and not an error. */
+export const ROUTE_SHARD = 16;
+export const routeShardKey = (i, j) => Math.floor(i / ROUTE_SHARD) + '_' + Math.floor(j / ROUTE_SHARD);
+export const ROUTE_SHARD_DIR = 'data/access-routes';
+export const routeShardFile = key => ROUTE_SHARD_DIR + '/' + key + '.json';
+
 /* ===================== the edge of the data =====================
 
    The bake holds Washington's roads and about 2.8 km past them — the tile padding — and nothing
@@ -686,26 +706,30 @@ export const borderNote = d => d
    than ride. As with the other modes the metres are stored per class and the minutes computed here,
    so a speed can be retuned without a re-bake.
 
-   Three things stop a bike, and one of them is a judgement call:
+   Two things stop a bike:
 
      - **Designated wilderness.** A bicycle is illegal inside one by federal law, not by a gate. From
        the USFS EDW wilderness layer, and marked per EDGE rather than per way, because a trail crosses
        a boundary in the middle of a way. The layer is FOREST SERVICE ONLY: it does not hold the
        national park wildernesses, and bicycles are banned on nearly every national park trail as
        well — BIKE_PARK_NOTE says so on the sheet.
-     - **bicycle=no or bicycle=private in OSM.**
-     - **Roads the Forest Service has closed to motorized use**, which is BIKE_BLOCKS_CLOSED_ROADS
-       below. This is the user's instruction and it is deliberately conservative: a bicycle is NOT a
-       motor vehicle, and a closed forest road is usually both legal to ride and the best thing on the
-       map for it — riding past a gate is the whole point of taking a bike. It is one flag so the
-       decision can be revisited against a measurement rather than an argument. */
+     - **bicycle=no, private or dismount in OSM.**
+
+   And one thing that does NOT: a road the Forest Service has closed to MOTORIZED use. A bicycle is
+   not a motor vehicle, such a road is generally legal to ride, and riding past a gate is the whole
+   point of bringing one. v8 blocked it — the user's first instruction, taken conservatively — and v9
+   lifts it on the user's own reversal, with the measurement behind it: 4,109 cells (8.8%) quicker by
+   a median 12 minutes. **Do not re-tighten this by reading the original instruction.** See
+   ROADMAP.md, "Bikes may ride roads closed to motor vehicles". The DIRT BIKE, when it lands, is the
+   mode that layer really does stop. */
 export const BIKE_MPH = { road: 12, rough: 8, trail: 5 };
 export const BIKE_CLASSES = ['road', 'rough', 'trail'];
 export const BIKE_CLASS_LABEL = { road: 'road', rough: 'rough road or track', trail: 'trail' };
 export const BIKE_CLIMB_MIN_PER_100M = 8;
-/* The conservative choice, on purpose and in one place. Flipping it to false lets the bike ride the
-   closed-roads layer; docs/access.md records what that changes. */
-export const BIKE_BLOCKS_CLOSED_ROADS = true;
+/* False since v9, deliberately: see the reversal above. Kept as a flag rather than deleted because
+   the closed-roads layer is exactly what the dirt bike mode must respect, and because a rule this
+   project has changed its mind about should stay visible. */
+export const BIKE_BLOCKS_CLOSED_ROADS = false;
 export function rideMinutes(b) {
   if (!b) return null;
   let m = 0;

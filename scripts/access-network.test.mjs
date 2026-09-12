@@ -263,18 +263,20 @@ test('bike: wilderness blocks it absolutely, and an inholding inside one does no
   assert.equal(blocked, blocks.stats.wilderness);
 });
 
-test('bike: a closed road stops it only because we chose that, and a bicycle tag always does', async () => {
+test('bike: a road closed to motor vehicles does not stop it; a bicycle tag always does', async () => {
+  /* Reversed in v9: a bicycle is not a motor vehicle. The flag stays because the dirt bike will need
+     it the other way round, and because a rule this project changed its mind about should be visible
+     rather than deleted. */
   const net = await build([
     way('hwy', line(0, 0, 1000, 0), { type: 'secondary' }),
     way('closed', line(1000, 0, 1000, 2000, 8), { cat: 'rough', type: 'nfsr-closed' }),
     way('nobikes', line(1000, 0, 3000, 0, 8), { cat: 'trail', type: 'path', bk: 'no' }),
   ]);
-  const on = N.bikeBlocks(net, {});
-  assert.ok(on.stats.closed > 0, 'the closed-roads layer blocks the bike by default');
-  assert.ok(on.stats.bicycle > 0, 'and so does bicycle=no');
-  const off = N.bikeBlocks(net, { blockClosed: false });
-  assert.equal(off.stats.closed, 0, 'one flag turns the closed roads back on for a bike');
-  assert.ok(off.stats.bicycle > 0, 'the tag is not a flag — it always blocks');
+  const dflt = N.bikeBlocks(net, {});
+  assert.equal(dflt.stats.closed, 0, 'by default a closed forest road is rideable');
+  assert.ok(dflt.stats.bicycle > 0, 'while bicycle=no is not a flag — it always blocks');
+  const strict = N.bikeBlocks(net, { blockClosed: true });
+  assert.ok(strict.stats.closed > 0, 'and the flag still works, for the mode that needs it');
 });
 
 test('bike: the ride starts where the car stops, and the walk starts where the ride must', async () => {

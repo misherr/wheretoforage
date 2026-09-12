@@ -1343,7 +1343,7 @@ the off-trail climb being estimated when a candidate is chosen and measured
 afterwards, the same wrinkle the drive has. The invariant to keep: **a bike figure
 is never worse than the hike figure.**
 
-### Three things stop a bike, and one of them is a judgement call
+### Two things stop a bike — and one that does not
 
 - **Designated wilderness.** A bicycle inside one is illegal by federal law, not by
   a gate. 28 areas intersect Washington, from the USFS EDW wilderness layer, kept
@@ -1352,14 +1352,15 @@ is never worse than the hike figure.**
 - **`bicycle=no`, `private` or `dismount` in OpenStreetMap** — 9,106 ways, 28,450
   edges. `dismount` counts because pushing a bike is walking, and the figure then
   walks that stretch, which is exactly right.
-- **Roads the Forest Service has closed to motorized use** — 92,026 edges, the
-  largest block of the three. **This is the user's instruction and it is
-  deliberately conservative**: a bicycle is not a motor vehicle, a closed forest
-  road is usually legal to ride, and riding past a gate is the whole reason to take
-  a bike. It is one flag, `BIKE_BLOCKS_CLOSED_ROADS`, so the decision can be
-  revisited against a number rather than an argument. **Measured, by re-baking with
-  it off: 4,109 cells (8.8%) would be quicker, by a median 12 minutes, p90 51, max
-  361; where the ride ends changes for 2,430 cells and the walk bucket for 3.6%.**
+And one thing that does **not** stop it, though v8 had it stopping: a road the
+Forest Service has closed to **motorized** use. A bicycle is not a motor vehicle,
+such a road is generally legal to ride, and riding past a gate is the whole reason
+to bring one. The user asked for the conservative reading first, saw the
+measurement, and reversed it: **4,109 cells (8.8%) quicker, by a median 12 minutes**,
+p90 51, max 361, with the walk bucket moving for 3.6%. `BIKE_BLOCKS_CLOSED_ROADS` is
+false from v9 and a test asserts it, because the original instruction is still in the
+conversation history and reads the other way. The closed-roads layer is what the
+**dirt bike** must respect; that is where those 92,026 edges belong.
 
 Blocks are marked **per edge**, not per way, because a trail crosses a boundary in
 the middle of a way. An edge runs junction to junction, so an edge that straddles
