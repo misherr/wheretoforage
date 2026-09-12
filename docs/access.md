@@ -1196,7 +1196,7 @@ someone deciding where to go today is deciding about a day, not about a leg. A
 minute in the truck is easier than a minute walking, so counting them equally
 already leans towards walking rather than towards driving round the mountain.
 
-The two agree for **43,661 of 46,634 cells (93.6%)**. Where they differ, the drive
+The two agree for **43,881 of 46,634 cells (94.1%)**. Where they differ, the drive
 has found a closer place to leave the car at the price of a longer walk, or the
 reverse. The routes file stores the drive's walk only for the 1,764 cells where the
 line is actually different; everywhere else the app draws the hike's.
@@ -1259,11 +1259,13 @@ worst case is the figure that describes the day they actually had.
 
 ### What it costs
 
-- `access.json` goes from 7.75 MB to 9.0 MB, which is 1.96 MB to **2.24 MB over
+- `access.json` goes from 7.75 MB to 9.0 MB, which is 2.08 MB to **2.43 MB over
   the wire** — Pages serves it gzipped, and that is the number that matters on a
-  phone.
-- `access-routes.json` grows by 0.08 MB gzipped, because the modes **share** the
-  table of way stretches and differ only in the per-cell lists.
+  phone. (Measure it with `curl -H 'Accept-Encoding: gzip'` against the deployed
+  host, not with `gzip -9` locally: Pages compresses less hard, by about 8%.)
+- `access-routes.json` grows from 2.41 MB to 2.55 MB over the wire, because the
+  modes **share** the table of way stretches and differ only in the per-cell
+  lists — 1,764 of 25,880.
 - Bike will add about as much again. The size plan, with the levers measured, is
   in [ROADMAP.md](../ROADMAP.md#the-three-modes-share-storage-they-do-not-triple-it).
 

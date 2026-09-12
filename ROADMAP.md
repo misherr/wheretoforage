@@ -81,15 +81,18 @@ architecture:
 
 | file | v6 (hike) | v7 (+ drive) | with bike, projected |
 | --- | --- | --- | --- |
-| `access.json`, over the wire | 1.96 MB | **2.24 MB** | ~2.5 MB |
+| `access.json`, over the wire | 2.08 MB | **2.43 MB** | ~2.8 MB |
 | `access.json`, raw | 7.75 MB | 9.0 MB | ~10.3 MB |
-| `access-routes.json`, over the wire | 2.30 MB | **2.38 MB** | ~3.0 MB |
+| `access-routes.json`, over the wire | 2.41 MB | **2.55 MB** | ~3.2 MB |
+| `access-geom.json`, over the wire (lazy) | 2.22 MB | 2.22 MB | 2.22 MB |
 
 Over the wire is the number that matters: GitHub Pages serves these gzipped, which
-is a 4:1 saving, and `access.json` is fetched with `no-cache` — so a returning
-viewer revalidates and pays nothing until the bake changes.
+is a 3.7:1 saving, and `access.json` is fetched with `no-cache` — so a returning
+viewer revalidates and pays nothing until the bake changes. Measure against the
+deployed host (`curl -H 'Accept-Encoding: gzip'`); `gzip -9` locally reads about 8%
+smaller than Pages sends.
 
-Where the drive's 0.28 MB went, and what is left to pull if it ever needs pulling:
+Where the drive's 0.35 MB went, and what is left to pull if it ever needs pulling:
 
 - **The routes file already shares.** One table of way stretches serves every
   mode; only the per-cell lists are per mode, and the drive's walk is stored only

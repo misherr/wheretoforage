@@ -122,7 +122,7 @@ while nothing throws.
   permit-only roads — timed at 35 mph on pavement, 25 on a graded forest road or a street, 15 on
   anything rougher, with the metres stored per class so a speed can change without a re-bake. The
   parking point is the one that makes the WHOLE journey fastest, drive plus walk, which is not always
-  where the hike leaves the car: the hike counts foot minutes alone. They agree for 93.6% of cells,
+  where the hike leaves the car: the hike counts foot minutes alone. They agree for 94.1% of cells,
   and the routes file stores the drive's walk only for the rest. A street counts as graded because 61%
   of the drivable network this code calls unpaved is `highway=residential` — timing those at 15 mph is
   not pessimism, it is wrong about a street.
