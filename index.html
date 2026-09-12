@@ -1432,9 +1432,9 @@ function driveBlock(e,dim){
   /* One kind of road all the way is the common case, and "7.7 mi by road — 7.7 mi rough gravel" says
      it twice. Name the kind instead, and break it down only when there is something to break down. */
   let t=`<dt>Drive</dt><dd><b>${durationLabel(dm)}</b> ${dim('from the nearest paved road')}<br>`
-    +`${accessDistance(driveMetres(d))}${climb(d.up)} `
-    +dim(legs.length===1?'of '+DRIVE_CLASS_LABEL[legs[0]]
-      :'by road'+(legs.length?' — '+legs.map(c=>accessDistance(d[c])+' '+DRIVE_CLASS_LABEL[c]).join(', '):''))+`<br>`;
+    +(legs.length===1
+      ? `${accessDistance(driveMetres(d))} ${dim('of '+DRIVE_CLASS_LABEL[legs[0]])}${climb(d.up)}<br>`
+      : `${accessDistance(driveMetres(d))}${climb(d.up)} ${dim('by road'+(legs.length?' — '+legs.map(c=>accessDistance(d[c])+' '+DRIVE_CLASS_LABEL[c]).join(', '):''))}<br>`);
   if(wm>=1){
     t+=`<span class="bucket">${b.label}</span> <b>${durationLabel(wm)}</b> ${dim('on foot from there')}<br>`
       +(w.on>0?`${accessDistance(w.on)}${climb(w.onUp)} ${dim('on trails, tracks and roads, '+STOP_LABEL[d.stop])}<br>`:'')
