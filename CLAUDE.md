@@ -141,7 +141,7 @@ while nothing throws.
   [docs/access.md](docs/access.md#by-bike-the-third-mode)
 - **Where the data ends, the sheet says so.** The bake holds Washington's roads and about 2.8 km
   past them, so a cell near a LAND border can be handed the long way round: the state's deepest
-  drive, 141 minutes and 35 miles, is a cell 2.7 km from Idaho whose nearest pavement is four miles
+  drive, 134 minutes and 35 miles, is a cell 2.7 km from Idaho whose nearest pavement is four miles
   east, in Idaho. `edgeDoubt()` fires when the data ends inside half a figure's own length, and the
   tap sheet prints one line naming the neighbour — 892 of 46,923 cells, once per sheet rather than
   once per figure. The Pacific coast and the Strait are deliberately not borders for this: no road is

@@ -196,7 +196,7 @@ answering it.
 ### The bake holds Washington's roads only, so a border cell drives the long way
 
 **Measured, said out loud, not fixed.** The five deepest drives in the state — up
-to 141 minutes and 35 miles — are cells within three kilometres of the Idaho line
+to 134 minutes and 35 miles — are cells within three kilometres of the Idaho line
 whose nearest pavement is 4 miles east, in Idaho, which the bake does not hold. 167
 of the 780 cells with a drive over an hour are within 15 km of a border, against
 11% of cells overall. The worst-case walk and the hike have the same edge.

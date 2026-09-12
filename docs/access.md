@@ -1185,8 +1185,14 @@ stays in the slow class, which is where the pessimism belongs.
 
 Metres are stored per class and per cell, plus the climb; **the minutes are
 computed in the app**, so a speed can be retuned without a re-bake. Of the metres
-actually driven across all 46,634 cells, 1.8% are pavement, 17.7% graded and 80.5%
+actually driven across all 46,634 cells, 1.8% are pavement, 24.3% graded and 73.8%
 rough — the drive figure is, in effect, gravel miles from the end of the tarmac.
+
+(Those shares are the v8 numbers. In v7 they read 1.8 / 17.7 / 80.5, because the
+maintenance level never reached the network: `computeModes` copies each way by hand
+and `ml` was missing from the copy, so the whole graded class was town streets. The
+drive figures moved a little when the bike exposed it — the state's deepest drive
+from 141 minutes to 134 — and the class rule itself was never in doubt.)
 
 ### Where the car is left
 
@@ -1251,7 +1257,7 @@ worst case is the figure that describes the day they actually had.
   median disagreement is small and both figures describe a real approach.
 - **The worst case never beats walking the drive's own road**: 182 rows (0.4%),
   the same cause.
-- The deepest drives in the state — 141 minutes, 35 miles — are a **border
+- The deepest drives in the state — 134 minutes, 35 miles — are a **border
   artifact**, and the sheet now says so; see below. 167 of the 780 cells with a
   drive over an hour are within 15 km of a border, against 11% of cells overall.
 
@@ -1259,7 +1265,7 @@ worst case is the figure that describes the day they actually had.
 
 The bake holds Washington's roads and about 2.8 km past them — the fetch's tile
 padding — and nothing beyond. So near a **land** border the way round it found may
-be the only way it can see. The state's deepest drive is the proof: 141 minutes and
+be the only way it can see. The state's deepest drive is the proof: 134 minutes and
 35 miles for a cell 2.7 km from the Idaho line, whose nearest pavement is 4 miles
 east in Idaho, 1.6 km outside the data.
 

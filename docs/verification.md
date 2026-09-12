@@ -486,7 +486,7 @@ cheap and catches what a spot check would not:
 - **Check the extremes against the map.** The five deepest drives in the state are
   all within a kilometre of the Idaho line, and the nearest pavement to the
   deepest one is 4 miles away — in Idaho, which the bake does not hold. Without
-  that check the 141-minute figure looks like a bug in the router rather than the
+  that check the 134-minute figure looks like a bug in the router rather than the
   edge of the data.
 - **Say the edge of the data where it applies, and count how often that is.** The
   border caveat fires for 892 of 46,923 cells — 1.9%, which is a caveat. Had it
@@ -495,9 +495,12 @@ cheap and catches what a spot check would not:
   not exist. Count before shipping a warning.
 - **Profile the speed classes before trusting them.** 61% of the drivable network
   `paved()` does not call pavement is `highway=residential`: the first version put
-  all of it in the 15 mph class and 98.1% of every drive was "rough gravel". After
-  moving streets to the graded class the split is 1.8% / 17.7% / 80.5%, which is
-  what the model was meant to say.
+  all of it in the 15 mph class and 98.1% of every drive was "rough gravel". Moving
+  streets to the graded class took it to 1.8 / 17.7 / 80.5 — and the profile was
+  still wrong, because the maintenance level was not reaching the network at all
+  (see above). With `ml` passed through it is **1.8 / 24.3 / 73.8**. A share that
+  sits at exactly 0.0% — as the graded class did before streets were moved — is the
+  cheapest bug detector in this file. Read the profile, not just the totals.
 
 ## The bike, checked
 
