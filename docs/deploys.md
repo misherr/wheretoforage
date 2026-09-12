@@ -31,6 +31,27 @@ its job is guarded by `if: github.repository == 'misherr/wheretoforage-dev'`.
 from deploying itself with the staging domain. Production stays on branch-based
 Pages (`build_type: legacy`, `main:/`) with its own committed `CNAME`.
 
+### A second push while the first is still deploying fails, and it is not a broken build
+
+Pages allows one in-flight deployment per site. Push twice inside a few minutes
+and the second run dies with
+
+> Deployment request failed for `<sha>` due to in progress deployment. Please
+> cancel `<earlier sha>` first or wait for it to complete.
+
+It is a 400 from the deployment API, reported as `##[error]Creating Pages
+deployment failed`, and it leaves a red X against a commit whose build was
+fine — the artifact uploaded, only the deployment was refused. **Re-run the
+failed job once the earlier one has finished:**
+
+```bash
+gh run rerun <id> --repo misherr/wheretoforage-dev
+```
+
+Seen 2026-09-12 with three staging pushes in ten minutes. Nothing to fix in the
+workflow: cancelling the in-flight deployment to let a newer one through would
+just move the race. If several commits are ready, push them together.
+
 ### Both workflows are repository-guarded, in opposite directions
 
 The staging repo is a *full copy* of this tree, so every workflow in
