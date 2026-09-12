@@ -537,3 +537,36 @@ And two checks that confirmed what they should:
   That is the number the decision should be revisited against; `--out` to a
   scratch path with `--checkpoint` pointed at the real one makes such a variant
   bake free of consequences.
+
+## Assert on the effect, not on the log
+
+The `computeModes` copy bug reported itself as success: the upgrade log said
+**"where a bicycle is forbidden: {no: 8914, private: 155, dismount: 37}"** — nine
+thousand ways found, correctly — while the blocks summary two screens later said
+`"bicycle": 0`. Both lines were true. The fetch had done its work and the network
+never saw it, because `computeModes` copies each way by hand and `bk` was not in the
+copy.
+
+This is the same shape as the most expensive failures in this file:
+
+- the LANDFIRE bake that reported 39,981 forested cells while every one of them
+  scored as though its trees were ideal;
+- trailheads counted and logged during the fetch while 8.4% of them rested on a road
+  no car could use;
+- the anchor join that reported every tap correctly while the overlay drew nothing.
+
+In each case the log described the **work attempted** and nothing checked that the
+work **landed**. So:
+
+- **Assert one hop past the thing you just did.** Not "the query returned 9,106
+  ways" but "9,106 ways now block something". Not "the bake wrote 46,923 rows" but
+  "a row taken at random decodes into the figure the sheet shows".
+- **A zero in a summary is a bug report.** `"bicycle": 0` beside a fetch that found
+  thousands, and `graded 0.0%` in a profile of a three-class speed model, were each
+  the whole bug, printed, for a version. Read the profile, not just the totals, and
+  treat a share that is exactly zero as a failed assertion until proved otherwise.
+- **Where data crosses a boundary by hand — a copy, a column list, a row format —
+  test the far side.** `scripts/access-modes.test.mjs` bakes a four-way fixture end
+  to end and asserts that a maintenance level changes a drive time and a
+  `bicycle=no` tag changes a bike figure. Both fail when the field is dropped from
+  the copy, which no amount of log-reading did.

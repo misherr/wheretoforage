@@ -806,8 +806,8 @@ test('format: the bake stamps the version the app reads, from one constant', asy
   const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
   assert.match(app, /j\.version!==ACCESS_FORMAT/,
     'the app must refuse a version it does not know rather than misdecoding it');
-  assert.equal((app.match(/j\.version!==ACCESS_FORMAT/g) || []).length, 3,
-    'access.json, access-geom.json and access-routes.json all need the check — a stale geometry or routes file draws a wrong line');
+  assert.equal((app.match(/j2?\.version!==ACCESS_FORMAT/g) || []).length, 3,
+    'access.json, access-geom.json and a route shard all need the check — a stale geometry or routes file draws a wrong line');
 
   /* And the width really does depend on the stride, so a future change cannot forget to bump it. */
   assert.equal(out.rows[0].length, AC.ROW_WIDTH);

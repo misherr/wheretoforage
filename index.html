@@ -244,7 +244,7 @@ import { hostOf, HOST_NO_INFO, vegMult, vegSummary, hostFromSamples } from './sr
 import { makeEntry, applyVeg } from './src/model/cell.mjs';
 // The cell lattice, the state outline and terrainAt() are shared with scripts/build-cells.mjs, which
 // bakes data/cells.json. A second copy of this geometry would drift, and the symptom is a blank map.
-import { DLAT, DLON, BLK, BLAT, BLON, inWA, cellCenter, cellKey,
+import { DLAT, DLON, BLK, BLAT, BLON, inWA, cellCenter, cellKey, cellIndex,
          terrainAt, tileXY, pointKey as key } from './src/grid.mjs';
 // Access is a separate axis from suitability and never touches a score — see src/access.mjs.
 import { parseCoords, formatCoords } from './src/coords.mjs';
@@ -258,7 +258,7 @@ import { classifyAccess, accessDetail, accessRank, accessDistance, gainLabel, ex
          driveMinutes, driveMetres, travelMinutes, DRIVE_NOTE, DRIVE_CLASSES, DRIVE_CLASS_LABEL,
          edgeDoubt, borderNote,
          rideMinutes, rideMetres, bikeTravelMinutes, BIKE_NOTE, BIKE_PARK_NOTE, BIKE_CLASSES,
-         BIKE_CLASS_LABEL } from './src/access.mjs';
+         BIKE_CLASS_LABEL, routeShardKey, routeShardFile } from './src/access.mjs';
 /* ===================== CONFIG ===================== */
 const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
 const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400; // local refine below 1 mi when zoomed way in
@@ -796,7 +796,7 @@ async function tryStatic(){
       /* Geometry is shared by way rather than duplicated per cell — the difference between an 8 MB
          file and a 47 MB one. Rows carry indices into j.ways; decoding is deferred to the tap so
          48,000 polylines are never built up front. */
-      STATIC.access={ways:j.ways||[],byCell:new Map(),modes:new Map(),geom:null,routes:null,examined:null};
+      STATIC.access={ways:j.ways||[],byCell:new Map(),modes:new Map(),geom:null,examined:null};
       for(const row of j.rows){
         STATIC.access.byCell.set(row[0]+':'+row[1],decodeAccessRow(row));
         const [la,lo]=cellCenter(row[0],row[1]), m=decodeModes(row,la,lo);
@@ -1500,28 +1500,37 @@ function bikeBlock(e,dim){
   return t+worstBlock(e,dim,bikeTravelMinutes(b));
 }
 
-/* The route the hike figure describes: the walk over the network, where the car stops, and the
-   straight off-trail line to the cell centre. From its own lazily fetched file, stamped with the bake
-   like access-geom.json and for the same reason: force-cache on an unstamped URL kept a returning
-   viewer on a previous bake's lines. */
-let routesFetch=null;
-async function loadAccessRoutes(){
+/* The route a figure describes: the walk over the network, the ride before it, where the vehicle
+   stops, and the straight off-trail line to the cell centre.
+
+   Fetched ONE REGION AT A TIME. The whole state's routes were 3.4 MB in a single file, and the moment
+   it was fetched was somebody at a trailhead tapping "show the route" — the worst connection in the
+   app's life. Sharded 16 cells square (src/access.mjs), that tap costs a median 8 KB and at worst 52
+   KB, and a second tap in the same region costs nothing. Each shard is stamped with the bake, like
+   access-geom.json and for the same reason: force-cache on an unstamped URL kept a returning viewer
+   on a previous bake's lines.
+
+   A missing shard is a real answer, not an error: most of the Columbia basin has no routes at all. It
+   is remembered as null so it is asked for once. */
+const routeShards=new Map();
+async function loadRouteShard(lat,lon){
   if(!STATIC.access) return null;
-  if(STATIC.access.routes) return STATIC.access.routes;
-  if(!routesFetch) routesFetch=(async()=>{
-    try{ const r=await fetch('data/access-routes.json?g='+encodeURIComponent(accessAsOf||''),{cache:'force-cache'});
+  const [i,j]=cellIndex(lat,lon), key=routeShardKey(i,j);
+  let p=routeShards.get(key);
+  if(!p) routeShards.set(key,p=(async()=>{
+    try{ const r=await fetch(routeShardFile(key)+'?g='+encodeURIComponent(accessAsOf||''),{cache:'force-cache'});
       if(!r.ok) return null;
-      const j=await r.json();
-      if(j.version!==ACCESS_FORMAT){ console.warn(`access-routes.json is format v${j.version} — not drawing routes`); return null; }
-      const byCell=new Map(); for(const c of j.cells) byCell.set(c[0]+':'+c[1],c);
+      const j2=await r.json();
+      if(j2.version!==ACCESS_FORMAT){ console.warn(`a route shard is format v${j2.version} — not drawing routes`); return null; }
+      const byCell=new Map(); for(const c of j2.cells) byCell.set(c[0]+':'+c[1],c);
       /* The drive's walk is stored only where it is not the hike's, so a miss here means "the same
          line", not "no line". */
-      const byDrive=new Map(); for(const c of (j.driveCells||[])) byDrive.set(c[0]+':'+c[1],c);
-      const byBike=new Map(); for(const c of (j.bikeCells||[])) byBike.set(c[0]+':'+c[1],c);
-      STATIC.access.routes={edges:j.edges,byCell,byDrive,byBike}; return STATIC.access.routes;
+      const byDrive=new Map(); for(const c of (j2.driveCells||[])) byDrive.set(c[0]+':'+c[1],c);
+      const byBike=new Map(); for(const c of (j2.bikeCells||[])) byBike.set(c[0]+':'+c[1],c);
+      return {edges:j2.edges,byCell,byDrive,byBike};
     }catch(_){ return null; }
-  })();
-  return routesFetch;
+  })());
+  return p;
 }
 async function drawRoute(cell,link){
   const M=cell.modes; if(!M) return;
@@ -1531,7 +1540,7 @@ async function drawRoute(cell,link){
      marker on that line because the ride between them is the figure's whole point. */
   const park=onBike?M.bike.dismount:onDrive?M.drive.park:M.hike.park;
   const stop=onBike?M.bike.stop:onDrive?M.drive.stop:M.hike.stop;
-  const R=await loadAccessRoutes();
+  const R=await loadRouteShard(cell.lat,cell.lon);
   if(link) link.textContent='Show the route';
   if(!R){ if(link) link.textContent='Could not load the route'; return; }
   if(approachLayer){ approachLayer.remove(); approachLayer=null; }

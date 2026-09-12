@@ -123,10 +123,14 @@ every file, what it does, and the reasoning that is not obvious from reading it.
   bike (v8) — keyed by cell index rather than row position. Optional at runtime:
   without it every cell reads as unknown and the app is otherwise unchanged.
   9.0 MB, 2.2 MB over the wire, since Pages serves it gzipped.
-- **`data/access-routes.json`** — the route each cell's figure walks, fetched only
-  when "Show the route" is tapped, stamped with the bake. One shared table of way
-  stretches for all modes, and per cell a list into it; the drive's walk is stored
-  only where it is not the hike's, which is 1,764 of 25,880 cells.
+- **`data/access-routes/`** — the route each cell's figure walks, in **264 regional
+  files** of 16 cells square, one fetched when "Show the route" is tapped and each
+  stamped with the bake. Per shard: a table of way stretches and, per cell, a list
+  into it, for the hike, the drive where its walk differs (1,758 cells) and the bike
+  where its line differs (14,063). `routeShardKey` in `src/access.mjs` names the
+  file, and it is the only thing that does. It replaced a single 13 MB file — 3.4 MB
+  over the wire, fetched whole at the moment a forager at a trailhead asked for one
+  line.
 - **`scripts/serve.mjs`** — dependency-free static server for local
   development, `node scripts/serve.mjs [port]`. Exists because the app can no
   longer be opened over `file://`, and because it guarantees the `.mjs` MIME

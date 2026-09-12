@@ -176,11 +176,20 @@ test('filter: the drive filter counts the drive alone; the sort counts the whole
   assert.match(app, /within '\+durationLabel\(within\)\+' of driving'/, 'and says so on the pill');
 });
 
-test('route: its file is fetched only when asked, stamped with the bake, and version-checked', () => {
-  const fn = app.slice(app.indexOf('async function loadAccessRoutes'), app.indexOf('async function drawRoute'));
-  assert.match(fn, /data\/access-routes\.json\?g='\+encodeURIComponent\(accessAsOf\|\|''\)/);
-  assert.match(fn, /j\.version!==ACCESS_FORMAT/);
+test('route: one region is fetched when asked, stamped with the bake, and version-checked', () => {
+  const fn = app.slice(app.indexOf('async function loadRouteShard'), app.indexOf('async function drawRoute'));
+  assert.match(fn, /routeShardFile\(key\)\+'\?g='\+encodeURIComponent\(accessAsOf\|\|''\)/,
+    'the shard the tapped cell is in, stamped with the bake');
+  assert.match(fn, /j2\.version!==ACCESS_FORMAT/);
+  assert.match(fn, /if\(!r\.ok\) return null;/, 'a region with no routes is an answer, not an error');
+  assert.match(fn, /routeShards\.set\(key,p=/, 'and each region is asked for once');
+  assert.match(app, /const R=await loadRouteShard\(cell\.lat,cell\.lon\);/);
   assert.match(app, /dr\.onclick=ev=>\{ ev\.preventDefault\(\); dr\.textContent='Loading the route…'; drawRoute\(e,dr\); \}/);
+  /* the shard geometry is shared with the bake, like the lattice */
+  assert.equal(AC.ROUTE_SHARD, 16);
+  assert.equal(AC.routeShardKey(3365, -5704), '210_-357');
+  assert.equal(AC.routeShardFile('210_-357'), 'data/access-routes/210_-357.json');
+  assert.equal(AC.routeShardKey(3365 + 16, -5704), '211_-357', 'sixteen cells north is the next shard');
 });
 
 test('entries: modes come from the containing cell, in the one place entries get access', () => {

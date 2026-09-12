@@ -110,3 +110,27 @@ test('the bike is carried by the car, not ridden to where the car could have dri
   assert.equal(rec.bike.walk.on, 0, 'and nothing to walk but the last stretch off the road');
   assert.equal(rec.bike.walk.off, rec.hike.off, 'the same off-trail leg as the hike');
 });
+
+test('shards: a cell\'s routes are in the file its index names, with only the edges it needs', () => {
+  /* 3.4 MB in one file, fetched at a trailhead, was the problem. Each shard carries its own edge
+     table so a tap costs kilobytes; an edge used from two shards is stored twice, which measured at
+     2% of the total. */
+  const routes = {
+    edges: ['A', 'B', 'C'],
+    cells: [[100, 100, [0, 1], 'tail1'], [116, 100, [1, 2], 'tail2']],   // 16 cells apart: two shards
+    driveCells: [[100, 100, [2], 'dtail']],
+    bikeCells: [[116, 100, [0], 'btail']],
+  };
+  const s = M.shardRoutes(routes);
+  assert.deepEqual([...s.keys()].sort(), ['6_6', '7_6']);
+  const a = s.get('6_6'), b = s.get('7_6');
+  assert.deepEqual(a.cells.map(c => c[0]), [100]);
+  assert.deepEqual(b.cells.map(c => c[0]), [116]);
+  assert.deepEqual(a.edges, ['A', 'B', 'C'], 'the edges this shard uses, renumbered from zero');
+  assert.deepEqual(a.cells[0][2], [0, 1], 'and the cell points at them by the new numbers');
+  assert.deepEqual(a.driveCells[0][2], [2]);
+  assert.deepEqual(b.edges, ['B', 'C', 'A'], 'the other shard keeps its own copies in its own order');
+  assert.deepEqual(b.cells[0][2], [0, 1]);
+  assert.deepEqual(b.bikeCells[0][2], [2], 'the ride list is renumbered the same way');
+  assert.ok(!a.index && !b.index, 'and the working index is not written out');
+});

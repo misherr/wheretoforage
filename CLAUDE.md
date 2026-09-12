@@ -22,7 +22,7 @@ src/coords.mjs  the coordinate readout and the paste parser
 scripts/        build-cells.mjs, build-access.mjs, fetch-weather.mjs, serve.mjs,
                 access-network.mjs (the network, the drive and the bike), access-modes.mjs (per-cell figures)
 tests/model/    the model regression suite
-data/           cells.json, weather.json, evt-names.json, access.json (+ -geom, -routes) — checked in
+data/           cells.json, weather.json, evt-names.json, access.json (+ -geom, + access-routes/) — checked in
 ```
 
 Washington is divided into ~48,000 one-square-mile cells. Each carries baked
@@ -156,6 +156,14 @@ while nothing throws.
 - **`access-geom.json` stays whole and lazy**, fetched for the *tapped* approach only: clipped
   geometry is right for drawing and wrong for measuring, and a clip is what truncated trails
   before v4.
+- **The routes are fetched one region at a time, and the region is derived, never listed.**
+  `routeShardKey(i, j)` in `src/access.mjs` is the only place that decides which of the 264 files a
+  cell's line is in, so the bake and the app cannot disagree — the same rule `src/grid.mjs` follows
+  for the lattice. A **missing shard is an answer**: most of the Columbia basin has no routes, and the
+  app remembers the null rather than asking again. A **statewide bake owns the directory** and deletes
+  a shard that has no routes left; a regional one touches only its own shards and merges each. One
+  file was 3.4 MB fetched at a trailhead; a shard is a median 8 KB, 52 KB at worst.
+  [docs/access.md](docs/access.md#the-routes-are-fetched-one-region-at-a-time)
 - **Every entry gets its access from the cell that contains it, in one place.**
   `withAccess()` in `index.html` wraps every `makeEntry` call — baked cells, the
   sub-mile refine, a live block score, an exact point. It cannot live in

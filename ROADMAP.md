@@ -133,13 +133,19 @@ little optimistic again, which is this file's tradition. Where it went, and what
   on whatever signal a forager has at a trailhead. In 0.5° blocks that becomes 60–120
   KB per tap, at the cost of duplicating the few edges shared across a block edge.
 
-**The trigger this plan set has arrived.** `access.json` is 2.93 MB over the wire
-with three modes, against the 3 MB that was named as the point to act, and the
-routes file is 3.46 MB on a single tap. So: **the next change that adds columns or
-a mode should ship with the sharding, not before it.** In order of value —
-geographic sharding of the routes file first (it is the one fetched whole at a
-trailhead), then per-mode files for `access.json`, then the quantising and the
-redundant worst case, which together are worth about 20% and need no new plumbing.
+**The trigger arrived, and the first lever has been pulled.** `access.json` reached
+2.93 MB over the wire with three modes, against the 3 MB named as the point to act,
+and the routes file was 3.46 MB on a single tap. **The routes are now 264 regional
+files** — a median 8 KB a tap, 52 KB at worst
+([access.md](docs/access.md#the-routes-are-fetched-one-region-at-a-time)).
+
+What is left, in order of value:
+
+1. **Per-mode files for `access.json`**, so the up-front download holds at about
+   1.5 MB plus one mode however many modes exist. This is the one to do before a
+   fourth mode lands, and the dirt bike is asking.
+2. **Quantising the mode columns and dropping the redundant worst case** — measured
+   at about 20% together, no new plumbing, no format change beyond the values.
 
 ### QUEUED: ask Overpass for node ids, and stop inferring junctions
 
@@ -216,16 +222,22 @@ keep it in the network without stamping cells from it. It is a re-fetch of new
 tiles — hours of Overpass — so it waits for the Geofabrik extract, which would make
 it a bbox change rather than a fetch.
 
-### The routes file is fetched whole: 12.8 MB, 3.5 MB over the wire
+### ~~The routes file is fetched whole~~ — done 2026-09-12
 
-`data/access-routes.json` — 25,880 hike routes, 1,758 drive walks and 13,741
-rides over 141,886 stretches of way — is what "Show the route" draws, and it is fetched whole on the
-first request. The estimate before building it was 1.9 MB; it counted edges but not
-the per-cell lists and the partial last edges. On a phone on a slow connection that
-first request is slow, and it happens at the moment a forager is standing at a
-trailhead deciding. Splitting it by region, like the geometry tiles once were,
-would make it 60–120 KB per request; see the size plan above. Not done until it is
-known how often anyone asks.
+Was one file: 25,880 hike routes, 1,758 drive walks and 14,063 rides over 140,677
+stretches of way, 12.8 MB and 3.4 MB over the wire, fetched **whole** on the first
+"Show the route" — at a trailhead, on one bar of signal. The estimate before
+building it had been 1.9 MB; it counted edges but not the per-cell lists and the
+partial last edges.
+
+Now **264 regional files** of 16 cells square: a median 8 KB a tap, 52 KB at worst,
+and the same total to within 2% because an edge is nearly always used by cells in one
+shard only. The shard size was chosen by measuring five candidates on the real file
+rather than picking one
+([access.md](docs/access.md#the-routes-are-fetched-one-region-at-a-time)). The user
+called the priority: *"a 3.46 MB fetch landing on whatever signal I have at a
+trailhead is exactly the wrong place for it — that's where the app has to work and
+where the connection is worst."*
 
 ### A way with a road at both ends is walked from its first end, not the nearer one
 

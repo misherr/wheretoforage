@@ -1150,8 +1150,8 @@ road. Live, against OSM: 8 of 8 sampled gate stops have a barrier within 40 m, a
 ### What it costs
 
 - `access.json` grows from 5.3 MB to 7.75 MB up front — the mode columns for every
-  cell. `access-routes.json`, the routes for drawing, is 8.6 MB and fetched only
-  when someone asks to see one. Both are in [ROADMAP.md](../ROADMAP.md).
+  cell. The routes for drawing were 8.6 MB in one file at this point; they are
+  regional files now, a median 8 KB a tap. Both are in [ROADMAP.md](../ROADMAP.md).
 - Inferred junctions: some false connections, and none of OSM's missed.
 - An unmapped gate is invisible to the hike figure. The worst case is the answer
   to that, not a fix for it.
@@ -1403,11 +1403,52 @@ priced and the cheapest wins.
 
 - `access.json`: 9.0 MB to **10.8 MB**, which is 2.43 MB to **2.93 MB over the
   wire**, measured against the deployed host.
-- `access-routes.json`: 8.8 MB to **12.8 MB**, 2.55 MB to **3.46 MB over the wire**
-  — the bike's line is stored for 13,741 cells, because unlike the drive's walk it
-  is rarely the hike's, and because the ride itself is drawn. The drive's roads are
-  not drawn: the overlay already shows them, while nobody believes a ride past a
-  gate until they see the line.
+- The routes: 8.8 MB to **12.8 MB**, which would have been 3.46 MB over the wire in
+  one file — the bike's line is stored for 14,063 cells, because unlike the drive's
+  walk it is rarely the hike's, and because the ride itself is drawn. That file is
+  now 264 regional ones; see below. The drive's roads are not drawn: the overlay
+  already shows them, while nobody believes a ride past a gate until they see the
+  line.
+
+## The routes are fetched one region at a time
+
+The routes file grew with every mode — 8.6 MB at the hike, 12.8 MB at the bike, 3.4
+MB of that over the wire — and it was fetched **whole, on the first "Show the
+route"**. That is the worst possible moment for a multi-megabyte fetch: somebody
+standing at a trailhead on one bar of signal, asking one question about one cell.
+
+So it is 264 files of 16 cells square, about 26 km, named from the cell index by
+`routeShardKey` in `src/access.mjs` — one place, shared by the bake and the app, the
+way `src/grid.mjs` is shared for the lattice.
+
+**The size was measured, not guessed.** On the real 13 MB file, at 16, 24, 32, 48 and
+64 cells square:
+
+| shard | files | median | p90 | worst | total |
+| --- | --- | --- | --- | --- | --- |
+| 16 cells (26 km) | 264 | 8 KB | 32 KB | 52 KB | 3.32 MB |
+| 24 cells (39 km) | 126 | 18 KB | 63 KB | 97 KB | 3.35 MB |
+| 32 cells (52 km) | 80 | 32 KB | 121 KB | 154 KB | 3.37 MB |
+| 48 cells (78 km) | 44 | 56 KB | 183 KB | 321 KB | 3.37 MB |
+| 64 cells (103 km) | 24 | 114 KB | 237 KB | 503 KB | 3.36 MB |
+
+Every option costs the same **in total** — within 2% of the single file, because an
+edge is nearly always used by cells in one shard only, so duplicating the shared
+ones is almost free. The choice is therefore purely about the size of one fetch, and
+16 cells won on the p90: 32 KB against 121 KB.
+
+Three rules the sharding has to keep:
+
+- **A missing shard is an answer, not a failure.** Most of the Columbia basin has no
+  routes at all. The app treats a 404 as "no lines here" and remembers it, so it
+  asks once.
+- **A statewide bake owns the directory.** A shard with no routes left is deleted,
+  or the app keeps fetching a stale one for ever. A regional bake touches only the
+  shards its own cells fall in, merges each with what was there, and rewrites even
+  the ones its region emptied.
+- **The key is derived, never listed.** No manifest, no index file: the app computes
+  the filename from the cell it was asked about. A manifest is one more thing to
+  keep in step with the data.
 
 ## Roads and trails on the map are somebody else's rendering
 

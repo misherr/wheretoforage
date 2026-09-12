@@ -30,10 +30,10 @@ import { cellIndex } from '../src/grid.mjs';
 import { osmCategory, osmType, osmPaved, osmRoughReason, LIMITED_ACCESS, USFS_DRIVABLE_ML, CAP, CATS, encodeGeom,
          ROW_STRIDE, ACCESS_FORMAT,
          OSM_DRIVE, OSM_TRAIL, OSM_ROUGH, OSM_PAVED, carRestriction, blocksCars, CAR_BARRIERS, ROW_WIDTH,
-         bikeRestriction, BIKE_FORBIDDEN,
+         bikeRestriction, BIKE_FORBIDDEN, routeShardKey,
          TRAILHEAD_NONE, TRAILHEAD_MAPPED, TRAILHEAD_INFERRED } from '../src/access.mjs';
 import { REGIONS, decodePNG, terrariumMetres, tileXY, TERRAIN_SOURCE } from './build-cells.mjs';
-import { computeModes, routesFile, modeColumns, mergeRoutes } from './access-modes.mjs';
+import { computeModes, routesFile, modeColumns, mergeRoutes, shardRoutes } from './access-modes.mjs';
 
 export const GENERATOR = 'scripts/build-access.mjs';
 export const GENERATOR_VERSION = '8.1.0';
@@ -390,6 +390,38 @@ function atomicWrite(file, body, opts) {
    Densification is not decoration: a single long segment between two distant vertices would skip
    straight past a cell it runs through, and that cell would read as unknown while a highway crosses
    the middle of it. */
+/* The routes, written as the regional files the app fetches one of — 16 cells square, about 26 km.
+   A statewide bake OWNS the directory: a shard with no routes left is deleted, or the app fetches a
+   stale one for ever. A regional bake touches only the shards its own cells fall in, merges each with
+   what was there, and leaves the rest alone — including rewriting one its region emptied. */
+export function writeRouteShards(dir, stamp, routes, mine, logFn = log) {
+  const shards = shardRoutes(routes);
+  if (mine) for (const k of mine) {
+    const [i, j] = k.split(':').map(Number), key = routeShardKey(i, j);
+    if (!shards.has(key)) shards.set(key, { edges: [], cells: [], driveCells: [], bikeCells: [] });
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  const stale = new Set(fs.readdirSync(dir).filter(x => x.endsWith('.json')));
+  let bytes = 0, routed = 0, written = 0;
+  for (const [key, s] of shards) {
+    const file = path.join(dir, key + '.json');
+    const body = mine && fs.existsSync(file)
+      ? mergeRoutes(JSON.parse(fs.readFileSync(file, 'utf8')), s, mine) : s;
+    stale.delete(key + '.json');
+    const n = body.cells.length + (body.driveCells || []).length + (body.bikeCells || []).length;
+    if (!n) { if (fs.existsSync(file)) fs.rmSync(file); continue; }
+    atomicWrite(file, JSON.stringify({ ...stamp, shard: key, edges: body.edges, cells: body.cells,
+      driveCells: body.driveCells || [], bikeCells: body.bikeCells || [] }));
+    bytes += fs.statSync(file).size; routed += n; written++;
+  }
+  let removed = 0;
+  if (!mine) for (const x of stale) { fs.rmSync(path.join(dir, x)); removed++; }
+  logFn('wrote ' + dir + '/ - ' + written + ' regional files, ' + routed.toLocaleString() + ' routes, '
+    + (bytes / 1e6).toFixed(2) + ' MB in all, one fetched when an approach is shown'
+    + (removed ? ' (' + removed + ' stale files removed)' : ''));
+  return { files: written, routes: routed, bytes, removed, shard_cells: 16 };
+}
+
 export function stampWay(state, coords, cat, wid) {
   if (!coords || coords.length === 0) return;
   const { cells, nearest } = state;
@@ -1493,7 +1525,7 @@ export async function build(opts, deps = {}) {
     wilderness: wildStats ? { areas: wildStats.areas.length, features: wildStats.features, points: wildStats.points,
                               simplify_m: WILD_SIMPLIFY_M }
                           : { areas: wilderness.length, from: 'checkpoint' },
-    modes: modeStats, row_width: ROW_WIDTH,
+    modes: modeStats, row_width: ROW_WIDTH, routes: null,
     tiles: tiles.length,
     requests: { overpass: osmRequests, overpass_retries: osmRetries,
                 overpass_mb: +(osmBytes / 1e6).toFixed(1),
@@ -1511,13 +1543,11 @@ export async function build(opts, deps = {}) {
   let out = { version: ACCESS_FORMAT, generated, cap_m: CAP, provenance, ways: outWays, rows };
   let geomOut = { version: ACCESS_FORMAT, generated, geom: outGeom };
 
-  /* The routes walked, for drawing: a third file, fetched only when an approach is shown. */
-  const routesPath = opts.out.replace(/\.json$/, '') + '-routes.json';
-  let routesOut = modeNet ? { version: ACCESS_FORMAT, generated, ...routesFile(modeNet, modes) } : null;
-  if (routesOut && opts.region !== 'state' && fs.existsSync(routesPath)) {
-    const mine = new Set(out.rows.map(r => r[0] + ':' + r[1]));
-    routesOut = { ...routesOut, ...mergeRoutes(JSON.parse(fs.readFileSync(routesPath, 'utf8')), routesOut, mine) };
-  }
+  /* The routes walked, for drawing: regional shards, one fetched per tap. `routesMine` is every cell
+     this bake covered, which is what a regional merge carries the others past. */
+  const routesDir = opts.out.replace(/\.json$/, '') + '-routes';
+  const routesMine = opts.region !== 'state' ? new Set(out.rows.map(r => r[0] + ':' + r[1])) : null;
+  const routesAll = modeNet ? routesFile(modeNet, modes) : null;
   if (opts.region !== 'state' && fs.existsSync(opts.out)) {
     const prev = JSON.parse(fs.readFileSync(opts.out, 'utf8'));
     const pg = opts.out.replace(/\.json$/, '') + '-geom.json';
@@ -1532,16 +1562,18 @@ export async function build(opts, deps = {}) {
   const geomPath = opts.out.replace(/\.json$/, '') + '-geom.json';
   if (opts.dryRun) log('dry run - not writing');
   else {
+    /* Before access.json, so its provenance can carry what the shards came to. */
+    if (routesAll) {
+      log('routes     ' + routesAll.cells.length.toLocaleString() + ' hike routes, '
+        + routesAll.driveCells.length.toLocaleString() + ' drive walks and '
+        + routesAll.bikeCells.length.toLocaleString() + ' rides, over '
+        + routesAll.edges.length.toLocaleString() + ' edges');
+      out.provenance.routes = writeRouteShards(routesDir, { version: ACCESS_FORMAT, generated }, routesAll, routesMine);
+      const oldFile = routesDir + '.json';
+      if (!routesMine && fs.existsSync(oldFile)) { fs.rmSync(oldFile); log('removed ' + oldFile + ' — the routes are sharded now'); }
+    }
     atomicWrite(opts.out, JSON.stringify(out));
     atomicWrite(geomPath, JSON.stringify(geomOut));
-    if (routesOut) {
-      atomicWrite(routesPath, JSON.stringify(routesOut));
-      log('wrote ' + routesPath + ' - ' + routesOut.cells.length.toLocaleString() + ' hike routes, '
-        + (routesOut.driveCells || []).length.toLocaleString() + ' drive walks and '
-        + (routesOut.bikeCells || []).length.toLocaleString() + ' rides, over '
-        + routesOut.edges.length.toLocaleString() + ' edges, ' + (fs.statSync(routesPath).size / 1e6).toFixed(2)
-        + ' MB, fetched only when an approach is shown');
-    }
     log('wrote ' + opts.out + ' - ' + out.rows.length.toLocaleString() + ' cells, '
       + out.ways.length.toLocaleString() + ' ways, ' + (fs.statSync(opts.out).size / 1e6).toFixed(2) + ' MB');
     log('wrote ' + geomPath + ' - geometry only, ' + (fs.statSync(geomPath).size / 1e6).toFixed(2)
