@@ -1586,19 +1586,24 @@ the bicycle's rows and 95.3% of the dirt bike's, marked by a -1 in its first col
 no route geometry: the sheet states the figure and draws the mode's actual approach, and a second line
 per cell per riding mode would cost more than a bound is worth.
 
+Measured as **GitHub Pages actually serves them**, which is not `gzip -9` — Pages compresses at a
+lower level, and sizing against `gzip -9` flattered every figure in this file once already
+([dee53d1](../../commit/dee53d1)). These are `curl` against wheretoforage.com:
+
 | file | raw | over the wire |
 | --- | --- | --- |
-| `access.json` (base) | 6.05 MB | **1.54 MB** |
-| `access-hike.json` | 2.31 MB | 0.61 MB |
-| `access-drive.json` | 2.27 MB | 0.71 MB |
-| `access-bike.json` | 3.76 MB | 1.00 MB |
-| `access-moto.json` | 3.76 MB | 0.97 MB |
+| `access.json` (base) | 6.05 MB | **1.60 MB** |
+| `access-hike.json` | 2.31 MB | 0.63 MB |
+| `access-drive.json` | 2.27 MB | 0.73 MB |
+| `access-bike.json` | 3.76 MB | 1.04 MB |
+| `access-moto.json` | 3.76 MB | 1.02 MB |
 
-**Up front: 2.15 MB in hike mode, 2.51 MB for a rider.** The bound costs a riding mode 0.26 MB and the
+**Up front: 2.23 MB in hike mode, 2.64 MB for a rider.** The bound costs a riding mode 0.29 MB and the
 other two nothing at all, which is the per-mode split paying for itself — in v8's single file it would
-have cost every viewer 0.5 MB for a figure two of the four modes do not use. Still under the 3 MB the
-user set as the trigger for doing something, and what to do first is now clear: the riding files are
-the biggest, and quantising the mode columns (ROADMAP) would cut all four.
+have cost every viewer half a megabyte for a figure two of the four modes do not use. Still under the
+3 MB the user set as the trigger for doing something, but a rider is now 0.36 MB from it, and what to
+do first is clear: the riding files are the biggest, and quantising the mode columns (ROADMAP) would
+cut all four.
 
 ## The routes are fetched one region at a time
 

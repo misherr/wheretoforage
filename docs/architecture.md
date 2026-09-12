@@ -121,11 +121,11 @@ every file, what it does, and the reasoning that is not obvious from reading it.
 - **`data/access.json`** — the base file (v10): per-cell distance to the nearest
   mapped trail, road and rough way, then the worst-case walk from the pavement —
   which the hike and the drive share, the riding modes carrying their own — keyed by
-  cell index rather than row position. 6.05 MB, 1.54 MB over the wire. Optional at
+  cell index rather than row position. 6.05 MB, 1.60 MB over the wire. Optional at
   runtime: without it every cell reads as unknown and the app is otherwise
   unchanged.
 - **`data/access-hike.json`, `-drive.json`, `-bike.json`, `-moto.json`** — one
-  mode's columns each, 0.61 MB (hike) to 1.00 MB (bike) over the wire, fetched when
+  mode's columns each, 0.63 MB (hike) to 1.04 MB (bike) over the wire, fetched when
   that mode goes on screen and merged into the per-cell objects the sheet reads. Up
   to v8 every mode shared one row of one file, which was 2.93 MB over the wire with
   three modes and every byte of it fetched by a viewer who uses one. The two riding

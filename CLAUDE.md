@@ -156,9 +156,10 @@ while nothing throws.
   the worst case and nothing else; each mode's columns live in `data/access-<mode>.json`, fetched when
   that mode goes on screen and merged into the same per-cell objects the sheet reads. That is what
   let a fourth mode land without pushing the up-front download past 3 MB, and a per-mode worst case
-  land after it without either of the walking modes paying for it: **1.54 MB base + 0.61 MB (hike) to
-  1.00 MB (bike)**, so 2.15 MB up front on foot and 2.51 MB for a rider, against 2.93 MB for three
-  modes in one file. A mode file is version-checked and refused on its own.
+  land after it without either of the walking modes paying for it: **1.60 MB base + 0.63 MB (hike) to
+  1.04 MB (bike)** as Pages serves them, so 2.23 MB up front on foot and 2.64 MB for a rider, against
+  2.93 MB for three modes in one file. Size these against the deployed host and never against
+  `gzip -9`, which flattered the figure once. A mode file is version-checked and refused on its own.
 - **A bike is carried to where the car stops, then rides what it is allowed to ride.** Everything a
   walker may use except two absolutes: designated wilderness (federal law, from the USFS EDW layer,
   marked per EDGE because a trail crosses a boundary mid-way) and `bicycle=no|private|dismount`.
