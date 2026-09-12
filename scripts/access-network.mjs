@@ -21,8 +21,8 @@
  *
  * Everything here describes the network AS MAPPED. A gate nobody mapped is not in it. */
 
-import { WALK_KMH, CLIMB_MIN_PER_100M, OFF_TRAIL_FACTOR as OTF, OFF_CLIMB_FACTOR as OCF, BUSHWHACK_M, DIRECT_SAVES_MIN }
-  from '../src/access.mjs';
+import { WALK_KMH, CLIMB_MIN_PER_100M, OFF_TRAIL_FACTOR as OTF, OFF_CLIMB_FACTOR as OCF, BUSHWHACK_M, DIRECT_SAVES_MIN,
+         DRIVE_MPH, DRIVE_CLASSES, driveMinutes } from '../src/access.mjs';
 export { DIRECT_SAVES_MIN };
 
 const M_LAT = 111320;
@@ -103,14 +103,23 @@ class UF {
 /* ways: array of { id, geom, cat, type, pv, ac, name, ref }. gates: array of [lat, lon].
    elevationOf(geom) -> array of metres (or null) per vertex; injected so this module never fetches.
    Returns the graph plus build statistics, which the bake records in provenance. */
-export async function buildNetwork(ways, { gates = [], elevationOf = null, log = () => {} } = {}) {
+export async function buildNetwork(ways, { gates = [], elevationOf = null, log = () => {}, onJoin = null } = {}) {
   const W = ways.filter(w => w.geom && w.geom.length >= 2);
   const cum = W.map(w => cumulative(w.geom));
   const uf = new UF();
   const pts = W.map(() => []);                 // per way: [{a, id, gate}]
   const addPt = (wi, a, gate = false) => { const id = uf.add(); pts[wi].push({ a, id, gate }); return id; };
   const endPt = W.map((w, wi) => [addPt(wi, 0), addPt(wi, cum[wi][cum[wi].length - 1])]);
-  const st = { ways: W.length, end_joins: 0, side_joins: 0, crossings: 0, gates_placed: 0, gates_unplaced: 0 };
+  const st = { ways: W.length, end_joins: 0, side_joins: 0, crossings: 0, gates_placed: 0, gates_unplaced: 0, vetoed: 0 };
+  /* The audit seam. Every inferred join is offered to `onJoin` before it is made — kind, both ways,
+     where it falls on each, how far apart they were, and how far the contact point is from the
+     nearest VERTEX of each way, which is the evidence that OSM had a node there. Returning false
+     vetoes the join. Measuring the false-junction rate needs the joins the real code makes rather
+     than a copy of the rules, and a bridge/tunnel rule would veto through here once those tags are
+     fetched. The bake passes nothing, so the default is exactly the behaviour before it existed. */
+  const nearVertex = (c, a) => { let d = Infinity; for (let k = 0; k < c.length; k++) { const x = Math.abs(c[k] - a); if (x < d) d = x; } return d; };
+  const offer = (kind, wi, wj, ai, aj, d, point) => !onJoin || onJoin({ kind, wi, wj, ai, aj, d, point,
+    wid: W[wi].id, wjd: W[wj].id, vi: nearVertex(cum[wi], ai), vj: nearVertex(cum[wj], aj) }) !== false;
 
   /* segment grid, padded by SNAP_M, for "is an end near a side" */
   const grid = new Map();
@@ -137,8 +146,11 @@ export async function buildNetwork(ways, { gates = [], elevationOf = null, log =
       }
       for (const [wj, b] of best) {
         const L = cum[wj][cum[wj].length - 1];
-        if (b.a <= SNAP_M) { uf.union(endPt[wi][which], endPt[wj][0]); st.end_joins++; }
-        else if (b.a >= L - SNAP_M) { uf.union(endPt[wi][which], endPt[wj][1]); st.end_joins++; }
+        const end = b.a <= SNAP_M ? 0 : b.a >= L - SNAP_M ? 1 : -1;
+        const ai = which ? cum[wi][cum[wi].length - 1] : 0;
+        if (!offer(end < 0 ? 'end-side' : 'end-end', wi, wj, ai, end < 0 ? b.a : (end ? L : 0), b.d, p)) { st.vetoed++; continue; }
+        if (end === 0) { uf.union(endPt[wi][which], endPt[wj][0]); st.end_joins++; }
+        else if (end === 1) { uf.union(endPt[wi][which], endPt[wj][1]); st.end_joins++; }
         else { uf.union(endPt[wi][which], addPt(wj, b.a)); st.side_joins++; }
       }
     }
@@ -166,6 +178,7 @@ export async function buildNetwork(ways, { gates = [], elevationOf = null, log =
       if (seen.has(pk)) continue; seen.add(pk);
       const Li = cum[wi][cum[wi].length - 1], Lj = cum[wj][cum[wj].length - 1];
       if (ai < SNAP_M || ai > Li - SNAP_M || aj < SNAP_M || aj > Lj - SNAP_M) continue;   // an end: joined above
+      if (!offer('crossing', wi, wj, ai, aj, 0, pointAt(gi, cum[wi], ai))) { st.vetoed++; continue; }
       uf.union(addPt(wi, ai), addPt(wj, aj)); st.crossings++;
     }
   }
@@ -278,6 +291,63 @@ export function carReach(net) {
   return { reach, seeds: seeds.length };
 }
 
+/* ---------- by car ---------- */
+
+/* Which speed a way is driven at. The maintenance level is the only field either source has that says
+   whether a passenger car belongs on a road, so it decides: 4 and 5 are graded, 3 and every forest
+   road nobody rated are rough. Pessimistic where nothing is known, which is the rule this project
+   keeps relearning.
+
+   A town street is the exception, and it is a measurement rather than a taste: 61% of the drivable
+   network this test calls unpaved is highway=residential, because rural and small-town streets are
+   mapped without a surface tag. Timing those at 15 mph made a cell on the far side of a village read
+   several minutes deeper into the forest than it is, which is not pessimism — it is wrong about a
+   street. A street is graded; an unrated forest road is not.
+
+   Pavement is whatever `paved` already calls pavement, so "from the nearest paved road" means the
+   same thing in the drive figure and in the worst case beside it. */
+const STREET = /^(residential|living_street)$/;
+export const driveClassOf = w => paved(w) ? 'paved'
+  : /^[45]/.test(String(w.ml || '')) || STREET.test(w.type || '') ? 'graded' : 'rough';
+const DRIVE_M_PER_MIN = {};
+for (const c of DRIVE_CLASSES) DRIVE_M_PER_MIN[c] = DRIVE_MPH[c] * 1609.34 / 60;
+
+/* Minutes from the nearest paved road to every node a car can reach, with the metres it drove in each
+   class and the climb, so the app can recompute the minutes from stored parts. Same stopping rules as
+   carReach: drivable roads only, a gate is reached and never passed, and a private or permit road is
+   not drivable at all. */
+export function carDrive(net) {
+  const { W, eW, eU, eV, eLen, eUpF, eUpB, deg, adj, nNodes, E, gateNode } = net;
+  const min = new Float64Array(nNodes).fill(Infinity);
+  const legs = { paved: new Float64Array(nNodes), graded: new Float64Array(nNodes), rough: new Float64Array(nNodes), up: new Float64Array(nNodes) };
+  const heap = [], push = (c, n) => { heap.push([c, n]); let i = heap.length - 1;
+    while (i > 0) { const p = (i - 1) >> 1; if (heap[p][0] <= heap[i][0]) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
+  const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; let i = 0;
+    for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } } return top; };
+  let seeds = 0;
+  for (let e = 0; e < E; e++) if (paved(W[eW[e]])) for (const n of [eU[e], eV[e]])
+    if (min[n] === Infinity && !gateNode.has(n)) { min[n] = 0; seeds++; push(0, n); }
+  while (heap.length) {
+    const [c, n] = pop(); if (c > min[n]) continue;
+    if (gateNode.has(n)) continue;                       // you may drive to a gate, never through it
+    for (let k = deg[n]; k < deg[n + 1]; k++) {
+      const e = adj[k], w = W[eW[e]]; if (!drivable(w)) continue;
+      const fwd = eU[e] === n, m = fwd ? eV[e] : eU[e];
+      const cls = driveClassOf(w), nc = c + eLen[e] / DRIVE_M_PER_MIN[cls];
+      if (nc < min[m] - 1e-9) {
+        min[m] = nc;
+        for (const q of DRIVE_CLASSES) legs[q][m] = legs[q][n];
+        legs[cls][m] += eLen[e];
+        legs.up[m] = legs.up[n] + (fwd ? eUpF[e] : eUpB[e]);
+        push(nc, m);
+      }
+    }
+  }
+  return { min, legs, seeds };
+}
+const legsAt = (drv, n) => ({ paved: drv.legs.paved[n], graded: drv.legs.graded[n], rough: drv.legs.rough[n], up: drv.legs.up[n] });
+const plusLeg = (l, cls, m, up) => { const o = { ...l }; o[cls] += m; o.up += Math.max(0, up); return o; };
+
 /* ---------- on foot ---------- */
 
 /* The effort model. The constants live in src/access.mjs, shared with the app, so the route the bake
@@ -291,9 +361,11 @@ export const walkMinutes = (m, up) => m / WALK_M_PER_MIN + up * CLIMB_MIN_PER_M;
 export const offMinutes = (m, up) => m * OFF_TRAIL_FACTOR / WALK_M_PER_MIN + up * CLIMB_MIN_PER_M * OFF_CLIMB_FACTOR;
 
 /* Multi-source Dijkstra on minutes. `free(e)` says an edge costs nothing (you are driving it);
-   `sources` start at zero. Tracks, per node, the metres walked, the climb, the node the walk
-   started from, and the edge it arrived by — so a figure can be explained and a line drawn. */
-export function walkFrom(net, sources, free) {
+   `sources` start at `initial(n)`, which is zero for the hike — the car is already there — and the
+   drive time for the drive, where getting deeper costs minutes. Tracks, per node, the metres walked,
+   the climb, the node the walk started from, and the edge it arrived by — so a figure can be
+   explained and a line drawn. */
+export function walkFrom(net, sources, free, initial = null) {
   const { W, eW, eU, eV, eLen, eUpF, eUpB, deg, adj, nNodes } = net;
   const cost = new Float64Array(nNodes).fill(Infinity), metres = new Float64Array(nNodes), climb = new Float64Array(nNodes);
   const start = new Int32Array(nNodes).fill(-1), via = new Int32Array(nNodes).fill(-1);
@@ -301,7 +373,11 @@ export function walkFrom(net, sources, free) {
     while (i > 0) { const p = (i - 1) >> 1; if (heap[p][0] <= heap[i][0]) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
   const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; let i = 0;
     for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } } return top; };
-  for (const n of sources) { cost[n] = 0; start[n] = n; push(0, n); }
+  for (const n of sources) {
+    const c0 = initial ? initial(n) : 0;
+    if (!isFinite(c0) || c0 >= cost[n]) continue;
+    cost[n] = c0; start[n] = n; push(c0, n);
+  }
   while (heap.length) {
     const [c, n] = pop(); if (c > cost[n]) continue;
     for (let k = net.deg[n]; k < net.deg[n + 1]; k++) {
@@ -347,8 +423,12 @@ export function approaches(net, walk, free, lat, lon, elevAt, radiusM = 2500, li
   return { primary, direct };
 }
 
-function scanApproaches(net, walk, free, lat, lon, elevAt, radiusM, limitM) {
-  const { W, cum, eW, eA0, eA1, eU, eV, eLen, climbAt, up, down, elev } = net;
+/* Every walkable edge within radiusM of a point, with where the point falls on it and how far off the
+   route it leaves you. One scan, shared by the walk and the drive: what differs between the two modes
+   is what reaching that point costs, not which points there are. A motorway is not in it — you cannot
+   park on one — though the drive may travel one to get there. */
+function nearbyEdges(net, lat, lon, radiusM) {
+  const { W, cum, eW, eA0, eA1 } = net;
   if (!net.egrid) {                                        // edges by grid cell, unpadded
     net.egrid = new Map();
     for (let e = 0; e < net.E; e++) {
@@ -364,11 +444,10 @@ function scanApproaches(net, walk, free, lat, lon, elevAt, radiusM, limitM) {
   const pLa = radiusM / M_LAT, pLo = radiusM / mLon(lat);
   const cand = new Set();
   forBox(lat - pLa, lon - pLo, lat + pLa, lon + pLo, key => { const arr = net.egrid.get(key); if (arr) for (const e of arr) cand.add(e); });
-  const hCell = elevAt ? elevAt(lat, lon) : null;
-  let best = null, within = null;
+  const out = [];
   for (const e of cand) {
     const wi = eW[e], g = W[wi].geom, c = cum[wi];
-    /* project the centre onto this edge's stretch of the way */
+    /* project the point onto this edge's stretch of the way */
     let bd = Infinity, ba = eA0[e];
     for (let k = 1; k < g.length; k++) {
       if (c[k] < eA0[e] || c[k - 1] > eA1[e]) continue;
@@ -379,7 +458,28 @@ function scanApproaches(net, walk, free, lat, lon, elevAt, radiusM, limitM) {
       if (d < bd) { bd = d; ba = a; }
     }
     if (bd > radiusM) continue;
-    const u = eU[e], v = eV[e];
+    out.push({ e, arc: ba, off: bd, point: pointAt(g, c, ba) });
+  }
+  return out;
+}
+
+/* The climb a candidate's off-trail leg is judged on: the cell above the point the walk leaves from,
+   from the way's own profile. The winner's is measured properly afterwards by the bake. */
+function offClimbEst(net, e, arc, hCell) {
+  if (hCell == null) return 0;
+  const wi = net.eW[e], c = net.cum[wi], el = net.elev && net.elev[wi];
+  if (!el) return 0;
+  const i = Math.min(net.W[wi].geom.length - 1, Math.max(0, c.findIndex(x => x >= arc)));
+  return el[i] == null ? 0 : Math.max(0, hCell - el[i]);
+}
+
+function scanApproaches(net, walk, free, lat, lon, elevAt, radiusM, limitM) {
+  const { cum, eW, eA0, eA1, eU, eV, climbAt, up, down } = net;
+  const hCell = elevAt ? elevAt(lat, lon) : null;
+  let best = null, within = null;
+  for (const cn of nearbyEdges(net, lat, lon, radiusM)) {
+    const e = cn.e, ba = cn.arc, bd = cn.off;
+    const wi = eW[e], c = cum[wi], u = eU[e], v = eV[e];
     let on, m, cl, from;
     if (free(e, u, v) && walk.cost[u] === 0 && walk.cost[v] === 0) { on = 0; m = 0; cl = 0; from = 'here'; }
     else {
@@ -391,13 +491,10 @@ function scanApproaches(net, walk, free, lat, lon, elevAt, radiusM, limitM) {
       if (viaU <= viaV) { on = viaU; m = walk.metres[u] + (ba - eA0[e]); cl = walk.climb[u] + upU; from = u; }
       else { on = viaV; m = walk.metres[v] + (eA1[e] - ba); cl = walk.climb[v] + upV; from = v; }
     }
-    let hP = null;
-    if (hCell != null && elev[wi]) { const i = Math.min(g.length - 1, Math.max(0, c.findIndex(x => x >= ba))); hP = elev[wi][i]; }
-    const offUpEst = hCell != null && hP != null ? Math.max(0, hCell - hP) : 0;
-    const total = on + offMinutes(bd, offUpEst);
+    const total = on + offMinutes(bd, offClimbEst(net, e, ba, hCell));
     const better = b => !b || total < b.total - 1e-9 || (Math.abs(total - b.total) < 1e-9 && bd < b.off);
     if (better(best) || (bd <= limitM && better(within))) {
-      const x = { total, onMin: on, on: m, onUp: cl, off: bd, edge: e, arc: ba, from, point: pointAt(g, c, ba) };
+      const x = { total, onMin: on, on: m, onUp: cl, off: bd, edge: e, arc: ba, from, point: cn.point };
       if (better(best)) best = x;
       if (bd <= limitM && better(within)) within = x;
     }
@@ -405,20 +502,65 @@ function scanApproaches(net, walk, free, lat, lon, elevAt, radiusM, limitM) {
   return { fastest: best, within };
 }
 
+/* The drive figure's approach: the one that makes the WHOLE journey fastest, drive plus walk, a
+   minute of each counted the same. Where the road nearest the cell is one a car can get to, the car
+   goes to the point itself and no walking is left; otherwise the walk starts wherever the drive
+   ended, and the drive legs reported are that parking point's. Same bushwhack preference as the hike:
+   the fastest approach that keeps the off-trail leg inside limitM, and only otherwise the fastest. */
+export function driveApproaches(net, drv, driveWalk, lat, lon, elevAt, radiusM = 2500, limitM = BUSHWHACK_M) {
+  const { W, cum, eW, eA0, eA1, eU, eV, climbAt, up, down, nodePt } = net;
+  const hCell = elevAt ? elevAt(lat, lon) : null;
+  let best = null, within = null;
+  for (const cn of nearbyEdges(net, lat, lon, radiusM)) {
+    const e = cn.e, ba = cn.arc, bd = cn.off;
+    const wi = eW[e], w = W[wi], c = cum[wi], u = eU[e], v = eV[e];
+    const upU = climbAt(up[wi], c, ba) - climbAt(up[wi], c, eA0[e]);
+    const upV = climbAt(down[wi], c, eA1[e]) - climbAt(down[wi], c, ba);
+    let legs, walkOn = 0, walkUp = 0, reach, park, from, stopNode = -1;
+    if (drivable(w) && isFinite(drv.min[u]) && isFinite(drv.min[v])) {
+      const cls = driveClassOf(w), mpm = DRIVE_M_PER_MIN[cls];
+      const viaU = drv.min[u] + (ba - eA0[e]) / mpm, viaV = drv.min[v] + (eA1[e] - ba) / mpm;
+      const atU = viaU <= viaV;
+      legs = plusLeg(legsAt(drv, atU ? u : v), cls, atU ? ba - eA0[e] : eA1[e] - ba, atU ? upU : upV);
+      reach = Math.min(viaU, viaV); park = cn.point; from = 'drive';
+    } else {
+      const viaU = driveWalk.cost[u] + walkMinutes(ba - eA0[e], upU), viaV = driveWalk.cost[v] + walkMinutes(eA1[e] - ba, upV);
+      if (!isFinite(viaU) && !isFinite(viaV)) continue;
+      const atU = viaU <= viaV, n = atU ? u : v;
+      const s = driveWalk.start[n];
+      if (s < 0 || !isFinite(drv.min[s])) continue;
+      legs = legsAt(drv, s);
+      walkOn = driveWalk.metres[n] + (atU ? ba - eA0[e] : eA1[e] - ba);
+      walkUp = driveWalk.climb[n] + (atU ? upU : upV);
+      reach = atU ? viaU : viaV; park = nodePt[s]; from = n; stopNode = s;
+    }
+    const total = reach + offMinutes(bd, offClimbEst(net, e, ba, hCell));
+    const better = b => !b || total < b.total - 1e-9 || (Math.abs(total - b.total) < 1e-9 && bd < b.off);
+    if (better(best) || (bd <= limitM && better(within))) {
+      const x = { total, drive: legs, driveMin: driveMinutes(legs), on: walkOn, onUp: walkUp, off: bd,
+                  edge: e, arc: ba, from, park, point: cn.point, stopNode };
+      if (better(best)) best = x;
+      if (bd <= limitM && better(within)) within = x;
+    }
+  }
+  return { primary: within || best };
+}
+
 /* The route an approach takes, start to finish, as edges — the last one only as far as the point the
    off-trail line leaves from. Empty for a drive-up. */
 export function routeOf(net, walk, a) {
   if (!a) return null;
   const edges = [];
-  if (a.from !== 'here') {
+  const onFoot = typeof a.from === 'number';        // 'here' and 'drive' both mean no walking
+  if (onFoot) {
     let n = a.from, guard = 0;
     while (n >= 0 && walk.via[n] >= 0 && walk.start[n] !== n && guard++ < 100000) {
       const e = walk.via[n]; edges.push(e); n = net.eU[e] === n ? net.eV[e] : net.eU[e];
     }
     edges.reverse();
   }
-  const start = a.from === 'here' ? a.point : net.nodePt[walk.start[a.from]];
-  return { edges, last: a.edge, lastFrom: a.from === 'here' ? null : a.from, end: a.point, start };
+  const start = onFoot ? net.nodePt[walk.start[a.from]] : a.point;
+  return { edges, last: a.edge, lastFrom: onFoot ? a.from : null, end: a.point, start };
 }
 
 /* Why the car stopped where the walk starts: a mapped gate, a private or permit road, the drivable

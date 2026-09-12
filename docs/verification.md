@@ -413,3 +413,83 @@ junction built on round numbers. Build fixtures on round numbers on purpose.
 spots must both say how many cells are hidden and how many of those have no
 mapped route; and turning the filter off must bring back exactly the cells it
 hid, with the same scores.
+
+## The false-junction rate, measured
+
+Junctions are inferred, so "some false connections" was the honest description and
+a useless one. Measured 2026-09-11. The scripts are throwaway; the method is not.
+
+**1. Get the joins the real code makes, not a copy of the rules.** `buildNetwork`
+takes an `onJoin` hook: every inferred join is offered to it with its kind, both
+way ids, where it falls on each way, the gap between them, and the distance from
+the contact point to the nearest vertex of each way. Returning false vetoes it.
+A census run offered 1,559,805 joins and matched the shipped provenance exactly,
+which is the check that the hook sees everything.
+
+**2. Ask a source that is not the code under test.** Overpass holds the node ids
+the checkpoint threw away. For a stratified sample of 3,089 joins between two OSM
+ways, `way(id:…); out skel;` gives each way's node list, the intersection gives the
+shared nodes, `node(id:…); out skel;` gives their coordinates, and `out tags;` gives
+bridge, tunnel and layer. A shared node within 40 m of the inferred point confirms
+the join; a bridge or tunnel tag with no shared node is a grade separation.
+
+**3. Split the rate by the two things it depends on** — the classes of the two ways
+and the size of the gap — or the answer is a meaningless average. Forest classes
+4.6% unconfirmed, everything else 20.4%; an end-to-end join inside a metre 0.4%,
+beyond a metre 40–60%.
+
+**4. Price it by re-running the bake with those joins vetoed.** A deterministic
+coin — a hash of the join, so a re-run removes the same set — vetoes each join with
+the probability its class turned out to be unconfirmed, and the whole modes pass is
+recomputed and diffed against the shipped figures. 6.2% of hike figures change,
+1.7% of buckets, median 17 minutes. Also worth running as pure upper bounds: every
+crossing (22.6% of figures, 1.05% of buckets), every end join over 5 m (30.6%,
+9.2%).
+
+**5. Measure the other direction too.** For 600 random forest ways, ask Overpass
+for every way sharing a node with them, keep the ones the bake holds, and check
+whether the inference joined each pair: 1,398 of 1,461 found, 95.7% recall.
+
+**6. Then look at some.** A local page with Esri imagery, the two ways drawn in red
+and blue and the inferred point circled, answers what the tags cannot. Eight
+forest-class unconfirmed joins were all passable on foot. "OSM does not assert a
+connection" is an upper bound on "there is no connection", and in the woods a loose
+one.
+
+Traps this found:
+
+- **Vertex evidence does not work.** 25 m simplification deletes the shared node
+  from the line, so only 192 of 12,297 OSM-to-OSM crossings have a vertex within a
+  metre of the crossing — while 81% of them are real. A rule built on it would
+  delete mostly-true junctions.
+- **Water needs polygons, and polygons are relations.** A first pass fetched
+  `natural=water` ways and found nothing on the Columbia, because big rivers are
+  multipolygon relations whose member ways carry no tags. The river *centreline*
+  (`waterway=river`) is the test that works for "does this route cross the river".
+- **Compare encoded geometry by value.** The drive's route was compared with the
+  hike's using `!==` on two arrays, so all 25,999 were "different" and the routes
+  file grew 5 MB for nothing. `scripts/access-modes.test.mjs` now guards it.
+
+## The drive, checked
+
+The drive figure is checked against the other two figures in its own row, which is
+cheap and catches what a spot check would not:
+
+- **The hike can never be the longer walk.** The drive's walk starts somewhere a
+  car can get to, and the hike is the least foot minutes from anywhere a car can
+  get to. 249 rows of 46,634 read otherwise; all are the off-trail climb being
+  estimated while the candidate is chosen and measured afterwards, which can make
+  the two modes pick different points. Worth re-running after any change to the
+  selection: a sharp rise means the two modes have really diverged.
+- **The worst case can never beat walking the drive's own road**, since it starts
+  at the same pavement and may walk anything. 182 rows, same cause.
+- **Check the extremes against the map.** The five deepest drives in the state are
+  all within a kilometre of the Idaho line, and the nearest pavement to the
+  deepest one is 4 miles away — in Idaho, which the bake does not hold. Without
+  that check the 141-minute figure looks like a bug in the router rather than the
+  edge of the data.
+- **Profile the speed classes before trusting them.** 61% of the drivable network
+  `paved()` does not call pavement is `highway=residential`: the first version put
+  all of it in the 15 mph class and 98.1% of every drive was "rough gravel". After
+  moving streets to the graded class the split is 1.8% / 17.7% / 80.5%, which is
+  what the model was meant to say.

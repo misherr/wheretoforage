@@ -1011,6 +1011,46 @@ no node ids. That errs towards connecting: a trail passing under a bridge become
 a junction. The Geofabrik extract in [ROADMAP.md](../ROADMAP.md) would give the
 true topology.
 
+### The inferred junctions are wrong about 9% of the time, and it costs about 1.7% of the buckets
+
+Measured 2026-09-11, because "some false connections" is not a number. Method in
+[verification.md](verification.md#the-false-junction-rate-measured); what it found:
+
+- The network makes **1,559,805 join offers** — 64% end to end, 23% an end onto a
+  side, 12% two lines crossing. (An end-to-end join is offered from both ways, so
+  the distinct count is lower.)
+- Against Overpass, which holds the node ids the checkpoint threw away: of 3,089
+  sampled joins between two OSM ways, **82% are confirmed by a shared node within
+  40 m** and 13.6% are not.
+- The rate depends almost entirely on **what kind of ways and how big the gap**.
+  Both ways a forest class — track, path, unclassified, service, forest road:
+  **4.6% unconfirmed**. Anything else, which is town streets, cycleways and
+  highway ramps: **20.4%**. An end-to-end join with a gap under a metre is
+  essentially always real (2 of 499 unconfirmed); over a metre it is a coin flip.
+  An end onto a side runs from 2% at a metre to 41% at 15 m in town, 8% in forest.
+- **Vertex evidence is useless**, which is worth knowing because it looks like the
+  obvious cheap test: only 192 of 12,297 OSM-to-OSM crossings have a vertex within
+  a metre of the crossing point, yet 81% of them are real. Douglas-Peucker at 25 m
+  removes the shared node from the line. Do not build a rule on it.
+- **What it costs.** Vetoing joins at the measured rate per class removes 144,922
+  of them and changes **6.2% of hike figures** (forested cells 6.8%) and **1.7% of
+  difficulty buckets**; 18 cells of 46,634 lose a figure entirely, and the car
+  reaches 88.5% of drivable road instead of 91.2%. The median affected cell moves
+  17 minutes. Vetoing *every* crossing — an absurd upper bound — changes 22.6% of
+  figures and 1.05% of buckets.
+- **"OSM does not confirm it" is not "it is not there."** Eight forest-class
+  unconfirmed joins checked against imagery were all passable on foot: two pieces
+  of one trail with a gap, two tracks meeting at a visible junction, a path
+  crossing a forest road at grade. Some are the same named way on both sides. The
+  6.2% is therefore an upper bound on the real error, not an estimate of it.
+- **The misses, too**: of 1,461 connections OSM really has between ways the bake
+  holds, the inference finds 1,398 — **95.7% recall**, 63 missed.
+- No route runs over water: none of the 25,880 stored routes crosses the Columbia,
+  Snake, Skagit, Yakima or Spokane, and 32 have a vertex inside a lake polygon,
+  all of them shoreline trails. (2,393 cross a smaller mapped river, where forest
+  roads and trails do have bridges and fords.) An earlier note about a route
+  running onto an island in the Columbia did not survive this check.
+
 ### Where a car can get to
 
 Pessimistic on purpose — this project has twice been burned by access reading
@@ -1115,6 +1155,117 @@ road. Live, against OSM: 8 of 8 sampled gate stops have a barrier within 40 m, a
 - Inferred junctions: some false connections, and none of OSM's missed.
 - An unmapped gate is invisible to the hike figure. The worst case is the answer
   to that, not a fix for it.
+
+## Getting there by car: the drive mode
+
+Built after the hike (v7), on the same network and the same stopping rules. The
+question it answers is the user's: **how deep into the forest road network does
+this cell sit** — and then, what is left on foot.
+
+### The drive
+
+Minutes from the nearest paved road, along drivable roads only, never through a
+mapped gate and never onto a private or permit-only road. Pavement is the same
+`paved()` the worst case uses, so "from the nearest paved road" means one thing
+everywhere in the app. Three speeds, agreed with the user:
+
+| class | speed | what is in it |
+| --- | --- | --- |
+| pavement | 35 mph | motorway–tertiary, or a surface tag that says paved |
+| graded | 25 mph | USFS maintenance level 4–5 — and a town street |
+| rough | 15 mph | level 3, and every forest road nobody rated |
+
+**A street is in the graded class on the strength of a measurement.** 61% of the
+drivable network that `paved()` does not call pavement is `highway=residential`
+and 31% is `unclassified`; only 8% is a USFS road. Rural and small-town streets
+are simply mapped without a surface tag. Timing those at 15 mph made a cell on the
+far side of a village read minutes deeper into the forest than it is — that is not
+erring pessimistic, it is being wrong about a street. An unrated *forest* road
+stays in the slow class, which is where the pessimism belongs.
+
+Metres are stored per class and per cell, plus the climb; **the minutes are
+computed in the app**, so a speed can be retuned without a re-bake. Of the metres
+actually driven across all 46,634 cells, 1.8% are pavement, 17.7% graded and 80.5%
+rough — the drive figure is, in effect, gravel miles from the end of the tarmac.
+
+### Where the car is left
+
+The hike chooses its parking point on **foot minutes alone**. The drive chooses on
+the **whole journey** — drive plus walk, a minute of each counted the same, because
+someone deciding where to go today is deciding about a day, not about a leg. A
+minute in the truck is easier than a minute walking, so counting them equally
+already leans towards walking rather than towards driving round the mountain.
+
+The two agree for **43,661 of 46,634 cells (93.6%)**. Where they differ, the drive
+has found a closer place to leave the car at the price of a longer walk, or the
+reverse. The routes file stores the drive's walk only for the 1,764 cells where the
+line is actually different; everywhere else the app draws the hike's.
+
+In 20,643 cells (44%) the car reaches the point nearest the cell and there is no
+walk at all. In 1,397 (3%) the road runs into the cell itself.
+
+### What the sheet says
+
+The mode on screen decides which figure leads. In drive mode:
+
+> **Drive** — 20 min *from the nearest paved road*
+> 7.2 mi · 500 ft of climb — *4.6 mi graded forest road, 2.6 mi rough or unrated gravel*
+> **Long approach 2.5 h** *on foot from there*
+> 2.4 mi · 350 ft of climb *on trails, tracks and roads, from a mapped gate*
+> 0.5 mi · 500 ft of climb *off trail* — Show the route
+> *Door to cell, 2.5 h. The drive is from the nearest paved road, at 35 mph on
+> pavement, 25 on a graded forest road and 15 on anything rougher. Snow,
+> washouts, a locked gate nobody mapped and mud are not in it.*
+
+The worst case — the same walk from the nearest paved road — sits beside the drive
+exactly as it sits beside the hike, and for the same reason: **a gate nobody mapped
+is invisible to both figures.** The filter is "within 30 minutes of driving", which
+counts the drive alone because that is what it says; the "easiest access" sort
+counts the whole journey, because ordering by the drive alone would put a
+five-minute drive and a four-hour walk above a ten-minute drive that ends at the
+cell.
+
+### Deming, in drive mode
+
+The user's own trip: the target at 48.8003140, -122.0556248, where the road was
+gated about six miles short and they walked in from the south — 6 miles, 2,000 ft,
+6.5 hours.
+
+> Drive **30 min** from the nearest paved road, 7.7 mi of rough or unrated gravel,
+> 3,600 ft of climb. Then **35 min** on foot, all of it the 0.4 mi off-trail leg.
+> Door to cell, 1 h.
+> **If the gravel is gated: 5.5 h**, a long approach — 7.7 mi and 3,600 ft from
+> the nearest paved road, then 0.4 mi off trail.
+
+The gate is still not in OpenStreetMap, so the drive still reads as a drive. The
+worst case is the figure that describes the day they actually had.
+
+### Checked
+
+- Every stored drive is a real breakdown: no negative metres, and the minutes
+  recomputed from the stored parts match the speeds exactly.
+- **The hike is never the longer walk of the two** — the drive's walk starts
+  somewhere a car can get to, so the hike's foot minutes cannot be worse. 249 rows
+  of 46,634 (0.5%) read otherwise, all of them explained by the off-trail climb
+  being *estimated* while a candidate is chosen and *measured* afterwards; the
+  median disagreement is small and both figures describe a real approach.
+- **The worst case never beats walking the drive's own road**: 182 rows (0.4%),
+  the same cause.
+- The deepest drives in the state — 141 minutes, 35 miles — are a **border
+  artifact**: the bake holds Washington's roads only, so a cell 600 m from the
+  Idaho line drives around inside the state rather than 4 miles east to Idaho
+  pavement. 167 of the 780 cells with a drive over an hour are within 15 km of a
+  border, against 11% of cells overall. [ROADMAP.md](../ROADMAP.md).
+
+### What it costs
+
+- `access.json` goes from 7.75 MB to 9.0 MB, which is 1.96 MB to **2.24 MB over
+  the wire** — Pages serves it gzipped, and that is the number that matters on a
+  phone.
+- `access-routes.json` grows by 0.08 MB gzipped, because the modes **share** the
+  table of way stretches and differ only in the per-cell lists.
+- Bike will add about as much again. The size plan, with the levers measured, is
+  in [ROADMAP.md](../ROADMAP.md#the-three-modes-share-storage-they-do-not-triple-it).
 
 ## Roads and trails on the map are somebody else's rendering
 

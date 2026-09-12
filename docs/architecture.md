@@ -102,17 +102,24 @@ every file, what it does, and the reasoning that is not obvious from reading it.
   that matters most: that nothing under `src/model/` can see access at all.
 - **`scripts/access-network.mjs`** — the route network: every fetched way,
   joined where ways meet (ends, sides, crossings — inferred, because the
-  checkpoint has no node ids), where a car can get to from pavement, and the walk
-  from there. Pure: elevation is injected, nothing is fetched.
+  checkpoint has no node ids), where a car can get to from pavement, how long the
+  drive there takes, and the walk from there. Pure: elevation is injected, nothing
+  is fetched. `onJoin` is an audit seam — every inferred join is offered to it and
+  can be vetoed, which is how the false-junction rate is measured
+  ([verification.md](verification.md#the-false-junction-rate-measured)).
 - **`scripts/access-modes.mjs`** — per-cell mode figures from that network: the
-  hike approach, the worst case from the nearest paved road, the straight-in
-  alternative, where the car stops and why, and the routes file for drawing.
+  hike approach, the drive and the walk left after it, the worst case from the
+  nearest paved road, the straight-in alternative, where the car stops and why,
+  and the routes file for drawing.
 - **`data/access.json`** — per-cell distance to the nearest mapped trail, road
-  and rough way, then the mode columns (v6), keyed by cell index rather than row
-  position. Optional at runtime: without it every cell reads as unknown and the
-  app is otherwise unchanged.
-- **`data/access-routes.json`** — the route each cell's hike figure walks,
-  fetched only when "Show the route" is tapped, stamped with the bake.
+  and rough way, then the mode columns — hike, worst case, straight-in, drive
+  (v7) — keyed by cell index rather than row position. Optional at runtime:
+  without it every cell reads as unknown and the app is otherwise unchanged.
+  9.0 MB, 2.2 MB over the wire, since Pages serves it gzipped.
+- **`data/access-routes.json`** — the route each cell's figure walks, fetched only
+  when "Show the route" is tapped, stamped with the bake. One shared table of way
+  stretches for all modes, and per cell a list into it; the drive's walk is stored
+  only where it is not the hike's, which is 1,764 of 25,880 cells.
 - **`scripts/serve.mjs`** — dependency-free static server for local
   development, `node scripts/serve.mjs [port]`. Exists because the app can no
   longer be opened over `file://`, and because it guarantees the `.mjs` MIME

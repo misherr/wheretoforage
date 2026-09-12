@@ -27,6 +27,55 @@ async function world(ways, gates = []) {
 }
 const approach = (w, x, y) => { const [la, lo] = at(x, y); return N.bestApproach(w.net, w.walk, w.free, la, lo, null); };
 
+/* the node nearest a point, for checking the drive at a place rather than at an index */
+const nodeAt = (net, x, y) => { const p = at(x, y); let best = -1, bd = Infinity;
+  for (let n = 0; n < net.nNodes; n++) { const q = net.nodePt[n]; if (!q) continue;
+    const d = Math.hypot((q[1] - p[1]) * mLon(LAT), (q[0] - p[0]) * M_LAT); if (d < bd) { bd = d; best = n; } }
+  return best; };
+
+test('drive: a road is timed by its maintenance level, and a gate ends the drive', async () => {
+  /* a mile of pavement, then a mile of graded level-4 road, then a mile of unrated gravel with a gate
+     halfway along it */
+  const net = await build([
+    way('hwy', line(0, 0, 1609, 0), { type: 'secondary' }),
+    way('graded', line(1609, 0, 1609, 1609, 8), { type: 'unclassified', ml: '4' }),
+    way('gravel', line(1609, 1609, 1609, 3218, 8), { type: 'unclassified' }),
+  ], [at(1609, 2400)]);
+  assert.equal(net.st.gates_placed, 1);
+  assert.equal(N.driveClassOf({ cat: 'road', type: 'secondary' }), 'paved');
+  assert.equal(N.driveClassOf({ cat: 'road', type: 'unclassified', ml: '4' }), 'graded');
+  assert.equal(N.driveClassOf({ cat: 'road', type: 'unclassified' }), 'rough', 'a forest road nobody rated is the slow class');
+  assert.equal(N.driveClassOf({ cat: 'road', type: 'residential' }), 'graded', 'but a street is a street, tagged with a surface or not');
+  const drv = N.carDrive(net);
+  const end = nodeAt(net, 1609, 1609);                            // where the graded road ends
+  assert.ok(Math.abs(drv.min[end] - 1609 / (25 * 1609.34 / 60)) < 0.05, 'a mile of graded road at 25 mph');
+  assert.equal(Math.round(drv.legs.paved[end]), 0, 'the pavement is where the drive starts, not part of it');
+  assert.ok(Math.abs(drv.legs.graded[end] - 1609) < 2);
+  const past = nodeAt(net, 1609, 3218);
+  assert.equal(drv.min[past], Infinity, 'nothing past the gate is drivable');
+  const gate = nodeAt(net, 1609, 2400);
+  assert.ok(isFinite(drv.min[gate]), 'but the gate itself is — you can drive to it');
+});
+
+test('drive: the car goes to the point nearest the cell, and otherwise parks where it must', async () => {
+  const net = await build([
+    way('hwy', line(0, 0, 1609, 0), { type: 'secondary' }),
+    way('gravel', line(1609, 0, 1609, 4000, 20), { type: 'unclassified' }),
+  ], [at(1609, 2000)]);
+  const drv = N.carDrive(net);
+  const nodes = [...Array(net.nNodes).keys()].filter(n => isFinite(drv.min[n]));
+  const driveWalk = N.walkFrom(net, nodes, () => false, n => drv.min[n]);
+  const ask = (x, y) => { const [la, lo] = at(x, y); return N.driveApproaches(net, drv, driveWalk, la, lo, null).primary; };
+  const near = ask(1700, 1000);
+  assert.equal(near.on, 0, 'short of the gate the car reaches the closest point: no walk');
+  assert.ok(near.drive.rough > 900 && near.drive.rough < 1100, `a kilometre of gravel, got ${Math.round(near.drive.rough)} m`);
+  assert.ok(near.off > 80 && near.off < 120, 'and the cell is 100 m off the road');
+  const past = ask(1700, 3000);
+  assert.ok(past.on > 900, 'past the gate the walk begins where the drive ended');
+  assert.equal(N.stopReason(net, past.stopNode), 'gate', 'and the sheet can say why');
+  assert.ok(Math.abs(past.drive.rough - 2000) < 40, 'the drive legs are the parking point\'s, not the cell\'s');
+});
+
 test('junctions: ends that meet, an end on a side, and lines that cross are all joined', async () => {
   const net = await build([
     way('road', line(0, 0, 2000, 0), { type: 'secondary' }),

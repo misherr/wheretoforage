@@ -53,7 +53,7 @@ test('duration: coarse, because the model is', () => {
 
 test('format: the mode columns decode, and a missing figure is null rather than zero', () => {
   const row = new Array(AC.ROW_WIDTH).fill(-1);
-  assert.deepEqual(AC.decodeModes(row, 47.5, -121.5), { hike: null, worst: null, direct: null });
+  assert.deepEqual(AC.decodeModes(row, 47.5, -121.5), { hike: null, worst: null, direct: null, drive: null });
   row[AC.HIKE_AT] = 3000; row[AC.HIKE_AT + 1] = 200; row[AC.HIKE_AT + 2] = 400; row[AC.HIKE_AT + 3] = 30;
   row[AC.HIKE_AT + 4] = 1000; row[AC.HIKE_AT + 5] = -2000; row[AC.HIKE_AT + 6] = AC.STOP.gate;
   const m = AC.decodeModes(row, 47.5, -121.5);
@@ -84,9 +84,9 @@ test('filters: they say how many cells they hide, and that unmapped is not unrea
   assert.match(app, /never changes a score/);
 });
 
-test('mode: hike is the default and the only one built; drive and bike say they are coming', () => {
+test('mode: hike and drive are built, bike says it is coming', () => {
   assert.match(app, /hike:\{label:'Hike',ready:true\}/);
-  assert.match(app, /drive:\{label:'Drive',ready:false/);
+  assert.match(app, /drive:\{label:'Drive',ready:true\}/);
   assert.match(app, /bike:\{label:'Bike',ready:false/);
   assert.match(app, /return MODES\[m\]&&MODES\[m\]\.ready\?m:'hike'/, 'a remembered mode that is not built falls back to hike');
   assert.match(app, /const modeFor=view=>view==='top'&&topMode\?topMode:MODE;/, 'Top spots can override the map');
@@ -95,11 +95,55 @@ test('mode: hike is the default and the only one built; drive and bike say they 
 test('sheet: the hike figure says what it is — as mapped, with the worst case beside it', () => {
   const block = app.slice(app.indexOf('function hikeBlock'), app.indexOf('let routesFetch'));
   assert.match(block, /AS_MAPPED_NOTE/);
-  assert.match(block, /If the gravel is gated/);
-  assert.match(block, /WORST_CASE_NOTE/);
+  assert.match(block, /worstBlock\(e,dim,min\)/, 'the worst case, against the minutes just read');
   assert.match(block, /STOP_LABEL\[h\.stop\]/, 'and why the car stopped');
+  const worst = app.slice(app.indexOf('function worstBlock'), app.indexOf('function driveBlock'));
+  assert.match(worst, /If the gravel is gated/);
+  assert.match(worst, /WORST_CASE_NOTE/);
   assert.match(AC.AS_MAPPED_NOTE, /gated six\s+miles short/, 'the Deming case is named, not hidden');
-  assert.match(app, /h\+=hikeBlock\(e,dim\);/, 'rendered in the Getting there section');
+  assert.match(app, /h\+=\(MODE==='drive'\?driveBlock\(e,dim\):hikeBlock\(e,dim\)\);/,
+    'the mode on screen decides which figure the sheet leads with');
+});
+
+test('sheet: the drive figure names the drive, the walk left, and what it does not know', () => {
+  const block = app.slice(app.indexOf('function driveBlock'), app.indexOf('/* The route the hike figure describes'));
+  assert.match(block, /driveMinutes\(d\)/, 'the minutes come from the stored metres, not from the bake');
+  assert.match(block, /from the nearest paved road/);
+  assert.match(block, /DRIVE_CLASS_LABEL\[c\]/, 'and it says how much of the road is what');
+  assert.match(block, /STOP_LABEL\[d\.stop\]/, 'why the car stopped');
+  assert.match(block, /AS_MAPPED_NOTE/);
+  assert.match(block, /DRIVE_NOTE/, 'and what the speeds assume');
+  assert.match(block, /worstBlock\(e,dim,travelMinutes\(d\)\)/, 'the worst case is beside the drive too');
+  assert.match(AC.DRIVE_NOTE, /35 mph|Snow/, 'the note says what is not in the figure');
+});
+
+test('format: the drive columns decode, and no pavement is not no figure', () => {
+  const row = new Array(AC.ROW_WIDTH).fill(-1);
+  row[AC.DRIVE_AT] = 0; row[AC.DRIVE_AT + 1] = 1609; row[AC.DRIVE_AT + 2] = 3218; row[AC.DRIVE_AT + 3] = 210;
+  row[AC.DRIVE_AT + 4] = 800; row[AC.DRIVE_AT + 5] = 40; row[AC.DRIVE_AT + 6] = 300; row[AC.DRIVE_AT + 7] = 25;
+  row[AC.DRIVE_AT + 8] = 500; row[AC.DRIVE_AT + 9] = -250; row[AC.DRIVE_AT + 10] = AC.STOP.gate;
+  const d = AC.decodeModes(row, 47.5, -121.5).drive;
+  assert.ok(d, 'a drive that begins where the pavement ends is still a drive — 0 is not -1');
+  assert.equal(d.rough, 3218); assert.equal(d.stop, AC.STOP.gate);
+  assert.equal(d.walk.on, 800);
+  assert.ok(Math.abs(d.park[0] - (47.5 - 250 / 111320)) < 1e-9, 'the park point is metres north of the centre');
+  /* the speeds the user agreed: 35 mph paved, 25 graded, 15 rough */
+  assert.deepEqual(AC.DRIVE_MPH, { paved: 35, graded: 25, rough: 15 });
+  assert.ok(Math.abs(AC.driveMinutes({ paved: 0, graded: 0, rough: 1609 }) - 4) < 0.05, 'a mile of rough gravel is four minutes');
+  assert.ok(Math.abs(AC.driveMinutes(d) - (1609 / (25 * 1609.34 / 60) + 3218 / (15 * 1609.34 / 60))) < 1e-9);
+  assert.ok(AC.travelMinutes(d) > AC.driveMinutes(d), 'door to cell is the drive plus the walk');
+  assert.equal(AC.driveMetres(d), 4827);
+});
+
+test('filter: the drive filter counts the drive alone; the sort counts the whole journey', () => {
+  const state = app.slice(app.indexOf('const WITHIN='), app.indexOf('const withinOK='));
+  assert.match(state, /drive:\[15,30,60,120\]/, 'half an hour of driving is one of the choices');
+  assert.match(state, /if\(mode==='drive'\) return M\.drive\?driveMinutes\(M\.drive\):null;/,
+    'the filter measures the leg its label names');
+  assert.match(state, /if\(mode==='drive'\) return M\.drive\?travelMinutes\(M\.drive\):null;/,
+    'and the sort measures the journey');
+  assert.match(app, /const accessSort=\(a,b\)=>\{ const ma=rankMinutes\(a,tMode\), mb=rankMinutes\(b,tMode\);/);
+  assert.match(app, /within '\+durationLabel\(within\)\+' of driving'/, 'and says so on the pill');
 });
 
 test('route: its file is fetched only when asked, stamped with the bake, and version-checked', () => {

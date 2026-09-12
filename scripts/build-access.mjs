@@ -35,7 +35,7 @@ import { REGIONS, decodePNG, terrariumMetres, tileXY, TERRAIN_SOURCE } from './b
 import { computeModes, routesFile, modeColumns, mergeRoutes } from './access-modes.mjs';
 
 export const GENERATOR = 'scripts/build-access.mjs';
-export const GENERATOR_VERSION = '6.0.0';
+export const GENERATOR_VERSION = '7.0.0';
 /* What a checkpoint holds, which is not the same question as which generator wrote it. Schema 2 keeps
    what the sources SAY — USFS maintenance level and trail_type, one way per USFS path, the OSM tags
    that describe a road — and nothing the rules derive, because the rules now run at assembly. A
@@ -870,7 +870,7 @@ export function reconcileUsfs(ways) {
   const twins = findTwins(ways);
   const st = { osm_ways_with_twin: twins.size, pairs: 0, to_rough: 0, to_road: 0, paved: 0, described: 0,
                conflicting_twins: 0, usfs_adopted: 0, usfs_still_disagreeing: 0,
-               kept_highway: 0, kept_partial: 0 };
+               kept_highway: 0, kept_partial: 0, ml_carried: 0 };
   for (const [owid, list] of twins) {
     const o = ways.get(owid), top = ways.get(list[0].uwid);
     st.pairs += list.length;
@@ -884,6 +884,11 @@ export function reconcileUsfs(ways) {
     if (by === 'described' && top.cat === 'road') st.described++;
     if (o.cat !== cat) { if (cat === 'rough') st.to_rough++; else st.to_road++; }
     o.cat = cat; o.catBy = by; o.twin = list[0].uwid;
+    /* The maintenance level comes with the category, because the drive times a road by it and the two
+       copies of one road must be driven at one speed. Without this the OSM copy of a graded level-4
+       road was timed as unrated gravel, and the drive took whichever copy the network happened to
+       join — the same road at two speeds. */
+    if (o.ml == null && top.ml != null) { o.ml = top.ml; st.ml_carried++; }
   }
   const byU = new Map();
   for (const [owid, list] of twins) for (const t of list) {
@@ -1454,7 +1459,8 @@ export async function build(opts, deps = {}) {
     atomicWrite(geomPath, JSON.stringify(geomOut));
     if (routesOut) {
       atomicWrite(routesPath, JSON.stringify(routesOut));
-      log('wrote ' + routesPath + ' - ' + routesOut.cells.length.toLocaleString() + ' routes over '
+      log('wrote ' + routesPath + ' - ' + routesOut.cells.length.toLocaleString() + ' hike routes plus '
+        + (routesOut.driveCells || []).length.toLocaleString() + ' where the drive walks differently, over '
         + routesOut.edges.length.toLocaleString() + ' edges, ' + (fs.statSync(routesPath).size / 1e6).toFixed(2)
         + ' MB, fetched only when an approach is shown');
     }

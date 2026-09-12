@@ -58,31 +58,107 @@ git show b61b0a8:scripts/network-tiles.test.mjs
 and add the pyramid, a decoder hook and cancellation, rather than keeping 23
 tests guarding code that nothing runs.
 
-### Drive and bike modes: next, in that order
+### Bike mode: the third one, and the only one needing a new source
 
-**Agreed with the user, not built.** The hike mode (v6) built the shared parts —
-the route network, where a car can get to, the buckets and the filters — so both
-of these add a calculation rather than an infrastructure.
+**Agreed with the user, not built.** Hike (v6) and drive (v7) built the shared
+parts — the route network, where a car can get to, the drive to it, the buckets and
+the filters — so bike adds a calculation and one fetch.
 
-- **Drive**: minutes from the nearest paved road along drivable roads to where the
-  car stops — 35 mph on pavement, 25 on USFS level 4–5, 15 on level 3 or unrated
-  gravel — which answers how deep into the forest-road network a cell sits. The
-  stopping rules already exist (gates on roads, private and permit roads); the
-  remainder becomes the walk, which the hike already computes. Filter: "within 30
-  minutes of driving", under the same off-by-default, counted rule.
 - **Bike**: level 1–2 roads and singletrack a truck cannot use, **blocked
   absolutely** by the USFS closed-to-motorized layer, by wilderness boundaries and
   by `bicycle=no`. Wilderness is a new source — the USFS EDW wilderness layer —
-  and is not fetched yet.
+  and is not fetched yet. The closed-to-motorized layer is already in the
+  checkpoint (`nfsr-closed`, 10,820 ways).
+- Unlike the drive, bike routes will not mostly coincide with the hike's: a bike
+  rides the ways a car cannot and walks the rest, so expect its own per-cell lists
+  in the routes file rather than the drive's 6.8%.
 
-### The routes file is 8.6 MB
+### The three modes share storage; they do not triple it
 
-`data/access-routes.json` — 25,880 routes over 111,115 stretches of way — is what
-"Show the route" draws, and it is fetched whole on the first request. The estimate
-before building it was 1.9 MB; it counted edges but not the per-cell lists and the
-partial last edges. On a phone on a slow connection that first request is slow.
-Splitting it by region, like the geometry tiles once were, would make it a few
-hundred KB per request. Not done until it is known how often anyone asks.
+**Measured 2026-09-11, after the drive landed.** The question was whether three
+modes mean three copies. They do not, and the numbers matter more than the
+architecture:
+
+| file | v6 (hike) | v7 (+ drive) | with bike, projected |
+| --- | --- | --- | --- |
+| `access.json`, over the wire | 1.96 MB | **2.24 MB** | ~2.5 MB |
+| `access.json`, raw | 7.75 MB | 9.0 MB | ~10.3 MB |
+| `access-routes.json`, over the wire | 2.30 MB | **2.38 MB** | ~3.0 MB |
+
+Over the wire is the number that matters: GitHub Pages serves these gzipped, which
+is a 4:1 saving, and `access.json` is fetched with `no-cache` — so a returning
+viewer revalidates and pays nothing until the bake changes.
+
+Where the drive's 0.28 MB went, and what is left to pull if it ever needs pulling:
+
+- **The routes file already shares.** One table of way stretches serves every
+  mode; only the per-cell lists are per mode, and the drive's walk is stored only
+  where it differs from the hike's — 1,764 of 25,880 cells. That is why adding a
+  whole mode cost 0.08 MB.
+- **Quantising the mode columns** — distances to 10 m, climbs to 5 m — measured
+  −13% of the mode columns. The figures are honest to a hundred metres anyway.
+- **Dropping the worst case where it does not differ** from the mode figure:
+  18,529 of 46,634 cells, measured −0.15 MB. The sheet already says "no different"
+  for those; it would have to read a missing group as that rather than as unknown.
+- **Sharding by mode**, a base file plus one file per mode, fetched when a viewer
+  switches: holds the up-front download at about 1.5 MB plus one mode no matter
+  how many modes exist. Costs a fetch on a mode switch and a rewrite of the
+  regional-merge path, which is tested and works; not worth it below 3 MB.
+- **Sharding the routes file by region** is the one worth doing first, and not
+  because of the total: it is fetched *whole* on the first "Show the route", 2.4 MB
+  on whatever signal a forager has at a trailhead. In 0.5° blocks that becomes 60–120
+  KB per tap, at the cost of duplicating the few edges shared across a block edge.
+
+None of this is urgent at 2.24 MB. The trigger to act is `access.json` over the
+wire passing 3 MB, or anyone reporting that "Show the route" hangs.
+
+### The inferred junctions could be replaced by real ones for one tag-only pass
+
+**Measured 2026-09-11.** 9.3% of the network's joins are ones OSM does not
+confirm, and removing them all moves 1.7% of difficulty buckets
+([access.md](docs/access.md#the-inferred-junctions-are-wrong-about-9-of-the-time-and-it-costs-about-17-of-the-buckets)).
+Three fixes, in increasing cost:
+
+1. **Node ids by tag-only query.** The checkpoint threw away node ids because the
+   fetch asked for `out geom`. `way(bbox); out skel;` returns id plus node ids and
+   nothing else — no tags, no coordinates — which is a fraction of the original
+   payload over the same 316 tiles. Two ways sharing a node id are connected, full
+   stop; everything else becomes an inference to drop or keep on its own merits.
+   This is the fix, and it is a checkpoint schema 4 upgrade, not a re-fetch.
+2. **Bridge, tunnel and layer tags**, the same way schema 2 and 3 backfilled the
+   tags that describe a road: 23,250 bridge ways, 3,273 tunnel and 24,056 with a
+   layer tag statewide. It would let the `onJoin` hook veto a crossing between two
+   different layers — the 2.5% of joins that are certainly false — without
+   touching the rest. Cheaper than (1) and much narrower.
+3. **The Geofabrik extract** below, which gives the true topology and removes the
+   question rather than measuring it.
+
+Do not build a rule on vertex evidence: 25 m simplification deletes the shared
+node from the line, and the test fails on 81% of real crossings.
+
+### The bake holds Washington's roads only, so a border cell drives the long way
+
+**Known, measured, not fixed.** The five deepest drives in the state — up to 141
+minutes and 35 miles — are cells within a kilometre of the Idaho line whose nearest
+pavement is 4 miles east, in Idaho, which the bake does not hold. 167 of the 780
+cells with a drive over an hour are within 15 km of a border, against 11% of cells
+overall. The worst-case walk has the same edge.
+
+The fix is an apron: fetch a 20 km band into Idaho, Oregon and British Columbia and
+keep it in the network without stamping cells from it. It is a re-fetch of new
+tiles — hours of Overpass — so it waits for the Geofabrik extract, which would make
+it a bbox change rather than a fetch.
+
+### The routes file is fetched whole: 8.8 MB, 2.4 MB over the wire
+
+`data/access-routes.json` — 25,880 hike routes and 1,764 drive walks over 115,691
+stretches of way — is what "Show the route" draws, and it is fetched whole on the
+first request. The estimate before building it was 1.9 MB; it counted edges but not
+the per-cell lists and the partial last edges. On a phone on a slow connection that
+first request is slow, and it happens at the moment a forager is standing at a
+trailhead deciding. Splitting it by region, like the geometry tiles once were,
+would make it 60–120 KB per request; see the size plan above. Not done until it is
+known how often anyone asks.
 
 ### A way with a road at both ends is walked from its first end, not the nearer one
 

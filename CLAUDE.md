@@ -20,7 +20,7 @@ src/grid.mjs    the cell lattice, the state outline, terrainAt, pointKey
 src/access.mjs  how you would reach a cell — a separate axis, never a score input
 src/coords.mjs  the coordinate readout and the paste parser
 scripts/        build-cells.mjs, build-access.mjs, fetch-weather.mjs, serve.mjs,
-                access-network.mjs (the route network), access-modes.mjs (per-cell hike figures)
+                access-network.mjs (the route network and the drive), access-modes.mjs (per-cell figures)
 tests/model/    the model regression suite
 data/           cells.json, weather.json, evt-names.json, access.json (+ -geom, -routes) — checked in
 ```
@@ -117,6 +117,22 @@ while nothing throws.
   Deming case, and the worst case is what makes it visible. Minutes and buckets are computed in the
   app from stored parts; never bake a threshold into the file.
   [docs/access.md](docs/access.md#how-far-in-on-foot-the-hike-mode)
+- **A drive figure is minutes from the nearest paved road, and the walk that is left.** The same
+  network and the same stopping rules as the hike — drivable roads, mapped gates, private and
+  permit-only roads — timed at 35 mph on pavement, 25 on a graded forest road or a street, 15 on
+  anything rougher, with the metres stored per class so a speed can change without a re-bake. The
+  parking point is the one that makes the WHOLE journey fastest, drive plus walk, which is not always
+  where the hike leaves the car: the hike counts foot minutes alone. They agree for 93.6% of cells,
+  and the routes file stores the drive's walk only for the rest. A street counts as graded because 61%
+  of the drivable network this code calls unpaved is `highway=residential` — timing those at 15 mph is
+  not pessimism, it is wrong about a street.
+  [docs/access.md](docs/access.md#getting-there-by-car-the-drive-mode)
+- **Junctions are inferred, and the error rate is measured, not assumed.** 9.3% of the joins the
+  network makes are ones OpenStreetMap does not confirm — 4.6% where both ways are forest classes,
+  20.4% in town. Removing them all changes 6.2% of hike figures and 1.7% of difficulty buckets. The
+  recall is 95.7%. Re-measure after any change to `SNAP_M`, the crossing test or the simplification
+  tolerance: the `onJoin` hook in `access-network.mjs` exists for exactly that, and the method is in
+  [docs/verification.md](docs/verification.md#the-false-junction-rate-measured).
 - **`access-geom.json` stays whole and lazy**, fetched for the *tapped* approach only: clipped
   geometry is right for drawing and wrong for measuring, and a clip is what truncated trails
   before v4.

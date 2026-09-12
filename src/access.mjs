@@ -222,8 +222,8 @@ export function decodeWay(w, geomFlat) {
    trailhead to the point on the way nearest the cell and stopped there — it never included getting
    from that point to the cell, which is why 924 cells reported a walk of exactly 0 while the way was
    up to 1.9 km away. See docs/access.md. */
-/* v6 appends the mode columns — hike, worst case, direct — after the three categories; see HIKE_AT. */
-export const ACCESS_FORMAT = 6;
+/* v7 appends the drive columns to v6's hike, worst case and direct; see HIKE_AT and DRIVE_AT. */
+export const ACCESS_FORMAT = 7;
 export const ROW_STRIDE = 5;
 export function decodeRow(row) {
   const d = {};
@@ -576,28 +576,73 @@ export function blocksCars(tags) {
   return !/^(yes|permissive|designated)$/.test(carAccessValue(tags) || '');
 }
 
-/* v6 rows carry the mode columns after the three categories:
+/* ===================== the drive =====================
+
+   How deep into the forest road network a cell sits: the drive from the nearest paved road to where
+   the car stops, then the walk that is left. What counts as passable for a car is what the rules
+   already decided — USFS maintenance level 3-5, or an OSM way OSM calls drivable — stopping at mapped
+   gates and at private or permit-only roads, which is the same place the hike figure starts.
+
+   Speeds, agreed with the user: 35 mph on pavement, 25 on a graded forest road (USFS level 4-5), 15 on
+   anything rougher, which is level 3 and every gravel road nobody rated. Metres are stored per class
+   and the minutes are computed in the app, so a speed can change without a re-bake. Climb is recorded
+   because the user asked each figure to carry one; it does not enter the time.
+
+   The parking point is chosen to make the WHOLE journey fastest — drive plus walk, a minute of each
+   counted the same. A minute in the truck is easier than a minute on foot, so this already leans
+   towards walking rather than towards driving round the mountain. The hike figure chooses on foot
+   minutes alone, which is why the two can name different places to leave the car. */
+export const DRIVE_MPH = { paved: 35, graded: 25, rough: 15 };
+const M_PER_MIN_PER_MPH = 1609.34 / 60;
+export const DRIVE_CLASSES = ['paved', 'graded', 'rough'];
+export const DRIVE_CLASS_LABEL = { paved: 'pavement', graded: 'graded forest road', rough: 'rough or unrated gravel' };
+export function driveMinutes(d) {
+  if (!d) return null;
+  let m = 0;
+  for (const c of DRIVE_CLASSES) m += (d[c] || 0) / (DRIVE_MPH[c] * M_PER_MIN_PER_MPH);
+  return m;
+}
+export const driveMetres = d => d ? DRIVE_CLASSES.reduce((s, c) => s + (d[c] || 0), 0) : null;
+/* Door to cell: the drive and the walk that is left, in one number, for sorting and for the summary
+   line. The filter uses the drive alone, because "within 30 minutes of driving" says driving. */
+export const travelMinutes = d => d ? driveMinutes(d) + footMinutes(d.walk) : null;
+export const DRIVE_NOTE =
+  'The drive is from the nearest paved road, at 35 mph on pavement, 25 on a graded forest road and 15 '
+  + 'on anything rougher. Snow, washouts, a locked gate nobody mapped and mud are not in it.';
+
+/* v7 rows carry the mode columns after the three categories:
      hike:   on, onUp, off, offUp, parkEastM, parkNorthM, stop
      worst:  on, onUp, off, offUp
      direct: on, onUp, off, offUp      (only when straight through the brush saves 15 min or more)
+     drive:  pavedM, gradedM, roughM, driveUp, on, onUp, off, offUp, parkEastM, parkNorthM, stop
    in metres. The park point is metres east and north of the cell centre rather than an index into a
    table, so a regional merge has nothing to re-point. -1 in a group's first column means no figure. */
 export const HIKE_AT = 2 + 3 * 5;
 export const HIKE_STRIDE = 7;
 export const WORST_AT = HIKE_AT + HIKE_STRIDE;
 export const DIRECT_AT = WORST_AT + 4;
-export const ROW_WIDTH = DIRECT_AT + 4;
+export const DRIVE_AT = DIRECT_AT + 4;
+export const DRIVE_STRIDE = 11;
+export const ROW_WIDTH = DRIVE_AT + DRIVE_STRIDE;
 const modeGroup = (row, at) => row[at] != null && row[at] >= 0
   ? { on: row[at], onUp: Math.max(0, row[at + 1]), off: row[at + 2], offUp: Math.max(0, row[at + 3]) } : null;
+const parkAt = (row, at, lat, lon) => lat != null && lon != null
+  ? [lat + row[at + 1] / 111320, lon + row[at] / (111320 * Math.cos(lat * Math.PI / 180))] : null;
 export function decodeModes(row, lat, lon) {
   const hike = modeGroup(row, HIKE_AT);
   if (hike) {
-    const dx = row[HIKE_AT + 4], dy = row[HIKE_AT + 5];
-    hike.park = lat != null && lon != null
-      ? [lat + dy / 111320, lon + dx / (111320 * Math.cos(lat * Math.PI / 180))] : null;
+    hike.park = parkAt(row, HIKE_AT + 4, lat, lon);
     hike.stop = row[HIKE_AT + 6] >= 0 ? row[HIKE_AT + 6] : STOP.none;
   }
-  return { hike, worst: modeGroup(row, WORST_AT), direct: modeGroup(row, DIRECT_AT) };
+  /* The drive's first column is metres of pavement, which is legitimately 0 for a cell whose drive
+     starts where the pavement ends — so an absent figure is -1 and only a negative means absent. */
+  let drive = null;
+  if (row.length > DRIVE_AT && row[DRIVE_AT] != null && row[DRIVE_AT] >= 0) {
+    drive = { paved: row[DRIVE_AT], graded: row[DRIVE_AT + 1], rough: row[DRIVE_AT + 2],
+              up: Math.max(0, row[DRIVE_AT + 3]), walk: modeGroup(row, DRIVE_AT + 4) || { on: 0, onUp: 0, off: 0, offUp: 0 },
+              park: parkAt(row, DRIVE_AT + 8, lat, lon), stop: row[DRIVE_AT + 10] >= 0 ? row[DRIVE_AT + 10] : STOP.none };
+  }
+  return { hike, worst: modeGroup(row, WORST_AT), direct: modeGroup(row, DIRECT_AT), drive };
 }
 
 /* ===================== external links =====================
