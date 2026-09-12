@@ -237,15 +237,26 @@ species identity, and a joint stand-structure factor replacing
 `fCanopy × fHeight`.
 
 Next, all of which need cells re-baked and none of which belongs in a UI: PRISM
-precipitation multipliers, SSURGO soil water capacity, NIFC fire perimeters.
+precipitation multipliers, SSURGO soil water capacity, NIFC fire perimeters, and
+the **30 m habitat rebuild** — queued with its measurements in
+[ROADMAP.md](ROADMAP.md#queued-the-30-m-habitat-rebuild--fetch-to-a-checkpoint-first-decide-what-to-emit-after).
 `data/cells.json` is format 2 and carries per-sample vegetation types, so
-host-rule changes no longer need a re-bake.
+host-rule changes no longer need a re-bake. **Batch whatever needs a re-bake into
+one**, since hard rule 3 makes a re-bake an event: the elevation plausibility
+check is queued against exactly that occasion.
 
 **Deliberately left open:** the score bands (25/45/65/80) were calibrated against
-the old, more optimistic distribution, and nothing currently reaches "very high".
-That may simply be correct for a dry September. The test is mid-October, when
-conditions should be genuinely peak — **do not retune the bands against one dry
-week.**
+the old, more optimistic distribution, and nothing currently reaches "very high" —
+on 2026-09-12 the deployed app read 622 sq mi at medium+ of 48,032 with a ceiling
+of 75. That may simply be correct for a dry September. The test is mid-October,
+when conditions should be genuinely peak — **do not retune the bands against one
+dry week.**
+
+**And the band reading comes before the habitat rebuild**, decided by the user on
+2026-09-12: a rebuild re-bases habitat scores, so doing both at once would leave
+the October reading unable to separate "the weather finally got good" from
+"habitat was re-based", spending the season's one calibration. Four weeks costs
+nothing. Do not reorder this to start the rebuild sooner.
 
 ## How to test
 

@@ -239,6 +239,44 @@ called the priority: *"a 3.46 MB fetch landing on whatever signal I have at a
 trailhead is exactly the wrong place for it — that's where the app has to work and
 where the connection is worst."*
 
+### ~~The worst case is always on foot, even for a rider~~ — done in v10, 2026-09-12
+
+Every mode's "if the gravel is gated" figure was the same walk from the nearest paved road: the
+honest pessimistic bound for a walker, and the **wrong quantity** for a machine a gate does not stop.
+At Deming it read 5.5 h on foot under all four modes, the dirt bike in the user's own garage
+included.
+
+Now one more Dijkstra per rider, seeded at the pavement instead of at the car, nine columns in each
+riding mode's file. The before-and-after this deserved:
+
+| Deming, if the gravel is gated | v9 | v10 |
+| --- | --- | --- |
+| hike, drive | 5.5 h on foot | unchanged — a closure strands both at the pavement |
+| bicycle | 5.5 h on foot | **3 h** — 2.5 h riding 7.7 mi and 3,600 ft, then 35 min on foot |
+| dirt bike | 5.5 h on foot | **1.5 h** — 45 min riding the same road |
+
+Statewide the bicycle's bound beats the walk for 38,349 cells (82%) by a median 58 minutes and the
+dirt bike's for 37,255 (80%) by a median 74; for 12,638 cells the dirt bike saves more than two hours
+against the figure v9 showed. The largest correction is 14 h against 2 h, a cell 28 miles up a road
+in the Colville forest. Two properties hold it to being a bound — never quicker than the mode's own
+figure, never slower than walking the same road — and both are checked on every cell, at 0.4% with
+causes named in [verification.md](docs/verification.md#the-riders-worst-case-checked). Every legal
+block still applies, so a road closed to motor vehicles stops the dirt bike whatever the gravel is
+doing.
+
+The user's framing, which is the reasoning worth keeping: *"for a rider that gated gravel is a
+20-minute ride, so the bound is overstated tenfold in exactly the case a dirt bike exists for."* The
+measured factor at Deming is 3.7 rather than ten, because that road climbs 3,600 ft and a motor pays
+2 minutes per 100 m for it; at the worst cell in the state it is 7. The direction was the point.
+
+**An overstatement is not automatically the safe direction.** That is the general lesson, and it cuts
+against a habit this project has rightly built: pessimism where nothing is known. Pessimism about a
+*quantity nobody measured* is prudence. A pessimistic answer to a **different question** than the one
+asked is just a wrong number, and "how long is that walk" is a different question from "how long is
+that ride". The dirt bike's designation rule leans the other way — silence means closed — and both
+calls are right, because each is conservative about the thing that can actually hurt the rider: a
+citation on one side, a wasted day on the other.
+
 ### A way with a road at both ends is walked from its first end, not the nearer one
 
 **Open — the user's call. Measured 2026-09-10, not acted on.**
@@ -451,40 +489,164 @@ Nothing here without the user's explicit sign-off — see hard rule 2.
   SSURGO soil water capacity, NIFC fire perimeters. None of them belongs in the
   UI.
 
-### ~~The worst case is always on foot, even for a rider~~ — done in v10, 2026-09-12
+### QUEUED: the 30 m habitat rebuild — fetch to a checkpoint first, decide what to emit after
 
-Every mode's "if the gravel is gated" figure was the same walk from the nearest paved road: the
-honest pessimistic bound for a walker, and the **wrong quantity** for a machine a gate does not stop.
-At Deming it read 5.5 h on foot under all four modes, the dirt bike in the user's own garage
-included.
+**Measured 2026-09-12. Nothing built, by instruction. Needs the user's sign-off before anything is:
+it changes what `vegSummary()` and `hostFromSamples()` read, which is hard rule 2 territory, and
+[src/model/CLAUDE.md](src/model/CLAUDE.md) governs the model half.**
 
-Now one more Dijkstra per rider, seeded at the pavement instead of at the car, nine columns in each
-riding mode's file. The before-and-after this deserved:
+**This was promoted from an aside.** Before today it had no entry — only a passing reference inside
+"The vector tile loader is deleted" ("it had been kept as the seam for the 30 m rebuild"). There was
+no prior plan, so nothing here is a revision of one, and nobody should go looking for the design that
+was supposedly agreed earlier. The named next inputs were and are PRISM, SSURGO and NIFC.
 
-| Deming, if the gravel is gated | v9 | v10 |
-| --- | --- | --- |
-| hike, drive | 5.5 h on foot | unchanged — a closure strands both at the pavement |
-| bicycle | 5.5 h on foot | **3 h** — 2.5 h riding 7.7 mi and 3,600 ft, then 35 min on foot |
-| dirt bike | 5.5 h on foot | **1.5 h** — 45 min riding the same road |
+#### Why the user wants it, in their words
 
-Statewide the bicycle's bound beats the walk for 38,349 cells (82%) by a median 58 minutes and the
-dirt bike's for 37,255 (80%) by a median 74; for 12,638 cells the dirt bike saves more than two hours
-against the figure v9 showed. The largest correction is 14 h against 2 h, a cell 28 miles up a road
-in the Colville forest. Two properties hold it to being a bound — never quicker than the mode's own
-figure, never slower than walking the same road — and both are checked on every cell, at 0.4% with
-causes named in [verification.md](docs/verification.md#the-riders-worst-case-checked). Every legal
-block still applies, so a road closed to motor vehicles stops the dirt bike whatever the gravel is
-doing.
+> *"A cell with cliffs, talus, a lake and one good bench averages to mediocre and hides where to
+> actually walk — I want to know where the good acre is, not that one exists."*
 
-The user's framing, which is the reasoning worth keeping: *"for a rider that gated gravel is a
-20-minute ride, so the bound is overstated tenfold in exactly the case a dirt bike exists for."* The
-measured factor at Deming is 3.7 rather than ten, because that road climbs 3,600 ft and a motor pays
-2 minutes per 100 m for it; at the worst cell in the state it is 7. The direction was the point.
+Keep that sentence. It is the whole test for whether a version of this is worth building, and the two
+options below differ precisely in whether they answer it.
 
-**An overstatement is not automatically the safe direction.** That is the general lesson, and it cuts
-against a habit this project has rightly built: pessimism where nothing is known. Pessimism about a
-*quantity nobody measured* is prudence. A pessimistic answer to a **different question** than the one
-asked is just a wrong number, and "how long is that walk" is a different question from "how long is
-that ride". The dirt bike's designation rule leans the other way — silence means closed — and both
-calls are right, because each is conservative about the thing that can actually hurt the rider: a
-citation on one side, a wasted day on the other.
+#### What is sampled today
+
+Four **quarter points** per cell (`quarterPoints()` in `scripts/build-cells.mjs`), 250 cells per
+request, so 1,000 sample points a call and **579 LANDFIRE requests** for the three layers across
+48,032 cells — inside a 162-second bake. `cells.json` format 2 stores the four type codes, a
+tree-class bitmask, canopy, height and tree fraction: 4.4 MB raw, **1.05 MB over the wire**.
+
+#### The point-sampling service cannot deliver 30 m. This is the arithmetic that decides the shape
+
+A lattice cell is `DLAT` × `DLON` — 1,614 × 1,609 m at 47.5°, so 2.60 km² and **2,886 pixels of
+30 m** (`DLON` is fixed in degrees, so the count drifts with latitude; this is the mid-state figure,
+not a textbook square mile). Over 48,032 cells that is **138.6 million pixels per layer, 415.9
+million for three** — and at 1,000 sample points a request, **~416,000 requests against today's
+579**. A factor of 718, on the order of a day of continuous calling at the rate the current bake
+achieves, and the service would throttle long before the end.
+
+So this is not a bigger version of the existing fetch. It is a **raster** fetch, and that changes
+which parts are hard.
+
+#### The raster path works, and was verified end to end rather than assumed
+
+`LF2024_EVC_CONUS/ImageServer` on the same host the bake already uses:
+
+| | |
+| --- | --- |
+| pixel size | 30 × 30 m, native |
+| bands / type | 1, `S16`, `esriImageServiceDataTypeThematic` |
+| spatial reference | EPSG:5070 (CONUS Albers) |
+| `maxImageWidth/Height` | 100,000 |
+| capabilities | `Image, Metadata, Catalog, Mensuration` — so `exportImage` is available |
+
+`exportImage` answers with an `href` to a `.tif` that is then downloaded: a 100 × 100 request came
+back as a 33,986-byte tiled, uncompressed, 16-bit signed TIFF. A minimal tag reader is enough to get
+at the pixels — no GeoTIFF library needed for thematic single-band data.
+
+#### The EPSG:5070 snapping trap, and how it was caught
+
+**A request must be snapped to the native 30 m grid in 5070, or the service resamples and the "30 m"
+in the name is a claim the data does not support.**
+
+The first test asked for 100 × 100 pixels over a bbox in degrees (0.05° × 0.02°, about 3.7 × 2.2 km).
+It came back happily — at **37 × 22 m pixels**, a resampling — and its centre pixel read EVC 177
+where the `identify` service said 175 at the same coordinate. Two cover points, from a test that
+looked like it had passed.
+
+The second test snapped the bbox to multiples of 30 m in 5070 and asked for the matching pixel count:
+extent came back as exactly **30.000 × 30.000 m** pixels, and **all 8 pixel centres sampled agreed
+with `identify`** at the same point (asked in 5070, so no projection arithmetic of ours was involved
+in the check). That is the test to write first when this is built, and it is the test that says
+whether the pipeline reads LANDFIRE pixels or a picture of them.
+
+Statewide cost: the bake's own `STATE` bbox is 390 × 605 km, so 13,000 × 20,167 pixels =
+**262 million per layer, 785 million for three** — more than the 138.6 M the cells actually occupy,
+because a bounding box over Washington is mostly not Washington. At 4,096² that is **16 exports per
+layer, 48 for three**, and **1.57 GB** as the uncompressed `S16` the service returned
+(`compression: 1`). PNG or LERC would shrink thematic data hard, and clipping requests to the cell
+footprint would cut the pixel count by nearly half again; both are worth measuring rather than
+assuming, and neither changes the shape of the plan.
+
+#### Step one, which serves either outcome: fetch to a checkpoint
+
+**The expensive step is shared.** Pulling the raster down is the same work whether the result becomes
+one summary per cell or a pyramid of tiles, so it should land in a **checkpoint** first and the
+emission decision should be taken afterwards, against real data rather than against this entry.
+
+`build-access.mjs` already carries the lesson: *"The access checkpoint is kept on success and
+re-assembling from it is free... Deleting it once turned an assembly change into a ten-hour
+re-fetch."* A habitat checkpoint of raw 30 m pixels is the same bargain at a similar scale, and every
+question below then costs minutes instead of gigabytes.
+
+#### The fork, captured and deliberately not resolved
+
+**Option A — one summary per cell.** Store a distribution instead of four draws: a cover histogram,
+height spread, host-type fractions, a true tree fraction.
+
+- **Buys:** a better score, and it lets `COVER_FLOOR` be **retired rather than tuned**. That constant
+  is 0.55 today for exactly this reason, in `src/model/vegetation.mjs`'s own words: *"EVC is a 30 m
+  average over a square mile and one number cannot tell an even 60% from a mosaic of gaps and closed
+  patches."* With the distribution in hand it can tell, so a floor that exists to hedge an unknown
+  stops being necessary. The 18.5% of forested cells holding a fourth vegetation type also stop being
+  four draws and become a real fraction.
+- **Costs:** today's veg block is about nine values a row; a distribution summary is 25–35, so
+  `cells.json` grows something like 2–3× over the wire — order 2–3 MB against 1.05 MB now, on top of
+  access's 2.23–2.64 MB up front. **Measure it, do not estimate it**, before choosing this shape.
+- **Does not answer the question above.** It still hands the user one number per square mile. The good
+  acre is inside that number, not on the map.
+
+**Option B — per-pixel tiles.** Emit a derived per-pixel habitat quality as a raster tile pyramid the
+map draws at high zoom.
+
+- **Buys:** the actual ask — *where* the good ground is, not that it exists.
+- **Costs:** the bigger build. One byte of derived quality per pixel is ~138 MB raw statewide, which
+  compresses hard as thematic PNG and is **fetched lazily per viewport**, so the download is not the
+  problem — the pyramid, the encoder, zoom handling and cancellation are. "The vector tile loader is
+  deleted" already points the way: *"If the 30 m layer is raster, Leaflet's own tile layer does all of
+  it already."* Start there rather than recovering `src/tile-source.mjs`.
+- **The deep question it raises, which is the real reason not to decide now:** does the **score** go
+  per-pixel, or does the score stay per-cell with the tiles as a "where to walk" overlay? Per-pixel
+  scoring puts a resolution mismatch into everything downstream — Top spots ranks square miles, the
+  access axis is per-cell and would stay per-cell, the filters count cells, and `withAccess()` joins
+  on the cell that contains a point. An overlay avoids all of that and answers the question anyway.
+  This is a design decision, not an implementation detail, and it wants its own before-and-after.
+
+They are not exclusive: A is a cheap read off the same checkpoint, and B can follow it. Deciding
+after the fetch costs nothing and lets the choice be informed.
+
+**Both would give the sub-mile refine something to work with.** `FINE_SIZES` already re-scores at
+0.007°, 0.005° and 0.0035° when the map is zoomed in far enough — 779 × 526 m down to 390 × 263 m,
+which is **456, 233 and 114 pixels of 30 m**. Today that refine has the same four quarter points to
+work from as the whole square mile does, so it varies by terrain and weather and not by vegetation at
+all. Option B feeds it directly; option A only if the summary is stored in a form a sub-cell can be
+read out of, which is a reason to think about the sub-mile case *before* choosing the summary's
+shape rather than after.
+
+#### Sequencing: the band reading comes first. The user's call, 2026-09-12
+
+**Take the mid-October band reading on today's habitat, then rebuild.** The user's reasoning, which is
+the part that gets forgotten and reversed:
+
+> *"Band reading in October on today's habitat first, then rebuild. Four weeks costs nothing and keeps
+> the season's one calibration interpretable."*
+
+The bands (25/45/65/80) were calibrated against an older, more optimistic distribution and nothing
+reaches "very high" — as of 2026-09-12 the deployed app reports **622 sq mi at medium+ of 48,032
+(1.3%)** with a ceiling of **75**. A habitat rebuild re-bases habitat scores. Do both at once and the
+October reading cannot separate *"the weather finally got good"* from *"habitat was re-based"*, and the
+one calibration this season offers is spent. **Do not reorder this to get the rebuild started sooner.**
+
+#### Batch the re-bake, because re-bakes are rare by rule
+
+Hard rule 3 says `cells.json` is not regenerated unless asked, so a re-bake is an event, and
+everything that wants one should ride along:
+
+- **The elevation plausibility check** — already queued above under Terrain, explicitly *"when
+  `cells.json` is next re-baked for another reason"*: reject an implausible own elevation and record
+  `slope 0 / aspect null` rather than a repaired guess. 6 of 48,032 cells, all scoring ≤5.
+- **PRISM precipitation multipliers, SSURGO soil water capacity, NIFC fire perimeters** — the three
+  still-wanted inputs, all needing a re-bake, none belonging in the UI.
+
+Doing the habitat rebuild as a solo re-bake and then discovering PRISM wants another one is the
+avoidable mistake here.
+
