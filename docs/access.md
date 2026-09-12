@@ -1252,10 +1252,42 @@ worst case is the figure that describes the day they actually had.
 - **The worst case never beats walking the drive's own road**: 182 rows (0.4%),
   the same cause.
 - The deepest drives in the state — 141 minutes, 35 miles — are a **border
-  artifact**: the bake holds Washington's roads only, so a cell 600 m from the
-  Idaho line drives around inside the state rather than 4 miles east to Idaho
-  pavement. 167 of the 780 cells with a drive over an hour are within 15 km of a
-  border, against 11% of cells overall. [ROADMAP.md](../ROADMAP.md).
+  artifact**, and the sheet now says so; see below. 167 of the 780 cells with a
+  drive over an hour are within 15 km of a border, against 11% of cells overall.
+
+### The edge of the data is a figure of its own
+
+The bake holds Washington's roads and about 2.8 km past them — the fetch's tile
+padding — and nothing beyond. So near a **land** border the way round it found may
+be the only way it can see. The state's deepest drive is the proof: 141 minutes and
+35 miles for a cell 2.7 km from the Idaho line, whose nearest pavement is 4 miles
+east in Idaho, 1.6 km outside the data.
+
+Reporting that as 35 miles and saying nothing is the failure mode this project
+keeps legislating against, so the sheet says it:
+
+> *The bake holds Washington's roads only, and they stop about 3.4 mi from here at
+> the Idaho line — a shorter way in from Idaho would not be in this figure.*
+
+The rule: `edgeDoubt(lat, lon, metres)` fires when the border plus the padding is
+closer than **half** the figure's own length, which is `EDGE_DOUBT_SHARE`. It is
+computed per figure, so a short drive near the line says nothing while a long one
+does, and it is printed **once per sheet**, on the first figure it applies to —
+three copies of the same paragraph is how a caveat becomes furniture. It fires for
+892 of 46,923 cells (1.9%): 578 near British Columbia, 176 near Idaho, 138 near
+Oregon; 501 on a drive figure, 464 on a hike, 822 on a worst case.
+
+Which borders count is the part worth getting right. `WA_LAND_BORDER` is the first
+fourteen vertices of the state outline — the 49th parallel, the Idaho line, the
+46th parallel and the Columbia to its mouth. **The Pacific coast and the Strait of
+Juan de Fuca are left out on purpose**: no road is missing out there, and including
+them would put the caveat on every coastal cell, which is how a real warning gets
+ignored.
+
+Nothing is stored for any of this — a cell's position and the figure's own length
+are enough — so it needed no re-bake and no format bump. The one case it gets
+wrong is a **regional** bake, whose coverage ends at its own bbox rather than at
+the state line; the shipped file is always statewide.
 
 ### What it costs
 

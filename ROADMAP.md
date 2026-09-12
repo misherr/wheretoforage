@@ -115,37 +115,75 @@ Where the drive's 0.35 MB went, and what is left to pull if it ever needs pullin
 None of this is urgent at 2.24 MB. The trigger to act is `access.json` over the
 wire passing 3 MB, or anyone reporting that "Show the route" hangs.
 
-### The inferred junctions could be replaced by real ones for one tag-only pass
+### QUEUED: ask Overpass for node ids, and stop inferring junctions
 
-**Measured 2026-09-11.** 9.3% of the network's joins are ones OSM does not
-confirm, and removing them all moves 1.7% of difficulty buckets
+**Queued at the user's request, 2026-09-11, with the cost measured.** This is the
+fix for the weakest part of the access build: 9.3% of the network's 1.56 million
+joins are connections OpenStreetMap does not assert, and removing them all moves
+6.2% of hike figures and 1.7% of difficulty buckets
 ([access.md](docs/access.md#the-inferred-junctions-are-wrong-about-9-of-the-time-and-it-costs-about-17-of-the-buckets)).
-Three fixes, in increasing cost:
 
-1. **Node ids by tag-only query.** The checkpoint threw away node ids because the
-   fetch asked for `out geom`. `way(bbox); out skel;` returns id plus node ids and
-   nothing else — no tags, no coordinates — which is a fraction of the original
-   payload over the same 316 tiles. Two ways sharing a node id are connected, full
-   stop; everything else becomes an inference to drop or keep on its own merits.
-   This is the fix, and it is a checkpoint schema 4 upgrade, not a re-fetch.
-2. **Bridge, tunnel and layer tags**, the same way schema 2 and 3 backfilled the
-   tags that describe a road: 23,250 bridge ways, 3,273 tunnel and 24,056 with a
-   layer tag statewide. It would let the `onJoin` hook veto a crossing between two
-   different layers — the 2.5% of joins that are certainly false — without
-   touching the rest. Cheaper than (1) and much narrower.
-3. **The Geofabrik extract** below, which gives the true topology and removes the
-   question rather than measuring it.
+**What it is.** The fetch asked for `out geom`, which returns each way's geometry
+and not its node ids, so the checkpoint has no topology and `buildNetwork` infers
+it — ends within 15 m, an end on a side, two lines crossing. `out skel` returns the
+opposite: way id plus node ids, no tags and no coordinates. **Two ways sharing a
+node id are connected. Full stop.** No snap radius, no crossing test, no judgement.
 
-Do not build a rule on vertex evidence: 25 m simplification deletes the shared
-node from the line, and the test fails on 81% of real crossings.
+**What it costs — measured, same selector, same mirror, 2026-09-11:**
+
+| tile | `out geom` (the fetch) | `out skel` (the backfill) |
+| --- | --- | --- |
+| Seattle, dense | 24.71 MB, 6 s | 4.59 MB, 3 s |
+| Snoqualmie forest | 3.67 MB, 1 s | 0.85 MB, 1 s |
+| Columbia basin, sparse | 1.03 MB, 1 s | 0.25 MB, 1 s |
+
+**19% of the payload**, so about **180 MB over the same 316 tiles** against the
+~930 MB the statewide fetch moved — and minutes rather than the hours that fetch
+took, because the tiles are cheap to answer and nothing is re-simplified. It is a
+**checkpoint schema 4 upgrade**, exactly like schema 2 (USFS by page) and schema 3
+(the tags that close a road to cars): the geometry already in hand is kept, one new
+field is added per way, and everything after the fetch re-assembles for free.
+
+**What it would fix.** Every OSM-to-OSM join becomes a fact: the ~87% OSM confirms
+stay, the rest go, and the 4.3% of real connections the inference currently misses
+appear. The measured error would drop to whatever the USFS ways contribute, which
+is the part node ids cannot settle — a USFS way can never share an OSM node, so
+those joins stay inferred and keep the sampled rates as their error bar. The
+`onJoin` hook is where the rule would go: it already sees both way ids.
+
+**Why it is not urgent.** The errors concentrate where nobody forages: 4.6%
+unconfirmed where both ways are forest classes against 20.4% in town, and the
+buckets — which is what the sheet actually shows — move by 1.7% even if every
+unconfirmed join is deleted. The figures are honest about being "as mapped"
+already.
+
+**Two notes for whoever does it.** Node ids say *whether* two ways meet, not
+*where*: keep the existing geometric contact point and gate it on the shared node,
+rather than trying to place a junction from an id. And do not build anything on
+vertex evidence — 25 m simplification deletes the shared node from the stored line,
+so that test fails on 81% of real crossings.
+
+**A narrower stopgap, if it is ever wanted without the 180 MB:** backfill bridge,
+tunnel and layer tags the way schema 2 and 3 backfilled the road descriptors —
+23,250 bridge ways, 3,273 tunnel and 24,056 with a layer tag statewide — and let
+the hook veto a crossing between two different layers. That is the 2.5% of joins
+that are certainly false, for a few tag-only queries. The **Geofabrik extract**
+below is the other end of the scale: it makes the question disappear rather than
+answering it.
 
 ### The bake holds Washington's roads only, so a border cell drives the long way
 
-**Known, measured, not fixed.** The five deepest drives in the state — up to 141
-minutes and 35 miles — are cells within a kilometre of the Idaho line whose nearest
-pavement is 4 miles east, in Idaho, which the bake does not hold. 167 of the 780
-cells with a drive over an hour are within 15 km of a border, against 11% of cells
-overall. The worst-case walk has the same edge.
+**Measured, said out loud, not fixed.** The five deepest drives in the state — up
+to 141 minutes and 35 miles — are cells within three kilometres of the Idaho line
+whose nearest pavement is 4 miles east, in Idaho, which the bake does not hold. 167
+of the 780 cells with a drive over an hour are within 15 km of a border, against
+11% of cells overall. The worst-case walk and the hike have the same edge.
+
+Since 2026-09-11 the tap sheet **names it** on the cells it can affect — 892 of
+46,923, once per sheet, naming the neighbour
+([access.md](docs/access.md#the-edge-of-the-data-is-a-figure-of-its-own)). That
+turns a wrong number into a caveated one, which is the honest interim; it does not
+make the figure right.
 
 The fix is an apron: fetch a 20 km band into Idaho, Oregon and British Columbia and
 keep it in the network without stamping cells from it. It is a re-fetch of new

@@ -135,6 +135,36 @@ test('format: the drive columns decode, and no pavement is not no figure', () =>
   assert.equal(AC.driveMetres(d), 4827);
 });
 
+test('the edge of the data: a border cell says so, an inland cell never does', () => {
+  /* The bake holds Washington's roads only, so a cell near a LAND border can be handed the long way
+     round. The coast is not such a border — nothing is missing in the Pacific — and flagging every
+     coastal cell would turn the caveat into noise. */
+  const idaho = AC.borderDistance(48.4372, -117.0687);          // the state's deepest drive
+  assert.equal(idaho.who, 'Idaho');
+  assert.ok(idaho.m < 4000, 'and it is two and a half kilometres from the line');
+  assert.equal(AC.borderDistance(48.98, -121.0).who, 'British Columbia');
+  assert.equal(AC.borderDistance(45.70, -122.60).who, 'Oregon');
+  assert.ok(AC.borderDistance(47.62, -122.33).m > 100000, 'Seattle is nowhere near a land border');
+  assert.ok(AC.borderDistance(47.30, -124.30).m > 100000, 'and the Pacific coast is not a land border');
+  assert.ok(!AC.WA_LAND_BORDER.some(p => p[1] > 46.5 && p[0] < -124),
+    'no coastal vertex is in the land border, or every coastal cell reads as doubtful');
+
+  assert.ok(AC.edgeDoubt(48.4372, -117.0687, 56800), '35 miles of driving 2.7 km from Idaho is doubtful');
+  assert.equal(AC.edgeDoubt(48.4372, -117.0687, 4000), null, 'two miles of it is not');
+  assert.equal(AC.edgeDoubt(47.40, -121.40, 56800), null, 'and an inland cell is never doubtful, however long the figure');
+  assert.match(AC.borderNote(AC.edgeDoubt(48.4372, -117.0687, 56800)),
+    /Washington's roads only[\s\S]*Idaho/, 'the note names what is missing and whose it is');
+  assert.equal(AC.borderNote(null), '', 'and says nothing when there is nothing to say');
+
+  const line = app.slice(app.indexOf('function edgeLine'), app.indexOf('function driveBlock'));
+  assert.match(line, /edgeDoubt\(e\.lat,e\.lon,metres\)/, 'measured at the cell, against that figure');
+  assert.match(app, /edgeLine\(e,dim,h\.on\+h\.off\)/, 'said on the hike figure');
+  assert.match(app, /edgeLine\(e,dim,driveMetres\(d\)\)/, 'on the drive');
+  assert.match(app, /edgeLine\(e,dim,W\.on\)/, 'and on the worst case');
+  assert.match(app, /if\(edgeSaid\) return '';/, 'said once per sheet, not once per figure');
+  assert.match(app, /edgeSaid=false;\s+h\+=\(MODE==='drive'/, 'and reset where the section starts');
+});
+
 test('filter: the drive filter counts the drive alone; the sort counts the whole journey', () => {
   const state = app.slice(app.indexOf('const WITHIN='), app.indexOf('const withinOK='));
   assert.match(state, /drive:\[15,30,60,120\]/, 'half an hour of driving is one of the choices');

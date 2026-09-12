@@ -127,6 +127,15 @@ while nothing throws.
   of the drivable network this code calls unpaved is `highway=residential` — timing those at 15 mph is
   not pessimism, it is wrong about a street.
   [docs/access.md](docs/access.md#getting-there-by-car-the-drive-mode)
+- **Where the data ends, the sheet says so.** The bake holds Washington's roads and about 2.8 km
+  past them, so a cell near a LAND border can be handed the long way round: the state's deepest
+  drive, 141 minutes and 35 miles, is a cell 2.7 km from Idaho whose nearest pavement is four miles
+  east, in Idaho. `edgeDoubt()` fires when the data ends inside half a figure's own length, and the
+  tap sheet prints one line naming the neighbour — 892 of 46,923 cells, once per sheet rather than
+  once per figure. The Pacific coast and the Strait are deliberately not borders for this: no road is
+  missing out there. Nothing is stored for it, so it costs no re-bake, and the one case it gets wrong
+  is a REGIONAL bake, whose coverage ends at its own bbox.
+  [docs/access.md](docs/access.md#the-edge-of-the-data-is-a-figure-of-its-own)
 - **Junctions are inferred, and the error rate is measured, not assumed.** 9.3% of the joins the
   network makes are ones OpenStreetMap does not confirm — 4.6% where both ways are forest classes,
   20.4% in town. Removing them all changes 6.2% of hike figures and 1.7% of difficulty buckets. The

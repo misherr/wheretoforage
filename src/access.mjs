@@ -14,7 +14,7 @@
 
 /* The lattice, so that "which cell contains this point" has exactly one answer. Importing grid.mjs
    is allowed and importing anything from src/model/ is not — a test enforces both directions. */
-import { cellKey } from './grid.mjs';
+import { cellKey, WA } from './grid.mjs';
 
 /* Distances are metres from the cell centre. A cell is roughly 1.6 km across, so NEAR is about "in
    this cell" and REACH is about "a short walk from it". */
@@ -609,6 +609,57 @@ export const travelMinutes = d => d ? driveMinutes(d) + footMinutes(d.walk) : nu
 export const DRIVE_NOTE =
   'The drive is from the nearest paved road, at 35 mph on pavement, 25 on a graded forest road and 15 '
   + 'on anything rougher. Snow, washouts, a locked gate nobody mapped and mud are not in it.';
+
+/* ===================== the edge of the data =====================
+
+   The bake holds Washington's roads and about 2.8 km past them — the tile padding — and nothing
+   beyond that. So a cell near a LAND border can be handed a way round that exists only because the
+   shorter way out of state is not in the file. The deepest drive in the state says it plainly: 141
+   minutes and 35 miles, for a cell 2 km from Idaho whose nearest pavement is 4 miles east, in Idaho.
+   167 of the 780 cells with a drive over an hour are within 15 km of a border, against 11% of cells
+   overall.
+
+   The rule that matters is which borders count. The first 14 vertices of the state outline are the
+   land ones — the 49th parallel, the Idaho line, the 46th parallel and the Columbia. The Pacific
+   coast and the Strait of Juan de Fuca are deliberately left out: no road is missing out there, and
+   flagging every coastal cell would turn a real caveat into noise.
+
+   Nothing is stored for this. A cell's position and the figure's own length are enough, which is why
+   it needed no re-bake — and why a REGIONAL bake is the one case it gets wrong: its coverage ends at
+   its own bbox, not at the state line. The shipped file is always a statewide bake. */
+export const WA_LAND_BORDER = WA.slice(0, 14);   // ...49th parallel, Idaho, 46th parallel, the Columbia to its mouth
+export const EDGE_PAD_M = 2800;          // how far past the last cell the fetch's tile padding reaches
+export const EDGE_DOUBT_SHARE = 0.5;     // doubt the figure when the data ends inside half its length
+
+const M_LAT_B = 111320;
+function segMetres(lat, lon, a, b) {     // a, b as [lon, lat], the outline's own order
+  const k = 111320 * Math.cos(lat * Math.PI / 180);
+  const ax = (a[0] - lon) * k, ay = (a[1] - lat) * M_LAT_B, bx = (b[0] - lon) * k, by = (b[1] - lat) * M_LAT_B;
+  const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+  const s = L2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / L2)) : 0;
+  return Math.hypot(ax + s * dx, ay + s * dy);
+}
+/* How far the nearest land border is, and whose it is. */
+export function borderDistance(lat, lon) {
+  let m = Infinity, seg = 0;
+  for (let i = 1; i < WA_LAND_BORDER.length; i++) {
+    const d = segMetres(lat, lon, WA_LAND_BORDER[i - 1], WA_LAND_BORDER[i]);
+    if (d < m) { m = d; seg = i - 1; }
+  }
+  /* segment 0 is the 49th parallel, 1 and 2 the Idaho line and the jog to the Snake, the rest Oregon */
+  return { m, who: seg === 0 ? 'British Columbia' : seg <= 2 ? 'Idaho' : 'Oregon' };
+}
+/* Whether a figure of this length, at this place, could be an artifact of the state-shaped hole in
+   the data — and if so, how far out the bake can see from here. */
+export function edgeDoubt(lat, lon, metres) {
+  if (lat == null || lon == null || !(metres > 0)) return null;
+  const b = borderDistance(lat, lon), reach = b.m + EDGE_PAD_M;
+  return reach < metres * EDGE_DOUBT_SHARE ? { who: b.who, border: b.m, reach } : null;
+}
+export const borderNote = d => d
+  ? 'The bake holds Washington\'s roads only, and they stop about ' + accessDistance(d.reach)
+    + ' from here at the ' + d.who + ' line — a shorter way in from ' + d.who + ' would not be in this figure.'
+  : '';
 
 /* v7 rows carry the mode columns after the three categories:
      hike:   on, onUp, off, offUp, parkEastM, parkNorthM, stop

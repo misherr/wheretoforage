@@ -488,6 +488,11 @@ cheap and catches what a spot check would not:
   deepest one is 4 miles away — in Idaho, which the bake does not hold. Without
   that check the 141-minute figure looks like a bug in the router rather than the
   edge of the data.
+- **Say the edge of the data where it applies, and count how often that is.** The
+  border caveat fires for 892 of 46,923 cells — 1.9%, which is a caveat. Had it
+  fired for 20% it would have been noise, and the first version did: including the
+  Pacific coast in the land border flagged every coastal cell for a road that does
+  not exist. Count before shipping a warning.
 - **Profile the speed classes before trusting them.** 61% of the drivable network
   `paved()` does not call pavement is `highway=residential`: the first version put
   all of it in the 15 mph class and 98.1% of every drive was "rough gravel". After

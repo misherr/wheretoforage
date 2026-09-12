@@ -255,7 +255,8 @@ import { classifyAccess, accessDetail, accessRank, accessDistance, gainLabel, ex
          NO_ON_TRAIL_NOTE, onRouteLabel, LINE_STYLE, LINE_CASING,
          decodeModes, footMinutes, bucketOf, durationLabel, BUSHWHACK_M, STOP_LABEL, AS_MAPPED_NOTE,
          WORST_CASE_NOTE, DIRECT_SAVES_MIN, decodeGeom as decodeAccessGeom,
-         driveMinutes, driveMetres, travelMinutes, DRIVE_NOTE, DRIVE_CLASSES, DRIVE_CLASS_LABEL } from './src/access.mjs';
+         driveMinutes, driveMetres, travelMinutes, DRIVE_NOTE, DRIVE_CLASSES, DRIVE_CLASS_LABEL,
+         edgeDoubt, borderNote } from './src/access.mjs';
 /* ===================== CONFIG ===================== */
 const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
 const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400; // local refine below 1 mi when zoomed way in
@@ -1233,6 +1234,7 @@ function showPoint(e,t){
       h+=`<dt>Access</dt><dd>${NOT_EXAMINED_LABEL}<br>${dim(NOT_EXAMINED_NOTE)}</dd></dl>`;
       pendingWay=-1;
     } else {
+      edgeSaid=false;
       h+=(MODE==='drive'?driveBlock(e,dim):hikeBlock(e,dim));
       h+=`<dt>Access</dt><dd>`
         +(ac.wayName?`<b>${ac.wayName}</b>`:ac.label)
@@ -1400,7 +1402,8 @@ function hikeBlock(e,dim){
   else t+=`${dim('Straight from the road: a car gets this close, as mapped.')}<br>`;
   t+=`${accessDistance(h.off)}${climb(h.offUp)} <span class="caveat">off trail</span>`
     +(h.off>BUSHWHACK_M?` ${dim('— more than '+accessDistance(BUSHWHACK_M)+' of it, which is what makes this a bushwhack')}`:'')
-    +` <a href="#" class="drawroute">Show the route</a><br>${dim(AS_MAPPED_NOTE)}</dd>`;
+    +` <a href="#" class="drawroute">Show the route</a><br>${dim(AS_MAPPED_NOTE)}`
+    +edgeLine(e,dim,h.on+h.off)+`</dd>`;
   t+=worstBlock(e,dim,min);
   /* The bake stored it against an estimated climb; shown only if it still saves enough with the measured one. */
   const D=M.direct;
@@ -1418,7 +1421,24 @@ function worstBlock(e,dim,ref){
   const wm=footMinutes(W);
   return `<dt>If the gravel is gated</dt><dd>`+(wm>ref+5
     ? `<b>${durationLabel(wm)}</b> ${dim('· '+bucketOf(W).label)} — ${accessDistance(W.on)}${climb(W.onUp)} from the nearest paved road, then ${accessDistance(W.off)} off trail<br>${dim(WORST_CASE_NOTE)}`
+      + edgeLine(e,dim,W.on)
     : dim('No different: this approach does not depend on a gravel road staying open.'))+`</dd>`;
+}
+
+/* The edge of the data, said where it could have made the figure longer than the truth: near a land
+   border the bake holds Washington's roads only, so the way round it found may be the only way it
+   could see. 892 of 46,923 cells qualify on at least one figure — 1.9%, which is why this is a line
+   on those cells rather than a note on every cell.
+
+   Once per sheet, on the first figure it applies to. It is true of every figure below it as well, and
+   printing the same paragraph three times is how a real caveat becomes furniture. */
+let edgeSaid=false;
+function edgeLine(e,dim,metres){
+  if(edgeSaid) return '';
+  const d=edgeDoubt(e.lat,e.lon,metres);
+  if(!d) return '';
+  edgeSaid=true;
+  return `<br>${dim(borderNote(d))}`;
 }
 
 /* The drive figure: how deep into the forest road network the cell sits, and the walk that is left.
@@ -1442,7 +1462,8 @@ function driveBlock(e,dim){
       +(w.off>BUSHWHACK_M?` ${dim('— more than '+accessDistance(BUSHWHACK_M)+' of it, which is what makes this a bushwhack')}`:'')
       +` <a href="#" class="drawroute">Show the route</a><br>`;
   } else t+=`${dim('A road runs into this cell: no walk at all, as mapped.')}<br>`;
-  t+=`${dim('Door to cell, '+durationLabel(travelMinutes(d))+'. '+DRIVE_NOTE)}<br>${dim(AS_MAPPED_NOTE)}</dd>`;
+  t+=`${dim('Door to cell, '+durationLabel(travelMinutes(d))+'. '+DRIVE_NOTE)}<br>${dim(AS_MAPPED_NOTE)}`
+    +edgeLine(e,dim,driveMetres(d))+`</dd>`;
   return t+worstBlock(e,dim,travelMinutes(d));
 }
 
