@@ -223,8 +223,12 @@ export function decodeWay(w, geomFlat) {
    from that point to the cell, which is why 924 cells reported a walk of exactly 0 while the way was
    up to 1.9 km away. See docs/access.md. */
 /* v9 splits the file: the base carries the categories and the worst case, and each mode's columns
-   live in their own file, fetched when that mode is on screen. See MODE_FILES and BASE_WIDTH. */
-export const ACCESS_FORMAT = 9;
+   live in their own file, fetched when that mode is on screen. See MODE_FILES and BASE_WIDTH.
+
+   v10 gives each RIDING mode its own worst case. Up to v9 the "if the gravel is gated" figure was one
+   walk from the pavement, shown under all four modes — and for a rider that is the wrong quantity, not
+   a conservative one. See RIDE_WORST_NOTE. */
+export const ACCESS_FORMAT = 10;
 export const ROW_STRIDE = 5;
 export function decodeRow(row) {
   const d = {};
@@ -568,6 +572,23 @@ export const AS_MAPPED_NOTE =
 export const WORST_CASE_NOTE =
   'If the gravel turns out to be gated: the same walk from the nearest paved road.';
 
+/* The same premise, for a machine a gate does not stop. A gate nobody mapped is invisible to the
+   network, so every mode needs a bound for it — but "the same walk from the pavement" is that bound
+   only for the two modes the closure actually strands. On foot it is the walk; in a car the car is
+   stuck at the gate, so it is the same walk; on either kind of bike you unload at the pavement and
+   ride, which is the whole reason the machine is in the truck.
+
+   At Deming the walker's bound is 5.5 h. The dirt bike covers that gravel in a fraction of it, and
+   until v10 the sheet said 5.5 h under the dirt bike as well — a tenfold overstatement in precisely
+   the case the mode exists for. The rider's bound is still a bound: the ride starts at the pavement
+   rather than wherever the car got to, and every legal block still applies, so a road the Forest
+   Service has closed to motor vehicles stops the dirt bike at the gate whatever the gravel is doing. */
+export const RIDE_WORST_NOTE =
+  'If the gravel turns out to be gated: the same journey, unloading at the nearest paved road. '
+  + 'A gate stops the car, not the machine — which is why this figure is a ride and the hike\'s is a walk.';
+export const RIDE_WORST_BLOCKED_NOTE =
+  'Nothing rideable leaves the pavement here, so this is the walk — the same one the hike figure gets.';
+
 /* What stops a car, read from OSM tags — shared by the fetch and the checkpoint upgrade. Pessimistic:
    the most specific access tag wins, and anything short of a plain yes to cars is a stop. */
 const CAR_RESTRICTED = /^(private|no|permit|forestry|agricultural|delivery)$/;
@@ -852,8 +873,15 @@ export function motoExcludedNote(x) {
      base:   i, j, then per category [d, wayIndex, walk, gain, offGain], then worst [on, onUp, off, offUp]
      hike:   i, j, on, onUp, off, offUp, parkE, parkN, stop, then direct [on, onUp, off, offUp]
      drive:  i, j, pavedM, gradedM, roughM, up, on, onUp, off, offUp, parkE, parkN, stop
-     bike:   i, j, roadM, roughM, trailM, up, on, onUp, off, offUp, parkE, parkN, dismountE, dismountN, stop
+     bike:   i, j, roadM, roughM, trailM, up, on, onUp, off, offUp, parkE, parkN, dismountE, dismountN, stop,
+             then the mode's own worst case [roadM, roughM, trailM, up, on, onUp, off, offUp, stop]
      moto:   i, j, the same shape as bike
+
+   The base file's worst case still serves the hike and the drive, because a gate strands both of them
+   on foot at the pavement; only the two riding modes carry one of their own, and only they need nine
+   more columns for it. The rider's worst case has no park point and no route: the sheet states the
+   figure and draws the mode's actual approach, and a second geometry per cell per riding mode would
+   cost more than the bound is worth.
 
    A park point is metres east and north of the cell centre rather than an index into a table, so a
    regional merge has nothing to re-point. */
@@ -861,7 +889,9 @@ export const WORST_AT = 2 + 3 * ROW_STRIDE;
 export const BASE_WIDTH = WORST_AT + 4;
 export const MODES_IN_FILE = ['hike', 'drive', 'bike', 'moto'];
 export const RIDE_MODES = ['bike', 'moto'];
-export const MODE_WIDTH = { hike: 13, drive: 13, bike: 15, moto: 15 };
+export const MODE_WIDTH = { hike: 13, drive: 13, bike: 24, moto: 24 };
+/* Where a riding mode's own worst case starts in its row: nine columns, the last the stop reason. */
+export const RIDE_WORST_AT = 15;
 export const modeFile = mode => 'data/access-' + mode + '.json';
 
 const modeGroup = (row, at) => row[at] != null && row[at] >= 0
@@ -869,9 +899,21 @@ const modeGroup = (row, at) => row[at] != null && row[at] >= 0
 const parkAt = (row, at, lat, lon) => lat != null && lon != null
   ? [lat + row[at + 1] / 111320, lon + row[at] / (111320 * Math.cos(lat * Math.PI / 180))] : null;
 
-/* The worst case lives in the base file: it is the same walk from the pavement whichever mode is on
-   screen, and every mode's block shows it. */
+/* The walker's worst case, in the BASE file because the hike and the drive share it: a closure leaves
+   both of them on foot at the pavement. The riding modes have their own, below, and every mode's block
+   shows one or the other. */
 export const decodeWorst = row => modeGroup(row, WORST_AT);
+
+/* A rider's own worst case: unloading at the nearest paved road and riding from there. The walk left
+   at the end is usually the mode figure's own — the ride ends at the same blocked edge whether it
+   started at the pavement or at the gate, only later — so -1 in its first column means "that walk",
+   which is smaller on the wire and is also the thing the sheet wants to be able to say. */
+const rideWorst = (row, at, walk) => {
+  if (!(row[at] >= 0)) return null;
+  return { road: row[at], rough: row[at + 1], trail: row[at + 2], up: Math.max(0, row[at + 3]),
+           walk: row[at + 4] >= 0 ? modeGroup(row, at + 4) : walk,
+           stop: row[at + 8] >= 0 ? row[at + 8] : STOP.none };
+};
 
 /* One mode's row, decoded into the shape the sheet reads. The ride modes share a shape — a bicycle
    and a dirt bike differ in their speeds and in what stops them, not in what is recorded. */
@@ -889,10 +931,11 @@ export function decodeModeRow(mode, row, lat, lon) {
   }
   if (RIDE_MODES.includes(mode)) {
     if (!(row[2] >= 0)) return {};
-    return { [mode]: { road: row[2], rough: row[3], trail: row[4], up: Math.max(0, row[5]),
-                       walk: modeGroup(row, 6) || { on: 0, onUp: 0, off: 0, offUp: 0 },
+    const walk = modeGroup(row, 6) || { on: 0, onUp: 0, off: 0, offUp: 0 };
+    return { [mode]: { road: row[2], rough: row[3], trail: row[4], up: Math.max(0, row[5]), walk,
                        park: parkAt(row, 10, lat, lon), dismount: parkAt(row, 12, lat, lon),
-                       stop: row[14] >= 0 ? row[14] : STOP.none } };
+                       stop: row[14] >= 0 ? row[14] : STOP.none,
+                       worst: rideWorst(row, RIDE_WORST_AT, walk) } };
   }
   return {};
 }

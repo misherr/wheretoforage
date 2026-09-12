@@ -118,16 +118,20 @@ every file, what it does, and the reasoning that is not obvious from reading it.
   to be added to that copy** — `ml`, `bk` and `closed` were once missing from it,
   which made the drive's 25 mph class unreachable and 9,106 `bicycle=no` ways
   block nothing.
-- **`data/access.json`** — the base file (v9): per-cell distance to the nearest
-  mapped trail, road and rough way, then the worst-case walk from the pavement,
-  keyed by cell index rather than row position. 5.8 MB, 1.5 MB over the wire.
-  Optional at runtime: without it every cell reads as unknown and the app is
-  otherwise unchanged.
+- **`data/access.json`** — the base file (v10): per-cell distance to the nearest
+  mapped trail, road and rough way, then the worst-case walk from the pavement —
+  which the hike and the drive share, the riding modes carrying their own — keyed by
+  cell index rather than row position. 6.05 MB, 1.54 MB over the wire. Optional at
+  runtime: without it every cell reads as unknown and the app is otherwise
+  unchanged.
 - **`data/access-hike.json`, `-drive.json`, `-bike.json`, `-moto.json`** — one
-  mode's columns each, 0.59–0.74 MB over the wire, fetched when that mode goes on
-  screen and merged into the per-cell objects the sheet reads. Up to v8 every mode
-  shared one row of one file, which was 2.93 MB over the wire with three modes and
-  every byte of it fetched by a viewer who uses one. `access-moto.json` also carries
+  mode's columns each, 0.61 MB (hike) to 1.00 MB (bike) over the wire, fetched when
+  that mode goes on screen and merged into the per-cell objects the sheet reads. Up
+  to v8 every mode shared one row of one file, which was 2.93 MB over the wire with
+  three modes and every byte of it fetched by a viewer who uses one. The two riding
+  files are the larger ones because each carries **its own worst case** (v10): the
+  "if the gravel is gated" bound ridden rather than walked, nine columns, which the
+  hike and the drive do not need and do not pay for. `access-moto.json` also carries
   `excluded`, the trail mileage its designation rule leaves out, so the sheet can
   say so from the data rather than from a constant.
 - **`data/access-routes/`** — the route each cell's figure walks, in **264 regional

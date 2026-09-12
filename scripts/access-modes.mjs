@@ -6,7 +6,9 @@
  *   bike    — the ride from where the car stops, and the walk that is left after that
  *   moto    — the same on a dirt bike, which is faster, stopped by the closed-roads layer, and only
  *             on singletrack the Forest Service records as open to motorcycles
- *   worst   — the same walk from the nearest paved road, for when the gravel is gated after all
+ *   worst   — the same walk from the nearest paved road, for when the gravel is gated after all,
+ *             and per RIDING mode the same premise ridden rather than walked: a gate stops the car,
+ *             not the machine, which is the whole reason one is in the truck
  *   direct  — straight through the brush, when that saves DIRECT_SAVES_MIN or more over `hike`
  * each as { on, onUp, off, offUp } in metres, plus where the car stops, why, and the route walked,
  * so the tap sheet can draw the line its figures describe.
@@ -62,6 +64,26 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
   const motoWalk = walkFrom(net, all.filter(n => isFinite(moto.min[n])), () => false, n => moto.min[n]);
   log('modes      moto blocks: ' + JSON.stringify(mBlocks.stats));
 
+  /* The two riders take the same shape, so they take the same code from here on: what differs is
+     upstream, in what each may use and how fast it goes. */
+  const RIDERS = [{ mode: 'bike', rideFn: bikeRide, veh: ride, walk: rideWalk, blocks },
+                  { mode: 'moto', rideFn: motoRide, veh: moto, walk: motoWalk, blocks: mBlocks }];
+
+  /* Each rider's own worst case: the same premise as the walker's — the gravel is gated where nobody
+     mapped a gate, so the car gets no further than the pavement — but RIDDEN. It is the same two-phase
+     computation as the figure above it with one thing changed, the sources: the pavement instead of
+     wherever the car reached. Everything else holds, so the bound is still a bound — a road the Forest
+     Service has closed to motor vehicles still stops the dirt bike whatever the gravel is doing.
+
+     The walker's version of this bound is right for the hike and for the drive, which a closure
+     strands on foot at the pavement either way, and it is in the base file for both. It was wrong for
+     the two riding modes by an order of magnitude: at Deming it read 5.5 h under the dirt bike. */
+  const pavedList = all.filter(n => pavedNode[n]);
+  for (const r of RIDERS) {
+    r.wVeh = r.rideFn(net, pavedList, r.blocks, worstFree);
+    r.wWalk = walkFrom(net, all.filter(n => isFinite(r.wVeh.min[n])), () => false, n => r.wVeh.min[n]);
+  }
+
   let drvE = 0, drvReached = 0;
   for (let e = 0; e < net.E; e++) if (drivable(net.W[net.eW[e]])) { drvE++; if (inR(net.eU[e]) && inR(net.eV[e])) drvReached++; }
   const stats = { ...net.st, car_reached_nodes: car.reach.reduce((a, b) => a + b, 0), paved_seeds: car.seeds,
@@ -69,6 +91,18 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
     drive: 0, drive_to_the_point: 0, drive_same_park: 0,
     bike: 0, bike_no_ride: 0, bike_blocks: null,
     moto: 0, moto_no_ride: 0, moto_blocks: null, moto_trail_miles: null,
+    bike_worst: 0, moto_worst: 0, bike_worst_stops: {}, moto_worst_stops: {},
+    /* What the rider's bound comes to, PER MODE — a median over both riders together would be quoted
+       later as one of them — and the two checks that say it is a bound at all: never quicker than the
+       mode's own figure (it starts further back), never slower than walking from the same pavement (a
+       rider may push). Those two are measured on the ROUTER's totals, which carry an ESTIMATED
+       off-trail climb while the stored figures carry a measured one, so they are not the same count as
+       the one docs/verification.md takes off the finished files. Counted rather than thrown on: the
+       approach scan may choose different points for the two, and a wave of violations would be the
+       bug, not a handful. */
+    worst_ride: { faster_than_figure: 0, slower_than_walking: 0,
+                  bike: { quicker: 0, saved_p50: null, saved_p90: null, saved_over_15: 0, no_ride: 0 },
+                  moto: { quicker: 0, saved_p50: null, saved_p90: null, saved_over_15: 0, no_ride: 0 } },
     stops: { none: 0, gate: 0, private: 0, rough: 0, end: 0 },
     drive_stops: { none: 0, gate: 0, private: 0, rough: 0, end: 0 },
     bike_stops: {}, moto_stops: {} };
@@ -95,6 +129,7 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
   log('modes      car reaches ' + (100 * drvReached / Math.max(1, drvE)).toFixed(1) + '% of drivable road from pavement');
 
   const out = new Map();
+  const saved = { bike: [], moto: [] };   // minutes each rider's bound beats the walker's, summarised below
   const parts = async (a, lat, lon) => a ? { on: Math.round(a.on), onUp: Math.round(a.onUp), off: Math.round(a.off),
     offUp: await offTrailClimb(a.point, [lat, lon]) } : null;
   for (const [key, [lat, lon, elev]] of cells) {
@@ -102,9 +137,8 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
     const hA = approaches(net, hike, hikeFree, lat, lon, () => elev);
     const wA = approaches(net, worst, worstFree, lat, lon, () => elev);
     const dA = driveApproaches(net, drv, driveWalk, lat, lon, () => elev);
-    const bA = vehicleApproaches(net, ride, rideWalk, lat, lon, () => elev);
-    const mA = vehicleApproaches(net, moto, motoWalk, lat, lon, () => elev);
-    if (!hA.primary && !wA.primary && !dA.primary && !bA.primary && !mA.primary) continue;
+    const rA = RIDERS.map(r => vehicleApproaches(net, r.veh, r.walk, lat, lon, () => elev));
+    if (!hA.primary && !wA.primary && !dA.primary && !rA.some(a => a.primary)) continue;
     const rec = { hike: await parts(hA.primary, lat, lon), worst: await parts(wA.primary, lat, lon),
                   direct: await parts(hA.direct, lat, lon), park: null, stop: STOP.none, route: null,
                   drive: null, driveRoute: null, bike: null, bikeRoute: null, moto: null, motoRoute: null };
@@ -134,9 +168,8 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
       if (rec.park && rec.drive.park[0] === rec.park[0] && rec.drive.park[1] === rec.park[1]) stats.drive_same_park++;
       rec.driveRoute = routeOf(net, driveWalk, d);
     }
-    /* The two riders take the same shape, so they take the same code: what differs is upstream, in
-       what each may use and how fast it goes. */
-    for (const [mode, A, veh, vWalk, blk] of [['bike', bA, ride, rideWalk, blocks], ['moto', mA, moto, motoWalk, mBlocks]]) {
+    for (let n = 0; n < RIDERS.length; n++) {
+      const r = RIDERS[n], A = rA[n], mode = r.mode, veh = r.veh, vWalk = r.walk, blk = r.blocks;
       if (!A.primary) continue;
       const b = A.primary;
       stats[mode]++;
@@ -150,6 +183,33 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
                             offUp: sameEnd && rec.hike ? rec.hike.offUp : await offTrailClimb(b.point, [lat, lon]) } };
       stats[mode + '_stops'][why] = (stats[mode + '_stops'][why] || 0) + 1;
       if (rec[mode].road + rec[mode].rough + rec[mode].trail === 0) stats[mode + '_no_ride']++;
+      /* And this rider's worst case. The off-trail climb is the measured one whenever the worst-case
+         approach leaves the network at the same place as a leg already measured, which is most of
+         them — the ride ends at the same blocked edge, it only takes longer to get there. */
+      const wR = vehicleApproaches(net, r.wVeh, r.wWalk, lat, lon, () => elev);
+      if (wR.primary) {
+        const q = wR.primary, near = a => a && a.edge === q.edge && Math.abs(a.arc - q.arc) < 1;
+        const walk = { on: Math.round(q.on), onUp: Math.round(q.onUp), off: Math.round(q.off),
+                       offUp: near(b) ? rec[mode].walk.offUp
+                            : near(hA.primary) && rec.hike ? rec.hike.offUp
+                            : await offTrailClimb(q.point, [lat, lon]) };
+        rec[mode].worst = { road: Math.round(q.drive.road), rough: Math.round(q.drive.rough),
+                            trail: Math.round(q.drive.trail), up: Math.round(q.drive.up), walk,
+                            stop: q.stopNode >= 0 ? rideStopReason(net, q.stopNode, blk) : STOP.none };
+        stats[mode + '_worst']++;
+        stats[mode + '_worst_stops'][rec[mode].worst.stop] = (stats[mode + '_worst_stops'][rec[mode].worst.stop] || 0) + 1;
+        const ws = stats.worst_ride;
+        if (wR.primary.total < A.primary.total - 1) ws.faster_than_figure++;
+        if (wA.primary && wR.primary.total > wA.primary.total + 1) ws.slower_than_walking++;
+        if (!(q.drive.road + q.drive.rough + q.drive.trail >= 100)) ws[mode].no_ride++;
+        /* The median is over the cells where the bound DIFFERS. Including the ones with nothing to
+           ride, where the saving is zero by construction, made it 41 min against the 58 the same
+           figure comes to off the finished files — one name over two populations. */
+        if (wA.primary) {
+          const s = wA.primary.total - wR.primary.total;
+          if (s > 1) { ws[mode].quicker++; saved[mode].push(s); if (s >= 15) ws[mode].saved_over_15++; }
+        }
+      }
       /* The ride IS drawn, unlike the drive: riding past a gate is what the figure is about. */
       rec[mode + 'Route'] = { edges: [...vehiclePathTo(net, veh, b.stopNode >= 0 ? b.stopNode : b.edgeFrom),
                                       ...(b.from === 'drive' ? [] : routeOf(net, vWalk, b).edges)],
@@ -161,6 +221,23 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
     out.set(key, rec);
     if (stats.cells % 10000 === 0) log('modes      ' + stats.cells.toLocaleString() + ' cells');
   }
+  for (const mode of RIDE_MODES) {
+    const s = saved[mode]; if (!s.length) continue;
+    s.sort((a, b) => a - b);
+    const at = p => Math.round(s[Math.min(s.length - 1, Math.floor(s.length * p))]);
+    stats.worst_ride[mode].saved_p50 = at(0.5); stats.worst_ride[mode].saved_p90 = at(0.9);
+  }
+  for (const mode of RIDE_MODES) {
+    const w = stats.worst_ride[mode];
+    log('modes      ' + mode + ' if the gravel is gated: ' + stats[mode + '_worst'].toLocaleString()
+      + ' cells, ' + w.quicker.toLocaleString() + ' of them quicker than walking from the same pavement'
+      + ' by a median ' + w.saved_p50 + ' min (p90 ' + w.saved_p90 + '), 15 min or more for '
+      + w.saved_over_15.toLocaleString() + '; ' + w.no_ride.toLocaleString()
+      + ' with nothing rideable leaving the pavement');
+  }
+  log('modes      and the bound is a bound, on the router\'s own totals: '
+    + stats.worst_ride.faster_than_figure + ' quicker than the figure they bound, '
+    + stats.worst_ride.slower_than_walking + ' slower than walking');
   return { modes: out, net, stats };
 }
 
@@ -297,9 +374,19 @@ export function modeColumns(mode, rec) {
                 v.park[0], v.park[1], v.stop] : [-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, -1];
   }
   const k = rec && rec[mode];
-  return k ? [k.road, k.rough, k.trail, k.up, k.walk.on, k.walk.onUp, k.walk.off, k.walk.offUp,
-              k.park[0], k.park[1], k.dismount[0], k.dismount[1], k.stop]
-           : [-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, -1];
+  if (!k) return [-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, -1, ...new Array(9).fill(-1)];
+  /* The walk left after the worst-case ride is usually the mode figure's own — the ride ends at the
+     same blocked edge, it just started further back — so it is stored once, and -1 in its first
+     column means "that walk". A walk of zero metres is a real answer here, which is why the sentinel
+     is negative. */
+  const w = k.worst;
+  const same = w && w.walk.on === k.walk.on && w.walk.onUp === k.walk.onUp
+                 && w.walk.off === k.walk.off && w.walk.offUp === k.walk.offUp;
+  return [k.road, k.rough, k.trail, k.up, k.walk.on, k.walk.onUp, k.walk.off, k.walk.offUp,
+          k.park[0], k.park[1], k.dismount[0], k.dismount[1], k.stop,
+          ...(w ? [w.road, w.rough, w.trail, w.up,
+                   ...(same ? [-1, -1, -1, -1] : [w.walk.on, w.walk.onUp, w.walk.off, w.walk.offUp]), w.stop]
+                : new Array(9).fill(-1))];
 }
 /* Does this cell have anything to say in this mode? A row of -1s is not written. */
 export function hasMode(mode, rec) {

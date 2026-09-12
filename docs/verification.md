@@ -590,3 +590,52 @@ Two lessons, and the first is the one from the section above:
   objectid. The fix was to re-fetch the trail records with their geometry and replace the old ones
   outright, the way schema 2 re-paged the roads: the layer is 3,408 features statewide, so the
   "expensive" option costs four requests.
+
+## The rider's worst case, checked
+
+The "if the gravel is gated" figure had been one walk from the pavement, shown under every mode, since
+v6. Changing a figure that old wants more than "the new number looks smaller", so v10's was checked
+three ways.
+
+**It is a bound.** Two properties have to hold on every cell, and they are opposite in direction:
+
+- **Never quicker than the mode's own figure.** The worst case starts at the pavement; the figure
+  starts wherever the car reached, which is a superset of the pavement, so more sources can only be
+  quicker. **362 cells of 93,268 read otherwise (0.4%)**, and none of those numbers reaches a
+  viewer: the sheet says "no different" whenever the bound is within five minutes of the figure
+  beside it.
+- **Never slower than walking the same road.** A rider may always push, so the walker's bound is a
+  ceiling. **371 cells (0.4%)** — the same share the drive's worst case has had since v7.
+
+The 0.4% was attributed rather than shrugged at, in order of size: the off-trail climb is
+*estimated* while an approach is chosen and *measured* afterwards (251 of the 362); "the nearest
+paved road" can be pavement the car cannot actually reach, behind a gate, which the walker's bound has
+always allowed and the rider's now inherits (93); and the two scans picked different approach points
+outright (18). **The bake's own counter says 57, not 362** — it compares the totals the router chose
+on, which carry the estimated off-trail climb, while this count reads the finished files. Two
+measurements of one property, and the disagreement between them is the estimate, which is worth
+knowing rather than reconciling away.
+
+Both are counted in the bake itself — `stats.worst_ride` — rather than only in a test, because the
+fixture that proves the logic cannot prove it against 46,634 real cells. A wave of violations in
+either direction would mean the sources were wrong; a handful would mean the approach scan chose
+different points, which it is allowed to do.
+
+**The figure moves, and by how much.** The bicycle's bound beats the walk for 38,349 of 46,634
+cells (82.2%) by a median 58 minutes; the dirt bike's for 37,255 (79.9%) by a median 74, and by
+more than two hours for 12,638 of them. At Deming — the cell this whole caveat exists for — 5.5 h becomes **1.5 h** on the
+dirt bike and 3 h on the bicycle. The largest correction in the state is 14 h against 2 h, a cell in
+the Colville forest 28 miles up a road from the nearest pavement.
+
+Two figures are unchanged on purpose: the hike and the drive still read the same walk out of the base
+file, because a closure leaves both of them on foot at the pavement. If those had moved, something
+would be wrong.
+
+**The sheet says the new thing.** A regex over `index.html` proves a call is written; it does not
+prove the words that come out. So `worstBlock` is now **extracted from index.html and run** against a
+record shaped like Deming, with the app's module scope handed in and `MODE` as a parameter — the
+assertion is on the rendered text: a rider is told a ride, a walker is told the walk, and a rider with
+nothing rideable at the pavement is told the walk *and why*. The regex-only version of that test
+passed unchanged when the rider branch was disabled with `const ridden=false&&…`; the runnable one
+fails on the first assertion. That is the same gap as a log line reporting 9,106 blocked ways that
+blocked nothing — see [Assert on the effect, not on the log](#assert-on-the-effect-not-on-the-log).

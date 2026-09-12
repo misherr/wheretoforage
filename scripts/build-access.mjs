@@ -37,7 +37,7 @@ import { REGIONS, decodePNG, terrariumMetres, tileXY, TERRAIN_SOURCE } from './b
 import { computeModes, routesFile, modeColumns, worstColumns, hasMode, mergeRoutes, shardRoutes } from './access-modes.mjs';
 
 export const GENERATOR = 'scripts/build-access.mjs';
-export const GENERATOR_VERSION = '9.0.0';
+export const GENERATOR_VERSION = '10.0.0';
 /* What a checkpoint holds, which is not the same question as which generator wrote it. Schema 2 keeps
    what the sources SAY — USFS maintenance level and trail_type, one way per USFS path, the OSM tags
    that describe a road — and nothing the rules derive, because the rules now run at assembly. A
@@ -1575,7 +1575,13 @@ export async function build(opts, deps = {}) {
       if (!hasMode(mode, rec)) continue;
       const [ri, rj] = k.split(':').map(Number);
       if (!inBbox(...cellCenter(ri, rj), opts.bbox)) continue;
-      list.push([ri, rj, ...modeColumns(mode, rec)]);
+      const row = [ri, rj, ...modeColumns(mode, rec)];
+      /* A row one column out is not an error in the app, it is a different figure: every column after
+         the missing one decodes as its neighbour. Checked here, where the file is written, because the
+         width is the contract between the bake and src/access.mjs. */
+      if (row.length !== MODE_WIDTH[mode]) throw new Error('the ' + mode + ' file wants rows of '
+        + MODE_WIDTH[mode] + ' and this one is ' + row.length + ' — MODE_WIDTH and modeColumns disagree');
+      list.push(row);
     }
     list.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
     modeRows[mode] = list;

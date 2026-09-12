@@ -255,7 +255,8 @@ import { classifyAccess, accessDetail, accessRank, accessDistance, gainLabel, ex
          NO_ON_TRAIL_NOTE, onRouteLabel, LINE_STYLE, LINE_CASING,
          decodeWorst, decodeModeRow, MODES_IN_FILE, modeFile,
          footMinutes, bucketOf, durationLabel, BUSHWHACK_M, STOP_LABEL, AS_MAPPED_NOTE,
-         WORST_CASE_NOTE, DIRECT_SAVES_MIN, decodeGeom as decodeAccessGeom,
+         WORST_CASE_NOTE, RIDE_WORST_NOTE, RIDE_WORST_BLOCKED_NOTE, RIDE_MODES,
+         DIRECT_SAVES_MIN, decodeGeom as decodeAccessGeom,
          driveMinutes, driveMetres, travelMinutes, DRIVE_NOTE, DRIVE_CLASSES, DRIVE_CLASS_LABEL,
          edgeDoubt, borderNote,
          rideMinutes, rideMetres, bikeTravelMinutes, BIKE_NOTE, BIKE_PARK_NOTE, BIKE_CLASSES,
@@ -1465,16 +1466,47 @@ function hikeBlock(e,dim){
   return t;
 }
 
-/* The worst case: the same walk from the nearest paved road, for when the gravel turns out to be
-   gated where nobody mapped a gate. Shown beside whichever mode's figure is on screen, because a gate
-   nobody mapped is invisible to both of them — that is the Deming case. `ref` is the minutes the mode
-   on screen claims, so "no different" means no different from what you just read. */
+/* The worst case: what it costs when the gravel turns out to be gated where nobody mapped a gate.
+   Shown beside whichever mode's figure is on screen, because a gate nobody mapped is invisible to all
+   of them — that is the Deming case, and the worst case is what makes it visible. `ref` is the minutes
+   the mode on screen claims, so "no different" means no different from what you just read.
+
+   It is a WALK from the pavement for the hike and the drive, which a closure strands on foot either
+   way, and the base file carries that one walk for both. For the two RIDING modes it is a ride from
+   the pavement, out of the mode's own file: a gate stops the car, not the machine. Until v10 the sheet
+   told a rider the Deming gravel was a 5.5-hour walk; on the dirt bike it is 1.5 h, and at the worst
+   cell in the state 14 h became 2 h. An overstatement is not automatically the safe direction — this
+   one was wrong in exactly the case the dirt bike exists for. Where nothing rideable leaves the
+   pavement the walk IS the bound, and the walker's figure below is what gets shown. */
 function worstBlock(e,dim,ref){
-  const W=e.modes&&e.modes.worst; if(!W) return '';
+  const M=e.modes||{}, W=M.worst, moto=MODE==='moto';
+  /* Whether the mode on screen is one a gate cannot stop, and whether it has anything to ride from
+     the pavement. A rider with nothing rideable there is shown the walk — and told that is why. */
+  const rider=RIDE_MODES.includes(MODE)&&!!M[MODE], R=rider?M[MODE].worst:null;
+  const ridden=R&&(moto?motoMetres:rideMetres)(R)>=100;
+  if(!W&&!ridden) return '';
   const climb=up=>up>=15?' · '+(gainLabel(up)||''):'';
+  let t=`<dt>If the gravel is gated</dt><dd>`;
+  if(ridden){
+    const total=(moto?motoTravelMinutes:bikeTravelMinutes)(R), m=(moto?motoMetres:rideMetres)(R);
+    const w=R.walk, wm=footMinutes(w), b=bucketOf(w);
+    const CLS=moto?MOTO_CLASSES:BIKE_CLASSES, LAB=moto?MOTO_CLASS_LABEL:BIKE_CLASS_LABEL;
+    const legs=CLS.filter(c=>R[c]>=100), walked=W?footMinutes(W):null;
+    if(total<=ref+5) return t+dim('No different: this approach does not depend on a gravel road staying open.')+`</dd>`;
+    t+=`<b>${durationLabel(total)}</b> ${dim('· '+b.label)}<br>`
+      +`${durationLabel((moto?motoMinutes:rideMinutes)(R))} ${dim('riding from the nearest paved road')} — `
+      +`${accessDistance(m)}${legs.length===1?' '+dim('of '+LAB[legs[0]]):''}${climb(R.up)}<br>`
+      +(wm>=1?`${durationLabel(wm)} ${dim('on foot after that, '+STOP_LABEL[R.stop])}<br>`
+             :dim('And then you are there.')+`<br>`)
+      +`${dim(RIDE_WORST_NOTE)}`
+      +(walked!=null&&walked>total+15?`<br>${dim('The same closure costs a walker '+durationLabel(walked)+'.')}`:'')
+      +edgeLine(e,dim,m+w.on);
+    return t+`</dd>`;
+  }
   const wm=footMinutes(W);
-  return `<dt>If the gravel is gated</dt><dd>`+(wm>ref+5
-    ? `<b>${durationLabel(wm)}</b> ${dim('· '+bucketOf(W).label)} — ${accessDistance(W.on)}${climb(W.onUp)} from the nearest paved road, then ${accessDistance(W.off)} off trail<br>${dim(WORST_CASE_NOTE)}`
+  return t+(wm>ref+5
+    ? `<b>${durationLabel(wm)}</b> ${dim('· '+bucketOf(W).label)} — ${accessDistance(W.on)}${climb(W.onUp)} from the nearest paved road, then ${accessDistance(W.off)} off trail<br>`
+      + dim(rider?RIDE_WORST_BLOCKED_NOTE:WORST_CASE_NOTE)
       + edgeLine(e,dim,W.on)
     : dim('No different: this approach does not depend on a gravel road staying open.'))+`</dd>`;
 }

@@ -115,7 +115,8 @@ while nothing throws.
   end. The approach given is the fastest that keeps the off-trail leg within `BUSHWHACK_M`, and a
   bushwhack only when none does. The worst case — the same walk from the nearest paved road — is
   always shown beside it, because a gate nobody mapped is invisible to the network: that is the
-  Deming case, and the worst case is what makes it visible. Minutes and buckets are computed in the
+  Deming case, and the worst case is what makes it visible. That walk is the bound for the hike and
+  the drive; the riding modes have one of their own (below). Minutes and buckets are computed in the
   app from stored parts; never bake a threshold into the file.
   [docs/access.md](docs/access.md#how-far-in-on-foot-the-hike-mode)
 - **A drive figure is minutes from the nearest paved road, and the walk that is left.** The same
@@ -138,12 +139,26 @@ while nothing throws.
   sheet prints the excluded mileage from the bake (`excluded` in `access-moto.json`) rather than a
   constant that can go stale. A gate does not stop it; a closure that names motor vehicles does.
   [docs/access.md](docs/access.md#on-a-dirt-bike-the-fourth-mode)
+- **The worst case belongs to the mode, and for a rider it is a ride.** A gate nobody mapped is
+  invisible to every figure, so every mode shows an "if the gravel is gated" bound — but that bound is
+  "the same walk from the nearest paved road" only for the two modes a closure strands on foot. On
+  either bike you unload at the pavement and ride, which is why the machine is in the truck: one more
+  Dijkstra per rider, seeded at the pavement instead of at the car, stored in the mode's own file
+  (`RIDE_WORST_AT`). At Deming the walker's bound is 5.5 h and the dirt bike's is **1.5 h** over the
+  same 7.7 mi; v9 printed the 5.5 h under all four modes. **An overstatement is not automatically the
+  safe direction** — it was out by a factor of 3.7 here and 14 at the worst cell in the state, in the
+  one case the mode exists for. It is still a bound: it starts at the pavement, and every legal block
+  still applies, so a road closed to motor vehicles stops the dirt bike whatever the gravel is doing.
+  Two properties are checked on every cell — never quicker than the mode's own figure, never slower
+  than walking the same road, both 0.4% with causes named.
+  [docs/access.md](docs/access.md#the-worst-case-belongs-to-the-mode)
 - **One file per mode, and the base file for what they share.** `access.json` carries the categories,
   the worst case and nothing else; each mode's columns live in `data/access-<mode>.json`, fetched when
   that mode goes on screen and merged into the same per-cell objects the sheet reads. That is what
-  let a fourth mode land without pushing the up-front download past 3 MB: **1.50 MB base + 0.59–0.74
-  MB for one mode**, against 2.93 MB for three modes in one file. A mode file is version-checked and
-  refused on its own.
+  let a fourth mode land without pushing the up-front download past 3 MB, and a per-mode worst case
+  land after it without either of the walking modes paying for it: **1.54 MB base + 0.61 MB (hike) to
+  1.00 MB (bike)**, so 2.15 MB up front on foot and 2.51 MB for a rider, against 2.93 MB for three
+  modes in one file. A mode file is version-checked and refused on its own.
 - **A bike is carried to where the car stops, then rides what it is allowed to ride.** Everything a
   walker may use except two absolutes: designated wilderness (federal law, from the USFS EDW layer,
   marked per EDGE because a trail crosses a boundary mid-way) and `bicycle=no|private|dismount`.

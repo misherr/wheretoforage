@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as M from './access-modes.mjs';
 import * as N from './access-network.mjs';
+import * as A from '../src/access.mjs';
 
 const M_LAT = 111320, mLon = la => 111320 * Math.cos(la * Math.PI / 180);
 const LAT = 47.5, LON = -121.6;
@@ -133,4 +134,54 @@ test('shards: a cell\'s routes are in the file its index names, with only the ed
   assert.deepEqual(b.cells[0][2], [0, 1]);
   assert.deepEqual(b.bikeCells[0][2], [2], 'the ride list is renumbered the same way');
   assert.ok(!a.index && !b.index, 'and the working index is not written out');
+});
+
+test('the worst case is ridden, not walked, for the modes that ride', async () => {
+  /* The Deming shape: pavement, a gravel road gated where nobody mapped a gate, and a cell at the far
+     end of it. The walker's bound is the whole road on foot. The rider's bound is the whole road
+     RIDDEN — that is why the machine is in the truck — and saying 5.5 h under the dirt bike was an
+     order of magnitude out in the one case the mode exists for. */
+  const ways = new Map([
+    ['ohwy', { geom: line(0, 0, 1000, 0), cat: 'road', type: 'secondary' }],
+    ['ofr', { geom: line(1000, 0, 1000, 6000, 24), cat: 'road', type: 'unclassified' }],
+  ]);
+  const cells = new Map([['1:1', [...at(1060, 5800), 500]]]);
+  const m = await M.computeModes(ways, cells, { gates: [at(1000, 2000)], elevationOf: null,
+                                                offTrailClimb: async () => -1 });
+  const rec = m.modes.get('1:1');
+  const walked = A.footMinutes(rec.worst);
+  assert.ok(walked > 60, 'the walker is on that road for over an hour: ' + Math.round(walked));
+
+  for (const [mode, total, metres] of [['bike', A.bikeTravelMinutes, A.rideMetres],
+                                       ['moto', A.motoTravelMinutes, A.motoMetres]]) {
+    const k = rec[mode], w = k.worst;
+    assert.ok(w, mode + ' has a bound of its own');
+    assert.ok(metres(w) > metres(k) + 1000,
+      mode + ' rides further in the worst case, because it starts at the pavement: '
+      + metres(k) + ' -> ' + metres(w));
+    assert.ok(total(w) < walked, mode + ' still beats walking the same road: '
+      + Math.round(total(w)) + ' against ' + Math.round(walked));
+    assert.ok(total(w) >= total(k) - 1,
+      'and never beats its own figure, which starts past the gate: ' + Math.round(total(w))
+      + ' against ' + Math.round(total(k)));
+  }
+  assert.ok(A.motoTravelMinutes(rec.moto.worst) < A.bikeTravelMinutes(rec.bike.worst),
+    'and the motor beats the pedals over the same gravel');
+  assert.equal(m.stats.worst_ride.faster_than_figure, 0, 'the bound is a bound, on every cell');
+  assert.equal(m.stats.worst_ride.moto.no_ride, 0, 'and counted per mode, not both riders in one figure');
+  assert.equal(m.stats.worst_ride.slower_than_walking, 0);
+
+  /* the columns round-trip, including the sentinel that says "the same walk as the figure above" */
+  const row = [1, 1, ...M.modeColumns('moto', rec)];
+  assert.equal(row.length, A.MODE_WIDTH.moto);
+  assert.equal(row[A.RIDE_WORST_AT + 4], -1, 'the worst case ends where the figure does, so its walk is stored once');
+  const back = A.decodeModeRow('moto', row, ...at(1060, 5800)).moto;
+  assert.deepEqual(back.worst.walk, back.walk, 'and comes back as that same walk');
+  assert.equal(A.motoMetres(back.worst), A.motoMetres(rec.moto.worst));
+
+  /* and a worst case that ends somewhere else keeps its own walk */
+  const other = { moto: { ...rec.moto, worst: { ...rec.moto.worst, walk: { on: 77, onUp: 7, off: 7, offUp: 0 } } } };
+  const row2 = [1, 1, ...M.modeColumns('moto', other)];
+  assert.equal(row2[A.RIDE_WORST_AT + 4], 77, 'stored in full when it differs');
+  assert.equal(A.decodeModeRow('moto', row2, ...at(1060, 5800)).moto.worst.walk.on, 77);
 });

@@ -1495,18 +1495,110 @@ fetched by a viewer who uses one mode. So v9 splits it: the base file carries th
 worst case, and each mode's columns live in `data/access-<mode>.json`, fetched when that mode goes on
 screen and merged into the same per-cell objects the sheet reads.
 
+As measured when the split landed: 1.50 MB for the base and 0.59-0.74 MB for one mode, **2.09 MB up
+front**, against 2.93 MB for three modes in one file — and it stays there as modes are added.
+Switching mode costs one fetch, once per session. The mode on screen is fetched **alongside** the base
+rather than after it, so startup is still one round trip. The riding files grew in v10 when they
+gained a worst case of their own; the current sizes are in [What it
+costs](#what-it-costs) under the next section, and there is deliberately only one table of them.
+
+## The worst case belongs to the mode
+
+A gate nobody mapped is invisible to the network. That is the Deming failure — the user's road was
+gated six miles short of the ground and the map still calls it a drive-up — and the answer since v6
+has been to show, beside every figure, **the same walk from the nearest paved road**. Nothing about
+that is optimistic, which is why it survived three modes without being questioned.
+
+It is still the right bound for two of the four. On foot a closure changes nothing about how you
+travel; in a car it leaves you at the gate, so what is left is the walk. For the **two riding modes it
+was the wrong quantity**: you unload at the pavement and ride, which is the entire reason the machine
+is in the truck. At Deming:
+
+| mode | door to cell, as mapped | if the gravel is gated |
+| --- | --- | --- |
+| hike | Moderate hike, **35 min** on foot | **5.5 h** on foot from the pavement |
+| drive | **30 min** driving then 35 min on foot, 1 h door to cell | **5.5 h** — the car is stopped too |
+| bike | nothing to ride, then **35 min** on foot | **3 h** — 2.5 h riding, then the same 35 min |
+| dirt bike | nothing to ride, then **35 min** on foot | **1.5 h** — 45 min riding, then the same 35 min |
+
+The four "as mapped" figures agree because the gate is not in OpenStreetMap: the car drives to the
+closest point and neither machine has anything left to ride. The gated column is where the modes
+separate, and it is the column that describes the day the user actually had. The ride is the same 7.7
+miles and 3,600 ft the car would have driven; the bicycle pays 8 minutes per 100 m of that climb and
+the dirt bike 2, which is the whole difference between 3 h and 1.5 h.
+
+**An overstatement is not automatically the safe direction.** Ten minutes of cushion on a walk is
+prudence; telling a rider his own gravel road is a five-and-a-half-hour walk is not conservative, it
+is wrong, and wrong in the one case the dirt bike exists for. Pessimism about a quantity nobody
+measured is prudence. A pessimistic answer to a **different question** is a wrong number, and "how
+long is that walk" is a different question from "how long is that ride".
+
+### How it is computed
+
+One more Dijkstra per rider, and nothing else changes: the same blocks, the same speeds, the same
+approach scan, the same two phases of ride and then walk. Only the **sources** differ — every node on
+a paved public road, with the machine carried anywhere along the pavement, instead of everywhere the
+car can reach. So the bound is a bound, and both directions are checked on every cell:
+
+- **Never quicker than the mode's own figure**, which starts wherever the car got to — a superset of
+  the pavement. 362 cells of 93,268 (0.4%) read otherwise, and none of those numbers is ever printed:
+  the sheet says "no different" whenever the bound is within five minutes of the figure beside it.
+- **Never slower than walking the same road**, because a rider may always push. 371 cells (0.4%) — the
+  same share the drive's worst case has had since v7, and the same causes.
+- **Every legal block still applies.** A road the Forest Service has closed to motor vehicles stops
+  the dirt bike at the gate whether or not the gravel before it is gated. A rider is not handed one
+  closure as consolation for another.
+
+The 0.4% in both directions has three named causes, in order of size: the off-trail climb is
+*estimated* while an approach is chosen and *measured* afterwards (251 of the 362); "the nearest paved
+road" can be pavement the car cannot actually reach, behind a gate, which the walker's bound has
+always allowed and the rider's now inherits (93); and the two scans picked different approach points
+outright (18). The bake's own counter says 57 rather than 362 because it compares the totals the
+router chose on, with the estimate — two different measurements of the same property, and worth
+keeping both.
+
+What it changes:
+
+| over the 46,634 cells with both figures | bicycle | dirt bike |
+| --- | --- | --- |
+| **quicker** than walking from the same pavement | **38,349 (82.2%)** | **37,255 (79.9%)** |
+| median saved | 58 min | 74 min |
+| p90 saved | 178 min | 239 min |
+| saves an hour or more | 18,852 | 20,882 |
+| saves two hours or more | 8,891 | 12,638 |
+| no different | 8,095 | 9,198 |
+| slower than the walk | 190 | 181 |
+
+The largest single correction is a cell in the Colville forest at 48.3357, -118.4811, 28 miles and
+5,000 ft up a road from the nearest pavement: **14 hours on foot against 2 hours on a dirt bike**. Its
+as-mapped figure is 1 h, so v9 printed a gated case fourteen times the figure beside it.
+
+Where nothing rideable leaves the pavement — 7,922 cells on the bicycle, 9,180 on the dirt bike — the
+walk **is** the bound, and the sheet prints the walker's figure with `RIDE_WORST_BLOCKED_NOTE` to say
+that is why, rather than a ride of zero miles.
+
+### What it costs
+
+Nine columns in each riding mode's file: the ride in its three classes, the climb, the walk left, and
+why the ride ended. The walk is stored **once** wherever the worst case ends where the mode figure
+does — the ride stops at the same blocked edge, it only took longer to get there — which is 89.7% of
+the bicycle's rows and 95.3% of the dirt bike's, marked by a -1 in its first column. No park point and
+no route geometry: the sheet states the figure and draws the mode's actual approach, and a second line
+per cell per riding mode would cost more than a bound is worth.
+
 | file | raw | over the wire |
 | --- | --- | --- |
-| `access.json` (base) | 5.8 MB | **1.50 MB** |
-| `access-hike.json` | 2.2 MB | 0.59 MB |
-| `access-drive.json` | 2.2 MB | 0.69 MB |
-| `access-bike.json` | 2.4 MB | 0.74 MB |
-| `access-moto.json` | 2.4 MB | 0.74 MB |
+| `access.json` (base) | 6.05 MB | **1.54 MB** |
+| `access-hike.json` | 2.31 MB | 0.61 MB |
+| `access-drive.json` | 2.27 MB | 0.71 MB |
+| `access-bike.json` | 3.76 MB | 1.00 MB |
+| `access-moto.json` | 3.76 MB | 0.97 MB |
 
-**Up front: 2.09 MB for the base and the hike**, against 2.93 MB for three modes in one file — and it
-stays there as modes are added. Switching mode costs one fetch of about 0.7 MB, once per session. The
-mode on screen is fetched **alongside** the base rather than after it, so startup is still one round
-trip.
+**Up front: 2.15 MB in hike mode, 2.51 MB for a rider.** The bound costs a riding mode 0.26 MB and the
+other two nothing at all, which is the per-mode split paying for itself — in v8's single file it would
+have cost every viewer 0.5 MB for a figure two of the four modes do not use. Still under the 3 MB the
+user set as the trigger for doing something, and what to do first is now clear: the riding files are
+the biggest, and quantising the mode columns (ROADMAP) would cut all four.
 
 ## The routes are fetched one region at a time
 

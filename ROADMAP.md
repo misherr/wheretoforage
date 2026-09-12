@@ -451,17 +451,40 @@ Nothing here without the user's explicit sign-off — see hard rule 2.
   SSURGO soil water capacity, NIFC fire perimeters. None of them belongs in the
   UI.
 
-### The worst case is always on foot, even for a rider
+### ~~The worst case is always on foot, even for a rider~~ — done in v10, 2026-09-12
 
-**Open, and worth it for the user's own riding.** Every mode's "if the gravel is gated" figure is the
-same walk from the nearest paved road, because that is the honest pessimistic bound for a walker. For
-a **dirt bike** it is the wrong bound: a gated gravel road is a twenty-minute ride, not a five-hour
-walk. At Deming the worst case reads 5.5 h on foot in all four modes, when the machine in the user's
-garage would cover that gravel in under half an hour — if the closure does not name motor vehicles,
-which at Deming nothing mapped does either way.
+Every mode's "if the gravel is gated" figure was the same walk from the nearest paved road: the
+honest pessimistic bound for a walker, and the **wrong quantity** for a machine a gate does not stop.
+At Deming it read 5.5 h on foot under all four modes, the dirt bike in the user's own garage
+included.
 
-The fix is a per-mode worst case: the same "from the nearest paved road" start, travelled by the mode
-on screen rather than on foot. It is cheap — the vehicle passes already exist, and it is one more
-Dijkstra seeded at the pavement instead of at the car — and it would make the gated case legible for
-the two riding modes instead of overstating it by an order of magnitude. Held only because it changes
-a figure that has been read the same way since v6, and that deserves its own before-and-after.
+Now one more Dijkstra per rider, seeded at the pavement instead of at the car, nine columns in each
+riding mode's file. The before-and-after this deserved:
+
+| Deming, if the gravel is gated | v9 | v10 |
+| --- | --- | --- |
+| hike, drive | 5.5 h on foot | unchanged — a closure strands both at the pavement |
+| bicycle | 5.5 h on foot | **3 h** — 2.5 h riding 7.7 mi and 3,600 ft, then 35 min on foot |
+| dirt bike | 5.5 h on foot | **1.5 h** — 45 min riding the same road |
+
+Statewide the bicycle's bound beats the walk for 38,349 cells (82%) by a median 58 minutes and the
+dirt bike's for 37,255 (80%) by a median 74; for 12,638 cells the dirt bike saves more than two hours
+against the figure v9 showed. The largest correction is 14 h against 2 h, a cell 28 miles up a road
+in the Colville forest. Two properties hold it to being a bound — never quicker than the mode's own
+figure, never slower than walking the same road — and both are checked on every cell, at 0.4% with
+causes named in [verification.md](docs/verification.md#the-riders-worst-case-checked). Every legal
+block still applies, so a road closed to motor vehicles stops the dirt bike whatever the gravel is
+doing.
+
+The user's framing, which is the reasoning worth keeping: *"for a rider that gated gravel is a
+20-minute ride, so the bound is overstated tenfold in exactly the case a dirt bike exists for."* The
+measured factor at Deming is 3.7 rather than ten, because that road climbs 3,600 ft and a motor pays
+2 minutes per 100 m for it; at the worst cell in the state it is 7. The direction was the point.
+
+**An overstatement is not automatically the safe direction.** That is the general lesson, and it cuts
+against a habit this project has rightly built: pessimism where nothing is known. Pessimism about a
+*quantity nobody measured* is prudence. A pessimistic answer to a **different question** than the one
+asked is just a wrong number, and "how long is that walk" is a different question from "how long is
+that ride". The dirt bike's designation rule leans the other way — silence means closed — and both
+calls are right, because each is conservative about the thing that can actually hurt the rider: a
+citation on one side, a wasted day on the other.

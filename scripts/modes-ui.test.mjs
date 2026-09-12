@@ -15,6 +15,19 @@ const read = rel => fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url))
 const app = read('../index.html');
 const P = (on, off, onUp = 0, offUp = 0) => ({ on, off, onUp, offUp });
 
+/* One of the sheet's own functions, extracted and RUNNABLE, with the app's module scope handed in.
+   A regex over index.html proves a call is written; it cannot prove the figure that comes out is the
+   right one — the same gap as a log line reporting work the code did not do. `MODE` is a parameter
+   here because the app reads it as a module-scope variable, and `edgeLine` is stubbed: the border
+   note has its own test. */
+function sheetBlock(name, MODE) {
+  const from = app.indexOf('function ' + name);
+  const src = app.slice(from, app.indexOf('\n}', from) + 2);
+  const deps = { ...AC, MODE, edgeLine: () => '' };
+  const keys = Object.keys(deps).filter(k => /^[A-Za-z_$][\w$]*$/.test(k));
+  return new Function(...keys, src + '\nreturn ' + name + ';')(...keys.map(k => deps[k]));
+}
+
 test('effort: brush is three times trail, climb off trail twice as dear', () => {
   assert.equal(Math.round(AC.footMinutes(P(4000, 0))), 60, '4 km of trail is an hour');
   assert.equal(Math.round(AC.footMinutes(P(0, 0, 100))), 10, '100 m of climb is ten minutes');
@@ -236,7 +249,9 @@ test('bike: blocked by wilderness and by a tag — and NOT by a road closed to m
 });
 
 test('format: the bike columns decode, including where the bike is left', () => {
-  const row = [1, 2, 0, 6000, 1200, 300, 900, 60, 200, 30, 100, 200, -400, 900, AC.STOP.closed];
+  const row = [1, 2, 0, 6000, 1200, 300, 900, 60, 200, 30, 100, 200, -400, 900, AC.STOP.closed,
+               /* and the mode's own worst case, whose walk here is the same walk */
+               0, 9000, 1200, 400, -1, -1, -1, -1, AC.STOP.closed];
   assert.equal(row.length, AC.MODE_WIDTH.bike);
   const b = AC.decodeModeRow('bike', row, 47.5, -121.5).bike;
   assert.ok(b, 'a ride with no road in it is still a ride — 0 is not -1');
@@ -244,6 +259,10 @@ test('format: the bike columns decode, including where the bike is left', () => 
   assert.ok(b.park[1] > -121.5 && b.dismount[1] < -121.5, 'the car east of the centre, the dismount west of it');
   assert.ok(b.dismount[0] > b.park[0], 'and the dismount further north');
   assert.equal(AC.rideMetres(b), 7200);
+  assert.ok(b.worst, 'and the bound for a gate nobody mapped, which for a bicycle is a ride');
+  assert.equal(AC.rideMetres(b.worst), 10200, 'further, because it starts at the pavement');
+  assert.equal(b.worst.walk.on, 900, 'the -1 means the same walk as the figure above, not no walk');
+  assert.equal(b.worst.walk.offUp, 30);
 });
 
 test('sheet: the bike figure names the ride, the walk left, and what the layer does not cover', () => {
@@ -294,7 +313,8 @@ test('moto: silence about motorized use means closed, and the sheet says what th
 });
 
 test('format: the moto row decodes like the bike row, because the machines record the same things', () => {
-  const row = [1, 2, 1000, 8000, 2400, 400, 600, 40, 150, 20, 50, -80, 300, 900, AC.STOP.designation];
+  const row = [1, 2, 1000, 8000, 2400, 400, 600, 40, 150, 20, 50, -80, 300, 900, AC.STOP.designation,
+               1000, 12000, 2400, 700, 1500, 90, 150, 20, AC.STOP.closed];
   assert.equal(row.length, AC.MODE_WIDTH.moto);
   const m = AC.decodeModeRow('moto', row, 47.5, -121.5).moto;
   assert.equal(m.road, 1000); assert.equal(m.rough, 8000); assert.equal(m.trail, 2400);
@@ -302,6 +322,9 @@ test('format: the moto row decodes like the bike row, because the machines recor
   assert.equal(AC.STOP_LABEL[AC.STOP.designation], 'from where the singletrack has no motorized designation recorded');
   assert.equal(AC.STOP_LABEL[AC.STOP.restricted], 'from where motor vehicles are not allowed');
   assert.equal(AC.motoMetres(m), 11400);
+  assert.equal(AC.motoMetres(m.worst), 15400);
+  assert.equal(m.worst.walk.on, 1500, 'a worst case that ends somewhere else carries its own walk');
+  assert.equal(m.worst.stop, AC.STOP.closed, 'and its own reason for stopping');
 });
 
 test('sheet: the dirt bike block says the ride, the walk, and what the designation rule excludes', () => {
@@ -328,4 +351,86 @@ test('files: one per mode, fetched when the mode is on screen', () => {
   assert.match(app, /await loadMode\(MODE\);/);
   assert.match(app, /topMode=b\.dataset\.tmode\|\|null; await loadMode\(modeFor\('top'\)\);/,
     "and Top spots' override waits for its own file");
+});
+
+test('worst case: a walk for the modes a gate strands, a ride for the machines it does not', () => {
+  /* Until v10 there was one worst case, the walk from the nearest paved road, shown under all four
+     modes. It is the right bound for the hike and for the drive — a closure leaves both on foot at
+     the pavement — and it was wrong by an order of magnitude for the two riding modes: at Deming the
+     sheet told a rider his own gravel was a 5.5-hour walk. An overstatement is not automatically the
+     safe direction. */
+  assert.equal(AC.MODE_WIDTH.bike, 24); assert.equal(AC.MODE_WIDTH.moto, 24);
+  assert.equal(AC.MODE_WIDTH.hike, 13, 'the hike and the drive still read the base file\'s one walk');
+  assert.equal(AC.MODE_WIDTH.drive, 13);
+  assert.equal(AC.RIDE_WORST_AT, 15);
+  /* the base file still carries the walker's version, for the two modes that need it */
+  const base = [1, 2, ...new Array(AC.BASE_WIDTH - 2).fill(-1)];
+  base[AC.WORST_AT] = 6000; base[AC.WORST_AT + 1] = 400; base[AC.WORST_AT + 2] = 300; base[AC.WORST_AT + 3] = 60;
+  assert.equal(AC.decodeWorst(base).on, 6000);
+  /* a rider with nothing to ride from the pavement gets no ride, and the sheet falls back to the walk */
+  const row = [1, 2, ...new Array(AC.MODE_WIDTH.moto - 2).fill(-1)];
+  row[2] = 0; row[3] = 0; row[4] = 0; row[5] = 0; row[6] = 1200; row[7] = 100; row[8] = 400; row[9] = 50;
+  const m = AC.decodeModeRow('moto', row, 47.5, -121.5).moto;
+  assert.equal(m.worst, null, 'no columns, no figure — and never a figure invented from the walk');
+  assert.match(AC.RIDE_WORST_NOTE, /unloading at the nearest paved road/);
+  assert.match(AC.RIDE_WORST_BLOCKED_NOTE, /this is the walk/);
+});
+
+test('sheet: the worst case is the ride for a rider and the walk for a walker', () => {
+  const fn = app.slice(app.indexOf('function worstBlock'), app.indexOf('/* The edge of the data'));
+  assert.match(fn, /RIDE_MODES\.includes\(MODE\)/, 'the riding modes read their own bound');
+  assert.match(fn, /R=rider\?M\[MODE\]\.worst:null/, 'out of the mode file, beside the mode figure');
+  assert.match(fn, /riding from the nearest paved road/, 'and it says where the ride starts');
+  assert.match(fn, /RIDE_WORST_NOTE/);
+  assert.match(fn, /The same closure costs a walker/, 'with the walker\'s figure named, since that is the contrast');
+  assert.match(fn, /RIDE_WORST_BLOCKED_NOTE/, 'and the walk when nothing rideable leaves the pavement');
+  assert.match(fn, /WORST_CASE_NOTE/, 'the hike and the drive keep the walk');
+  /* every mode's block still shows it, which is what makes an unmapped gate visible at all */
+  for (const m of ['hikeBlock', 'driveBlock', 'bikeBlock', 'motoBlock'])
+    assert.match(app.slice(app.indexOf('function ' + m)), /worstBlock\(e,dim,/, m + ' shows the worst case');
+});
+
+test('sheet: the gated case is RUN, and a rider is given a ride where a walker is given the walk', () => {
+  /* Deming's shape, to scale: ten kilometres of gravel with 600 m of climb, and 640 m off the end of
+     it. On foot that is four hours. On the dirt bike in the user's garage it is an hour — and until
+     v10 the sheet printed the four hours under the dirt bike, which is not a conservative figure but
+     a wrong one, in the single case the mode exists for. */
+  const gravel = { on: 9700, onUp: 600, off: 640, offUp: 60 };
+  const walk = { on: 0, onUp: 0, off: 640, offUp: 60 };
+  const ridden = { road: 0, rough: 9700, trail: 0, up: 600, walk, stop: AC.STOP.end };
+  const e = { lat: 48.8, lon: -122.05,
+              modes: { worst: gravel, moto: { ...ridden, walk, worst: ridden },
+                       bike: { ...ridden, walk, worst: ridden } } };
+  const plain = s => s;
+  const walked = AC.durationLabel(AC.footMinutes(gravel));
+  assert.equal(walked, '4 h', 'the walker\'s bound, for scale');
+
+  const moto = sheetBlock('worstBlock', 'moto')(e, plain, 20);
+  assert.match(moto, /riding from the nearest paved road/, 'the rider unloads at the pavement and rides');
+  assert.match(moto, new RegExp('<b>' + AC.durationLabel(AC.motoTravelMinutes(ridden)) + '</b>'),
+    'and the figure is the ride plus the walk, not the walk');
+  assert.ok(AC.motoTravelMinutes(ridden) < AC.footMinutes(gravel) / 3, 'which is a third of the walk or better');
+  assert.match(moto, /The same closure costs a walker 4 h/, 'the walker\'s figure is named as the contrast');
+  assert.ok(!moto.includes(AC.WORST_CASE_NOTE), 'and the walking note is not what a rider is told');
+  assert.match(moto, /Moderate hike/, 'the bucket still describes the walk that is left');
+
+  /* the bicycle is slower over the same gravel, and says so on its own numbers */
+  const bike = sheetBlock('worstBlock', 'bike')(e, plain, 20);
+  assert.match(bike, new RegExp('<b>' + AC.durationLabel(AC.bikeTravelMinutes(ridden)) + '</b>'));
+  assert.ok(AC.bikeTravelMinutes(ridden) > AC.motoTravelMinutes(ridden), 'pedals are slower than a motor');
+
+  /* the hike and the drive still get the walk, out of the base file */
+  const hike = sheetBlock('worstBlock', 'hike')(e, plain, 20);
+  assert.match(hike, /from the nearest paved road, then/);
+  assert.match(hike, /<b>4 h<\/b>/, 'the walker keeps the walker\'s bound');
+  assert.ok(hike.includes(AC.WORST_CASE_NOTE));
+
+  /* a rider with nothing rideable leaving the pavement is told the walk, and told why */
+  const stuck = { lat: 48.8, lon: -122.05, modes: { worst: gravel, moto: { ...ridden, walk, worst: null } } };
+  const none = sheetBlock('worstBlock', 'moto')(stuck, plain, 20);
+  assert.match(none, /<b>4 h<\/b>/, 'the walk is the bound when there is nothing to ride');
+  assert.ok(none.includes(AC.RIDE_WORST_BLOCKED_NOTE), 'and the sheet says that is why');
+
+  /* and a figure the gate does not change says so rather than repeating itself */
+  assert.match(sheetBlock('worstBlock', 'moto')(e, plain, 999), /No different/);
 });
