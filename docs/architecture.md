@@ -118,11 +118,18 @@ every file, what it does, and the reasoning that is not obvious from reading it.
   to be added to that copy** — `ml`, `bk` and `closed` were once missing from it,
   which made the drive's 25 mph class unreachable and 9,106 `bicycle=no` ways
   block nothing.
-- **`data/access.json`** — per-cell distance to the nearest mapped trail, road
-  and rough way, then the mode columns — hike, worst case, straight-in, drive,
-  bike (v8) — keyed by cell index rather than row position. Optional at runtime:
-  without it every cell reads as unknown and the app is otherwise unchanged.
-  9.0 MB, 2.2 MB over the wire, since Pages serves it gzipped.
+- **`data/access.json`** — the base file (v9): per-cell distance to the nearest
+  mapped trail, road and rough way, then the worst-case walk from the pavement,
+  keyed by cell index rather than row position. 5.8 MB, 1.5 MB over the wire.
+  Optional at runtime: without it every cell reads as unknown and the app is
+  otherwise unchanged.
+- **`data/access-hike.json`, `-drive.json`, `-bike.json`, `-moto.json`** — one
+  mode's columns each, 0.59–0.74 MB over the wire, fetched when that mode goes on
+  screen and merged into the per-cell objects the sheet reads. Up to v8 every mode
+  shared one row of one file, which was 2.93 MB over the wire with three modes and
+  every byte of it fetched by a viewer who uses one. `access-moto.json` also carries
+  `excluded`, the trail mileage its designation rule leaves out, so the sheet can
+  say so from the data rather than from a constant.
 - **`data/access-routes/`** — the route each cell's figure walks, in **264 regional
   files** of 16 cells square, one fetched when "Show the route" is tapped and each
   stamped with the bake. Per shard: a table of way stretches and, per cell, a list

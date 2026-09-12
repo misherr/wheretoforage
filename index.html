@@ -253,12 +253,15 @@ import { classifyAccess, accessDetail, accessRank, accessDistance, gainLabel, ex
          CLASSES as ACCESS_CLASSES, ACCESS_FORMAT, accessAt, CELL_SCOPE_NOTE,
          NOT_EXAMINED_LABEL, NOT_EXAMINED_NOTE, OFF_TRAIL_NOTE,
          NO_ON_TRAIL_NOTE, onRouteLabel, LINE_STYLE, LINE_CASING,
-         decodeModes, footMinutes, bucketOf, durationLabel, BUSHWHACK_M, STOP_LABEL, AS_MAPPED_NOTE,
+         decodeWorst, decodeModeRow, MODES_IN_FILE, modeFile,
+         footMinutes, bucketOf, durationLabel, BUSHWHACK_M, STOP_LABEL, AS_MAPPED_NOTE,
          WORST_CASE_NOTE, DIRECT_SAVES_MIN, decodeGeom as decodeAccessGeom,
          driveMinutes, driveMetres, travelMinutes, DRIVE_NOTE, DRIVE_CLASSES, DRIVE_CLASS_LABEL,
          edgeDoubt, borderNote,
          rideMinutes, rideMetres, bikeTravelMinutes, BIKE_NOTE, BIKE_PARK_NOTE, BIKE_CLASSES,
-         BIKE_CLASS_LABEL, routeShardKey, routeShardFile } from './src/access.mjs';
+         BIKE_CLASS_LABEL, routeShardKey, routeShardFile,
+         motoMinutes, motoMetres, motoTravelMinutes, MOTO_NOTE, MOTO_CLASSES, MOTO_CLASS_LABEL,
+         motoExcludedNote } from './src/access.mjs';
 /* ===================== CONFIG ===================== */
 const PUBLIC_MODE=true; // true for a public deployment: never call Open-Meteo or LANDFIRE from the browser; rely on data/cells.json + data/weather.json
 const FINE_SIZES=[0.007,0.005,0.0035], FINE_CAP=400; // local refine below 1 mi when zoomed way in
@@ -572,7 +575,8 @@ const active=new Set(['chance']);
 /* ---- how you are getting there: a global mode, with a per-view override ----
    All three are built on one network (src/access.mjs). The mode is a setting, remembered per device;
    Top spots can override it for its own list without changing the map's. */
-const MODES={hike:{label:'Hike',ready:true},drive:{label:'Drive',ready:true},bike:{label:'Bike',ready:true}};
+const MODES={hike:{label:'Hike',ready:true},drive:{label:'Drive',ready:true},bike:{label:'Bike',ready:true},
+             moto:{label:'Dirt bike',ready:true}};
 let MODE=(()=>{ try{ const m=localStorage.getItem('bolete.mode'); return MODES[m]&&MODES[m].ready?m:'hike'; }catch(_){ return 'hike'; } })();
 let topMode=null;                       // Top spots' own mode; null follows the map's
 const modeFor=view=>view==='top'&&topMode?topMode:MODE;
@@ -580,7 +584,7 @@ const modeFor=view=>view==='top'&&topMode?topMode:MODE;
    cells they hide. Hard rule 8 was written so that access could never SILENTLY suppress ground; an
    explicit, counted, off-by-default filter does not. A cell with no mapped route is hidden by a filter
    too, but counted apart: unmapped is not the same as unreachable. */
-const WITHIN={hike:[30,60,120,240],drive:[15,30,60,120],bike:[30,60,120,240]};
+const WITHIN={hike:[30,60,120,240],drive:[15,30,60,120],bike:[30,60,120,240],moto:[15,30,60,120]};
 let mapWithin=null, topWithin=null;     // minutes; null is off, and off is the default
 /* What the filter measures: the leg its label names. "Within 30 minutes of driving" is about driving,
    so it counts the drive alone and not the walk after it. */
@@ -588,17 +592,20 @@ const minutesIn=(e,mode)=>{ const M=e&&e.modes; if(!M) return null;
   if(mode==='hike') return M.hike?footMinutes(M.hike):null;
   if(mode==='drive') return M.drive?driveMinutes(M.drive):null;
   if(mode==='bike') return M.bike?rideMinutes(M.bike):null;
+  if(mode==='moto') return M.moto?motoMinutes(M.moto):null;
   return null; };
 /* What "easiest" means for a sort: the whole journey. Ordering cells by the drive alone would put a
    five-minute drive and a four-hour walk above a ten-minute drive that ends at the cell. */
 const rankMinutes=(e,mode)=>{ const M=e&&e.modes; if(!M) return null;
   if(mode==='drive') return M.drive?travelMinutes(M.drive):null;
   if(mode==='bike') return M.bike?bikeTravelMinutes(M.bike):null;
+  if(mode==='moto') return M.moto?motoTravelMinutes(M.moto):null;
   return minutesIn(e,mode); };
 const withinOK=(e,mode,within)=>{ if(within==null) return true; const m=minutesIn(e,mode); return m!=null&&m<=within; };
 const withinLabel=(mode,within)=>mode==='hike'?'within a '+durationLabel(within)+' hike'
   :mode==='drive'?'within '+durationLabel(within)+' of driving'
-  :mode==='bike'?'within a '+durationLabel(within)+' ride':'within '+durationLabel(within);
+  :mode==='bike'?'within a '+durationLabel(within)+' ride'
+  :mode==='moto'?'within a '+durationLabel(within)+' ride on a dirt bike':'within '+durationLabel(within);
 /* What a filter hides, counted over a pool — the map's Medium-or-better cells, or Top spots' list. */
 function filterCounts(pool,mode,within){ let shown=0,far=0,none=0;
   for(const e of pool){ if(within==null||withinOK(e,mode,within)) shown++; else if(minutesIn(e,mode)==null) none++; else far++; }
@@ -700,8 +707,10 @@ function buildLayersMenu(){
   const within=`<select data-within><option value="">at any distance</option>${(WITHIN[MODE]||[]).map(v=>`<option value="${v}"${mapWithin===v?' selected':''}>${withinLabel(MODE,v)}</option>`).join('')}</select>`;
   const modes=`<div class="modebar"><b>Getting there</b><div>${modeBtns}</div><label>Show cells ${within}</label><small>Off by default. It hides cells, never changes a score, and the legend says how many it hides.</small></div>`;
   $('layers').innerHTML=fills+`<div class="sep"></div>`+roads+`<div class="sep"></div>`+modes;
-  $('layers').querySelectorAll('button[data-mode]').forEach(b=>b.onclick=ev=>{ ev.stopPropagation(); if(b.disabled) return; MODE=b.dataset.mode;
-    try{ localStorage.setItem('bolete.mode',MODE); }catch(_){} buildLayersMenu(); renderAll(); });
+  $('layers').querySelectorAll('button[data-mode]').forEach(b=>b.onclick=async ev=>{ ev.stopPropagation(); if(b.disabled) return; MODE=b.dataset.mode;
+    try{ localStorage.setItem('bolete.mode',MODE); }catch(_){}
+    /* its figures are in their own file; draw when they are in hand */
+    buildLayersMenu(); await loadMode(MODE); buildLayersMenu(); renderAll(); });
   $('layers').querySelector('select[data-within]').onchange=ev=>{ mapWithin=ev.target.value?+ev.target.value:null; renderAll(); };
   $('layers').querySelectorAll('input[data-o]').forEach(inp=>inp.onchange=()=>{ if(inp.checked) active.add(inp.dataset.o); else active.delete(inp.dataset.o); renderAll(); });
   $('layers').querySelector('input[data-r]').onchange=ev=>{ roadsWanted=ev.target.checked; syncRoads(); renderLegends(); }; }
@@ -784,6 +793,10 @@ async function tryStatic(){
   /* Access is optional: the app is fully functional without it, every cell just reads as unknown.
      Keyed by cell index rather than by row position so a cells.json re-bake cannot silently shift
      the association. */
+  /* The mode on screen is fetched alongside the base file rather than after it: v9 keeps each mode's
+     columns in its own file, and waiting for one to know the other's name would cost a round trip at
+     startup for nothing. */
+  const modeStarted=fetch(modeFile(MODE),{cache:'no-cache'}).catch(()=>null);
   try{ const r=await fetch('data/access.json',{cache:'no-cache'});
     if(r.ok){ const j=await r.json();
       /* A file from a different format version is worse than no file: the row stride has changed
@@ -796,11 +809,15 @@ async function tryStatic(){
       /* Geometry is shared by way rather than duplicated per cell — the difference between an 8 MB
          file and a 47 MB one. Rows carry indices into j.ways; decoding is deferred to the tap so
          48,000 polylines are never built up front. */
-      STATIC.access={ways:j.ways||[],byCell:new Map(),modes:new Map(),geom:null,examined:null};
+      STATIC.access={ways:j.ways||[],byCell:new Map(),modes:new Map(),geom:null,examined:null,
+                     loaded:new Set(),excluded:{}};
       for(const row of j.rows){
-        STATIC.access.byCell.set(row[0]+':'+row[1],decodeAccessRow(row));
-        const [la,lo]=cellCenter(row[0],row[1]), m=decodeModes(row,la,lo);
-        if(m.hike||m.worst) STATIC.access.modes.set(row[0]+':'+row[1],m);
+        const k=row[0]+':'+row[1];
+        STATIC.access.byCell.set(k,decodeAccessRow(row));
+        /* The worst case is in the base file: it is the same walk from the pavement whichever mode is
+           on screen, and every mode's block shows it. */
+        const w=decodeWorst(row);
+        if(w) STATIC.access.modes.set(k,{worst:w});
       }
       /* Which cells the bake actually walked, so a missing row can be told from a missing lookup.
          Every access row belongs to a cells.json cell (verified: 0 of 46,373 fall outside it), and
@@ -810,6 +827,7 @@ async function tryStatic(){
       accessAsOf=j.generated||null;
       if(j.provenance&&j.provenance.cells_generated&&STATIC.cells&&j.provenance.cells_generated!==STATIC.cells.generated)
         console.warn('access.json was baked against a different cells.json — some cells may read as unknown');
+      await loadMode(MODE,modeStarted);
     } }catch(_){}
   STATIC.weather=await loadWeatherFile();
   if(STATIC.weather){ if(isStaging) console.log(`staging: weather from ${weatherSource}`); ingestWeather(STATIC.weather); }
@@ -1240,7 +1258,8 @@ function showPoint(e,t){
       pendingWay=-1;
     } else {
       edgeSaid=false;
-      h+=(MODE==='drive'?driveBlock(e,dim):MODE==='bike'?bikeBlock(e,dim):hikeBlock(e,dim));
+      h+=(MODE==='drive'?driveBlock(e,dim):MODE==='bike'?bikeBlock(e,dim)
+          :MODE==='moto'?motoBlock(e,dim):hikeBlock(e,dim));
       h+=`<dt>Access</dt><dd>`
         +(ac.wayName?`<b>${ac.wayName}</b>`:ac.label)
         +(ac.way&&ac.way.segments>1?' '+dim('('+ac.way.segments+' mapped segments joined)'):'')
@@ -1350,6 +1369,36 @@ let approachLayer=null, geomFetch=null;
    sign of trouble. Stamping the URL makes the cache entry change exactly when the data does, so
    force-cache becomes both safe and optimal. access.json is fetched no-cache, so the stamp is
    always the live one. */
+/* One mode's figures, from its own file, merged into the per-cell objects the sheet reads — so a block
+   can ask for e.modes.drive without caring which file it came from, and an entry built before the
+   fetch sees the mode appear in the same object. Fetched when the mode goes on screen and kept for
+   the session: the up-front download no longer grows with the number of modes, which is what let a
+   fourth one land without pushing access.json past 3 MB. */
+const modeLoads=new Map();
+function loadMode(mode,started){
+  if(!STATIC.access||!MODES[mode]||!MODES[mode].ready) return Promise.resolve(false);
+  if(STATIC.access.loaded.has(mode)) return Promise.resolve(true);
+  let p=modeLoads.get(mode);
+  if(!p) modeLoads.set(mode,p=(async()=>{
+    try{ const r=await (started||fetch(modeFile(mode),{cache:'no-cache'}));
+      if(!r||!r.ok) return false;
+      const j=await r.json();
+      if(j.version!==ACCESS_FORMAT){ console.warn(`data/access-${mode}.json is format v${j.version}, this build reads v${ACCESS_FORMAT} — ignoring it`); return false; }
+      for(const row of j.rows){
+        const k=row[0]+':'+row[1], c=cellCenter(row[0],row[1]);
+        const cur=STATIC.access.modes.get(k);
+        const dec=decodeModeRow(mode,row,c[0],c[1]);
+        if(cur) Object.assign(cur,dec); else STATIC.access.modes.set(k,dec);
+      }
+      /* What a mode's own rule leaves out, said on its block rather than assumed away. */
+      if(j.excluded) STATIC.access.excluded[mode]=j.excluded;
+      STATIC.access.loaded.add(mode);
+      return true;
+    }catch(_){ return false; }
+  })());
+  return p;
+}
+
 async function loadAccessGeom(){
   if(!STATIC.access) return null;
   if(STATIC.access.geom) return STATIC.access.geom;
@@ -1483,9 +1532,9 @@ function bikeBlock(e,dim){
   let t=`<dt>Bike</dt><dd>`;
   if(rideMetres(b)>=100){
     t+=`<b>${durationLabel(rm)}</b> ${dim('riding, from where the car stops')}<br>`
-      +`${accessDistance(rideMetres(b))}${climb(b.up)} `
-      +dim(legs.length===1?'of '+BIKE_CLASS_LABEL[legs[0]]
-        :'by bike'+(legs.length?' — '+legs.map(c=>accessDistance(b[c])+' '+BIKE_CLASS_LABEL[c]).join(', '):''))+`<br>`;
+      +(legs.length===1
+        ? `${accessDistance(rideMetres(b))} ${dim('of '+BIKE_CLASS_LABEL[legs[0]])}${climb(b.up)}<br>`
+        : `${accessDistance(rideMetres(b))}${climb(b.up)} ${dim('by bike'+(legs.length?' — '+legs.map(c=>accessDistance(b[c])+' '+BIKE_CLASS_LABEL[c]).join(', '):''))}<br>`);
   } else t+=`${dim('Nothing to ride: the car gets as far as a bike would, as mapped.')}<br>`;
   if(wm>=1){
     t+=`<span class="bucket">${bk.label}</span> <b>${durationLabel(wm)}</b> ${dim('on foot after that')}<br>`
@@ -1498,6 +1547,36 @@ function bikeBlock(e,dim){
     +`${dim(BIKE_PARK_NOTE)}<br>${dim(AS_MAPPED_NOTE)}`
     +edgeLine(e,dim,rideMetres(b)+w.on)+`</dd>`;
   return t+worstBlock(e,dim,bikeTravelMinutes(b));
+}
+
+/* The dirt bike: the bicycle's shape at the dirt bike's speeds, and with the rule that decides what
+   it may ride said out loud. A conservative mode has to be legible as conservative — otherwise a
+   rider reads "no trails here" where the truth is "the Forest Service has not recorded whether these
+   trails are open to motorcycles, and most of them it has not". */
+function motoBlock(e,dim){
+  const M=e.modes; if(!M||!M.moto) return hikeBlock(e,dim);
+  const b=M.moto, rm=motoMinutes(b), w=b.walk, wm=footMinutes(w), bk=bucketOf(w);
+  const climb=up=>up>=15?' · '+(gainLabel(up)||''):'';
+  const legs=MOTO_CLASSES.filter(c=>b[c]>=100);
+  let t=`<dt>Dirt bike</dt><dd>`;
+  if(motoMetres(b)>=100){
+    t+=`<b>${durationLabel(rm)}</b> ${dim('riding, from where the car stops')}<br>`
+      +(legs.length===1
+        ? `${accessDistance(motoMetres(b))} ${dim('of '+MOTO_CLASS_LABEL[legs[0]])}${climb(b.up)}<br>`
+        : `${accessDistance(motoMetres(b))}${climb(b.up)} ${dim('by dirt bike'+(legs.length?' — '+legs.map(c=>accessDistance(b[c])+' '+MOTO_CLASS_LABEL[c]).join(', '):''))}<br>`);
+  } else t+=`${dim('Nothing to ride: the car gets as far as a dirt bike would, as mapped.')}<br>`;
+  if(wm>=1){
+    t+=`<span class="bucket">${bk.label}</span> <b>${durationLabel(wm)}</b> ${dim('on foot after that')}<br>`
+      +(w.on>0?`${accessDistance(w.on)}${climb(w.onUp)} ${dim('on trails, tracks and roads, '+STOP_LABEL[b.stop])}<br>`:'')
+      +`${accessDistance(w.off)}${climb(w.offUp)} <span class="caveat">off trail</span>`
+      +(w.off>BUSHWHACK_M?` ${dim('— more than '+accessDistance(BUSHWHACK_M)+' of it, which is what makes this a bushwhack')}`:'')
+      +` <a href="#" class="drawroute">Show the route</a><br>`;
+  } else t+=`${dim('And then you are there: no walk at all, as mapped.')} <a href="#" class="drawroute">Show the route</a><br>`;
+  t+=`${dim('From the car, '+durationLabel(motoTravelMinutes(b))+'. '+MOTO_NOTE)}<br>`
+    +`<span class="caveat">${dim(motoExcludedNote(STATIC.access&&STATIC.access.excluded&&STATIC.access.excluded.moto))}</span><br>`
+    +`${dim(AS_MAPPED_NOTE)}`
+    +edgeLine(e,dim,motoMetres(b)+w.on)+`</dd>`;
+  return t+worstBlock(e,dim,motoTravelMinutes(b));
 }
 
 /* The route a figure describes: the walk over the network, the ride before it, where the vehicle
@@ -1527,19 +1606,21 @@ async function loadRouteShard(lat,lon){
          line", not "no line". */
       const byDrive=new Map(); for(const c of (j2.driveCells||[])) byDrive.set(c[0]+':'+c[1],c);
       const byBike=new Map(); for(const c of (j2.bikeCells||[])) byBike.set(c[0]+':'+c[1],c);
-      return {edges:j2.edges,byCell,byDrive,byBike};
+      const byMoto=new Map(); for(const c of (j2.motoCells||[])) byMoto.set(c[0]+':'+c[1],c);
+      return {edges:j2.edges,byCell,byDrive,byBike,byMoto};
     }catch(_){ return null; }
   })());
   return p;
 }
 async function drawRoute(cell,link){
   const M=cell.modes; if(!M) return;
-  const onDrive=MODE==='drive'&&!!M.drive, onBike=MODE==='bike'&&!!M.bike;
-  const fig=onBike?M.bike:onDrive?M.drive:M.hike; if(!fig) return;
-  /* Where the vehicle left you: a bike is left at the dismount point, and the car park is a second
-     marker on that line because the ride between them is the figure's whole point. */
-  const park=onBike?M.bike.dismount:onDrive?M.drive.park:M.hike.park;
-  const stop=onBike?M.bike.stop:onDrive?M.drive.stop:M.hike.stop;
+  const onDrive=MODE==='drive'&&!!M.drive, onMoto=MODE==='moto'&&!!M.moto, onBike=MODE==='bike'&&!!M.bike;
+  const ride=onMoto?M.moto:onBike?M.bike:null;
+  const fig=ride||(onDrive?M.drive:M.hike); if(!fig) return;
+  /* Where the vehicle left you: a bike or a dirt bike is left at the dismount point, and the car park
+     is a second marker on that line because the ride between them is the figure's whole point. */
+  const park=ride?ride.dismount:onDrive?M.drive.park:M.hike.park;
+  const stop=ride?ride.stop:onDrive?M.drive.stop:M.hike.stop;
   const R=await loadRouteShard(cell.lat,cell.lon);
   if(link) link.textContent='Show the route';
   if(!R){ if(link) link.textContent='Could not load the route'; return; }
@@ -1547,8 +1628,9 @@ async function drawRoute(cell,link){
   const k=cellKey(cell.lat,cell.lon);
   /* A figure with no walking has no line over the network, and the other mode's is not a substitute:
      falling back to it would draw a walk beside a figure that says there is none. */
-  const hasLine=onBike?(rideMetres(M.bike)>0||M.bike.walk.on>0):(onDrive?M.drive.walk.on:M.hike.on)>0;
-  const c=hasLine?((onBike&&R.byBike.get(k))||(onDrive&&R.byDrive.get(k))||R.byCell.get(k)):null;
+  const rideM=ride?(onMoto?motoMetres(ride):rideMetres(ride)):0;
+  const hasLine=ride?(rideM>0||ride.walk.on>0):(onDrive?M.drive.walk.on:M.hike.on)>0;
+  const c=hasLine?((onMoto&&R.byMoto.get(k))||(onBike&&R.byBike.get(k))||(onDrive&&R.byDrive.get(k))||R.byCell.get(k)):null;
   const lines=c?c[2].map(k2=>decodeAccessGeom(R.edges[k2])).concat([decodeAccessGeom(c[3])]):[];
   const last=lines.length?lines[lines.length-1]:null;
   const end=last&&last.length?last[last.length-1]:park;
@@ -1560,9 +1642,9 @@ async function drawRoute(cell,link){
   /* the off-trail leg: a straight line and nothing more, drawn as one */
   if(end) layers.push(L.polyline([end,[cell.lat,cell.lon]],{color:'#f2ede0',weight:2.5,dashArray:'2 6',pane:'approach'}));
   if(park) layers.push(L.circleMarker(park,{radius:6,color:LINE_CASING,weight:2,fillColor:'#f2ede0',fillOpacity:1,pane:'approach'})
-    .bindTooltip((onBike?'Where the bike stops, as mapped: ':'Where the car stops, as mapped: ')+STOP_LABEL[stop].replace(/^from /,'')));
-  if(onBike&&M.bike.park&&rideMetres(M.bike)>0)
-    layers.push(L.circleMarker(M.bike.park,{radius:5,color:LINE_CASING,weight:2,fillColor:'#5dcaa5',fillOpacity:1,pane:'approach'})
+    .bindTooltip((ride?'Where the ride stops, as mapped: ':'Where the car stops, as mapped: ')+STOP_LABEL[stop].replace(/^from /,'')));
+  if(ride&&ride.park&&rideM>0)
+    layers.push(L.circleMarker(ride.park,{radius:5,color:LINE_CASING,weight:2,fillColor:'#5dcaa5',fillOpacity:1,pane:'approach'})
       .bindTooltip('Where the car stops and the ride begins'));
   approachLayer=L.layerGroup(layers).addTo(map);
   const pts=lines.flat(); if(park) pts.push(park); pts.push([cell.lat,cell.lon]);
@@ -1578,6 +1660,8 @@ const modeSummary=(e,mode)=>{ const M=e.modes; if(!M) return '';
     +(footMinutes(M.drive.walk)>=1?', then '+bucketOf(M.drive.walk).label.toLowerCase():', road into the cell');
   if(mode==='bike'&&M.bike) return ' · '+(rideMetres(M.bike)>=100?durationLabel(rideMinutes(M.bike))+' ride':'no ride needed')
     +(footMinutes(M.bike.walk)>=1?', then '+bucketOf(M.bike.walk).label.toLowerCase():'');
+  if(mode==='moto'&&M.moto) return ' · '+(motoMetres(M.moto)>=100?durationLabel(motoMinutes(M.moto))+' on the dirt bike':'no ride needed')
+    +(footMinutes(M.moto.walk)>=1?', then '+bucketOf(M.moto.walk).label.toLowerCase():'');
   return ''; };
 function showTop(){
   const pool=[...cells.values()].filter(e=>e.A&&!e.failed);
@@ -1623,7 +1707,8 @@ function showTop(){
     +`${haveAccess?' Access describes what is mapped in OpenStreetMap and USFS data, not what exists on the ground, and never changes a score.':''}</p>`;
   $('sheet-body').innerHTML=h;
   $('sheet-body').querySelectorAll('.sortbar .pill[data-sort]').forEach(b=>b.onclick=()=>{ topSort=b.dataset.sort; showTop(); });
-  $('sheet-body').querySelectorAll('.sortbar .pill[data-tmode]').forEach(b=>b.onclick=()=>{ if(b.disabled) return; topMode=b.dataset.tmode||null; showTop(); });
+  $('sheet-body').querySelectorAll('.sortbar .pill[data-tmode]').forEach(b=>b.onclick=async()=>{ if(b.disabled) return;
+    topMode=b.dataset.tmode||null; await loadMode(modeFor('top')); showTop(); });
   $('sheet-body').querySelectorAll('.sortbar .pill[data-within]').forEach(b=>b.onclick=()=>{ topWithin=b.dataset.within?+b.dataset.within:null; showTop(); });
   $('sheet-body').querySelectorAll('.spot').forEach(el=>el.onclick=()=>{ const e=byK.get(el.dataset.k); map.setView([e.lat,e.lon],11); if(marker) marker.remove(); marker=L.circleMarker([e.lat,e.lon],{radius:7,color:'#fff',weight:2,fillColor:'#b8742c',fillOpacity:1}).addTo(map); if(el.dataset.rising){ const bt=bestDayIndex(e); quickPlayTo(bt,()=>showPoint(e,bt)); } else showPoint(e); });
 }

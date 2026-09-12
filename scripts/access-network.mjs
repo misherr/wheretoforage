@@ -23,7 +23,8 @@
 
 import { WALK_KMH, CLIMB_MIN_PER_100M, OFF_TRAIL_FACTOR as OTF, OFF_CLIMB_FACTOR as OCF, BUSHWHACK_M, DIRECT_SAVES_MIN,
          DRIVE_MPH, DRIVE_CLASSES, driveMinutes, BIKE_MPH, BIKE_CLASSES, BIKE_CLIMB_MIN_PER_100M,
-         BIKE_BLOCKS_CLOSED_ROADS, rideMinutes, STOP } from '../src/access.mjs';
+         BIKE_BLOCKS_CLOSED_ROADS, rideMinutes, STOP,
+         MOTO_MPH, MOTO_CLASSES, MOTO_CLIMB_MIN_PER_100M, motoMinutes } from '../src/access.mjs';
 export { DIRECT_SAVES_MIN };
 
 const M_LAT = 111320;
@@ -378,21 +379,35 @@ for (const c of BIKE_CLASSES) BIKE_M_PER_MIN[c] = BIKE_MPH[c] * 1609.34 / 60;
 export const bikeClassOf = w => w.cat === 'trail' ? 'trail'
   : paved(w) || /^[45]/.test(String(w.ml || '')) || STREET.test(w.type || '') ? 'road' : 'rough';
 
-/* Why a bike may not use an edge. Stored per EDGE rather than per way, because a trail crosses a
+/* Why a rider may not use an edge. Stored per EDGE rather than per way, because a trail crosses a
    wilderness boundary in the middle of a way and blocking the whole way would either forbid a legal
-   ride or allow an illegal one. */
-export const BLOCK = { none: 0, wilderness: 1, bicycle: 2, closed: 3, unwalkable: 4 };
-export const BLOCK_STOP = { [BLOCK.wilderness]: STOP.wilderness, [BLOCK.bicycle]: STOP.bicycle, [BLOCK.closed]: STOP.closed };
-export function bikeBlocks(net, { wilderness = null, blockClosed = BIKE_BLOCKS_CLOSED_ROADS } = {}) {
+   ride or allow an illegal one.
+
+   One function, two riders, because they differ only in which of these rules apply:
+
+     bicycle    bicycle=no|private|dismount, and wilderness.
+     dirt bike  wilderness; roads closed to MOTORIZED use; motor_vehicle=no and the other access tags
+                a car respects; and singletrack with no recorded motorized designation — which is most
+                of it, and is treated as closed on purpose.
+
+   The order matters only for which reason gets reported when several apply; the most specific first. */
+export const BLOCK = { none: 0, wilderness: 1, bicycle: 2, closed: 3, unwalkable: 4, designation: 5, restricted: 6 };
+export const BLOCK_STOP = { [BLOCK.wilderness]: STOP.wilderness, [BLOCK.bicycle]: STOP.bicycle,
+                            [BLOCK.closed]: STOP.closed, [BLOCK.designation]: STOP.designation,
+                            [BLOCK.restricted]: STOP.restricted };
+export function rideBlocks(net, { wilderness = null, blockClosed = false, blockRestricted = false,
+                                  trailNeedsMoto = false, blockBicycleTag = false } = {}) {
   const { W, eW, eA0, eA1, cum, E } = net;
   const why = new Uint8Array(E);
-  const st = { edges: E, wilderness: 0, bicycle: 0, closed: 0, unwalkable: 0 };
+  const st = { edges: E, wilderness: 0, bicycle: 0, closed: 0, unwalkable: 0, designation: 0, restricted: 0 };
   const inWild = wilderness ? wildernessMask(wilderness) : null;
   for (let e = 0; e < E; e++) {
     const w = W[eW[e]];
     if (!walkable(w)) { why[e] = BLOCK.unwalkable; st.unwalkable++; continue; }
-    if (w.bk) { why[e] = BLOCK.bicycle; st.bicycle++; continue; }
+    if (blockBicycleTag && w.bk) { why[e] = BLOCK.bicycle; st.bicycle++; continue; }
+    if (blockRestricted && w.ac) { why[e] = BLOCK.restricted; st.restricted++; continue; }
     if (blockClosed && (w.type === 'nfsr-closed' || w.closed)) { why[e] = BLOCK.closed; st.closed++; continue; }
+    if (trailNeedsMoto && w.cat === 'trail' && w.mo !== 1) { why[e] = BLOCK.designation; st.designation++; continue; }
     if (inWild) {
       const wi = eW[e], c = cum[wi];
       const mid = pointAt(W[wi].geom, c, (eA0[e] + eA1[e]) / 2);
@@ -401,6 +416,12 @@ export function bikeBlocks(net, { wilderness = null, blockClosed = BIKE_BLOCKS_C
   }
   return { why, stats: st };
 }
+export const bikeBlocks = (net, o = {}) => rideBlocks(net, { wilderness: o.wilderness, blockBicycleTag: true,
+  blockClosed: o.blockClosed === undefined ? BIKE_BLOCKS_CLOSED_ROADS : o.blockClosed });
+/* The dirt bike's rules, and the reason BIKE_BLOCKS_CLOSED_ROADS was kept after the bicycle stopped
+   needing it: this is the mode the closed-roads layer really does stop. */
+export const motoBlocks = (net, o = {}) => rideBlocks(net, { wilderness: o.wilderness, blockClosed: true,
+  blockRestricted: true, trailNeedsMoto: true });
 
 /* Wilderness, as an even-odd test over each area's rings so that an inholding inside one is not
    wilderness. Indexed by a coarse grid of bounding boxes: 28 areas cover a third of the Cascades and
@@ -456,7 +477,18 @@ export function vehiclePathTo(net, veh, node) {
   return out.reverse();
 }
 
-/* Why the ride ended here: the first reason among the edges leaving this node that the bike may not
+const MOTO_M_PER_MIN = {};
+for (const c of MOTO_CLASSES) MOTO_M_PER_MIN[c] = MOTO_MPH[c] * 1609.34 / 60;
+/* The same three classes as the bicycle, decided the same way: what changes is the speed and the
+   climb, not what counts as a road. */
+export const motoClassOf = bikeClassOf;
+export function motoRide(net, carNodes, blocks, carried = null) {
+  return vehicleReach(net, { classes: MOTO_CLASSES, classOf: motoClassOf, mPerMin: MOTO_M_PER_MIN,
+    climbMinPer100m: MOTO_CLIMB_MIN_PER_100M, sources: carNodes,
+    can: e => blocks.why[e] === BLOCK.none, stop: null, minutesOf: motoMinutes, carried });
+}
+
+/* Why the ride ended here: the first reason among the edges leaving this node that the rider may not
    use. A node with nothing blocked around it is simply the end of the mapped way. */
 export function rideStopReason(net, node, blocks) {
   if (node < 0) return STOP.none;

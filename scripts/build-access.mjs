@@ -26,17 +26,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cellIndex } from '../src/grid.mjs';
+import { cellIndex, cellCenter } from '../src/grid.mjs';
 import { osmCategory, osmType, osmPaved, osmRoughReason, LIMITED_ACCESS, USFS_DRIVABLE_ML, CAP, CATS, encodeGeom,
          ROW_STRIDE, ACCESS_FORMAT,
-         OSM_DRIVE, OSM_TRAIL, OSM_ROUGH, OSM_PAVED, carRestriction, blocksCars, CAR_BARRIERS, ROW_WIDTH,
-         bikeRestriction, BIKE_FORBIDDEN, routeShardKey,
+         OSM_DRIVE, OSM_TRAIL, OSM_ROUGH, OSM_PAVED, carRestriction, blocksCars, CAR_BARRIERS,
+         bikeRestriction, BIKE_FORBIDDEN, routeShardKey, motoDesignation, usfsMotoDesignation,
+         MODES_IN_FILE, modeFile, BASE_WIDTH, MODE_WIDTH,
          TRAILHEAD_NONE, TRAILHEAD_MAPPED, TRAILHEAD_INFERRED } from '../src/access.mjs';
 import { REGIONS, decodePNG, terrariumMetres, tileXY, TERRAIN_SOURCE } from './build-cells.mjs';
-import { computeModes, routesFile, modeColumns, mergeRoutes, shardRoutes } from './access-modes.mjs';
+import { computeModes, routesFile, modeColumns, worstColumns, hasMode, mergeRoutes, shardRoutes } from './access-modes.mjs';
 
 export const GENERATOR = 'scripts/build-access.mjs';
-export const GENERATOR_VERSION = '8.1.0';
+export const GENERATOR_VERSION = '9.0.0';
 /* What a checkpoint holds, which is not the same question as which generator wrote it. Schema 2 keeps
    what the sources SAY — USFS maintenance level and trail_type, one way per USFS path, the OSM tags
    that describe a road — and nothing the rules derive, because the rules now run at assembly. A
@@ -44,7 +45,7 @@ export const GENERATOR_VERSION = '8.1.0';
    Overpass to change a rule that only assembly reads. */
 /* Schema 3 adds what a car needs to know: barriers ON roads, and on every OSM way the tags that close it
    to the public by car (ac) or say it is paved (pv) — schema 2 kept pv only for USFS twins. */
-export const CHECKPOINT_SCHEMA = 4;
+export const CHECKPOINT_SCHEMA = 5;
 
 const UA = 'king-bolete-forecast/1.0 (github.com/misherr/wheretoforage)';
 
@@ -290,9 +291,11 @@ async function forEachElement(s, w, n, e, cb, depth = 0) {
 }
 
 async function arcgis(base, s, w, n, e, fields, page) {
+  /* Geometry is the expensive part, and an upgrade that only wants two attributes does not need it. */
   let u = base + '/query?f=json&where=1%3D1&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326'
     + '&geometry=' + encodeURIComponent([w, s, e, n].join(','))
-    + '&spatialRel=esriSpatialRelIntersects&returnGeometry=true&outFields=' + fields;
+    + '&spatialRel=esriSpatialRelIntersects&returnGeometry=' + (page && page.noGeometry ? 'false' : 'true')
+    + '&outFields=' + fields;
   // Ordered by objectid, so a retried page is the same page.
   if (page) u += '&orderByFields=objectid&resultOffset=' + page.offset + '&resultRecordCount=' + USFS_PAGE;
   let lastErr = '';
@@ -682,7 +685,10 @@ export function gainBetween(geom, elev, arcA, arcB) {
 export const USFS_LAYERS = [
   { url: USFS_ROADS + '/0', type: 'nfsr', fields: 'objectid,name,id,oper_maint_level' },
   { url: USFS_ROADS + '/1', type: 'nfsr-closed', fields: 'objectid,name,id' },
-  { url: USFS_TRAILS, type: 'nfst', fields: 'objectid,trail_name,trail_no,trail_type' },
+  /* terra_motorized and allowed_terra_use are what let a dirt bike onto singletrack; without them
+     every trail reads as undesignated, which the moto figure treats as closed. */
+  { url: USFS_TRAILS, type: 'nfst',
+    fields: 'objectid,trail_name,trail_no,trail_type,terra_motorized,allowed_terra_use' },
 ];
 
 /* One way per PATH, not one per feature.
@@ -707,6 +713,7 @@ export function usfsWays(f, type) {
     const w = { name, ref, type, cat, geom: simplify(p.map(q => [q[1], q[0]]), SIMPLIFY_M), th: TRAILHEAD_NONE };
     if (type === 'nfsr' && a.oper_maint_level) w.ml = String(a.oper_maint_level).charAt(0);
     if (type === 'nfst' && a.trail_type) w.tt = String(a.trail_type);
+    if (type === 'nfst') { const mo = usfsMotoDesignation(a); if (mo != null) w.mo = mo; }
     return ['u' + type + a.objectid + (paths.length > 1 ? '.' + (k + 1) : ''), w];
   });
 }
@@ -754,11 +761,11 @@ function tileMembership(tiles) {
   };
 }
 
-export async function fetchUsfs(tiles, bbox, fetchArc, ways, logFn = log) {
+export async function fetchUsfs(tiles, bbox, fetchArc, ways, logFn = log, layers = USFS_LAYERS) {
   const inTiles = tileMembership(tiles);
   const st = { features: 0, kept: 0, multi_path: 0, pieces: 0 };
   const s = bbox.lat0 - PAD, n = bbox.lat1 + PAD, w = bbox.lon0 - PAD, e = bbox.lon1 + PAD;
-  for (const L of USFS_LAYERS) {
+  for (const L of layers) {
     let got = 0, kept = 0;
     for (let offset = 0; ; offset += USFS_PAGE) {
       /* A page that fails is fatal, not empty: an empty page would delete up to a thousand roads from
@@ -1158,6 +1165,31 @@ async function backfillBikeInputs(ways, bbox, query, logFn = log) {
   return st;
 }
 
+/* One-off, for a schema-4 checkpoint: where OpenStreetMap says a motor vehicle may or may not go. One
+   tag query, statewide.
+
+   The USFS half is NOT here: it is a re-fetch of the trails layer, because an ArcGIS objectid is not
+   a stable key across republications. A first version looked the records up by id and stamped none of
+   3,382 of them while reporting four pages read — the ids in the checkpoint were 86,000 below the ones
+   the service now serves. The effect assertion caught it; the log never would have. */
+async function backfillMotoInputs(ways, bbox, query, logFn = log) {
+  const st = { osm_yes: 0, osm_no: 0, requests: 0 };
+  const s = bbox.lat0 - PAD, n = bbox.lat1 + PAD, w = bbox.lon0 - PAD, e = bbox.lon1 + PAD;
+  const bb = (a, b, c, d) => [a, b, c, d].map(v => v.toFixed(3)).join(',');
+  st.requests += await overpassByArea((a, b, c, d) => '[out:json][timeout:300];('
+      + ['motorcycle', 'motor_vehicle'].map(k => 'way["highway"]["' + k + '"](' + bb(a, b, c, d) + ');').join('')
+      + ');out tags;', [s, w, n, e],
+    els => { for (const el of els) {
+      const way = ways.get('o' + el.id); if (!way) continue;
+      const mo = motoDesignation(el.tags);
+      if (mo == null || way.mo != null) continue;
+      way.mo = mo;
+      if (mo === 1) st.osm_yes++; else st.osm_no++;
+    } }, query, logFn, 'motorized');
+  logFn('upgrade    what OSM says about motor vehicles: ' + JSON.stringify(st));
+  return st;
+}
+
 async function backfillHikeInputs(ways, gateNodes, bbox, query, logFn = log) {
   const bb = (a, b, c, d) => [a, b, c, d].map(v => v.toFixed(3)).join(',');
   const st = { gates: 0, gates_open_to_cars: 0, restricted_ways: 0, paved_ways: 0, requests: 0 };
@@ -1295,6 +1327,10 @@ export async function build(opts, deps = {}) {
              tags are in hand; a schema-3 checkpoint has to ask Overpass for them again. */
           const bk = bikeRestriction(el.tags);
           if (bk) w.bk = bk;
+          /* And whether a motor vehicle is allowed here, for the dirt bike: yes, no, or nothing said.
+             Nothing said on singletrack means closed — see src/access.mjs. */
+          const mo = motoDesignation(el.tags);
+          if (mo != null) w.mo = mo;
           ways.set(wid, w);
         }
         nWays++;
@@ -1327,7 +1363,7 @@ export async function build(opts, deps = {}) {
       usfsDone = false;
     } else log('           USFS was already re-fetched by page before an interruption — keeping it');
   }
-  let usfsStats = null, backfill = null, hikeInputs = null, bikeInputs = null, wildStats = null;
+  let usfsStats = null, backfill = null, hikeInputs = null, bikeInputs = null, motoInputs = null, wildStats = null;
   if (!opts.skipUsfs && !usfsDone) {
     usfsStats = await fetchUsfs(tiles, opts.bbox, fetchArc, ways, log);
     usfsDone = true; usfsPaged = true;
@@ -1356,6 +1392,30 @@ export async function build(opts, deps = {}) {
     log('upgrade    schema 4: the tag that forbids a bicycle');
     bikeInputs = await backfillBikeInputs(ways, opts.bbox, deps.overpassRaw || overpassRaw, log);
     schemaNow = 4;
+    saveCk();
+  }
+  if (upgrading && schemaNow < 5) {
+    log('upgrade    schema 5: where motorized use is designated');
+    /* The trail records are re-fetched, not looked up: EDW reassigns objectids when it republishes,
+       and the trails layer is small. Their geometry comes with them, so the old records go first. */
+    let dropped = 0;
+    for (const wid of [...ways.keys()]) if (wid.startsWith('unfst')) { ways.delete(wid); dropped++; }
+    log('upgrade    re-fetching ' + dropped.toLocaleString() + ' USFS trail pieces with their designations');
+    const trailAgain = await fetchUsfs(tiles, opts.bbox, fetchArc, ways, log, USFS_LAYERS.filter(l => l.type === 'nfst'));
+    motoInputs = { usfs_trails: trailAgain, dropped, ...(await backfillMotoInputs(ways, opts.bbox, deps.overpassRaw || overpassRaw, log)) };
+    let designated = 0, nonmotor = 0, silent = 0;
+    for (const [wid, way] of ways) if (way.type === 'nfst') { if (way.mo === 1) designated++; else if (way.mo === 0) nonmotor++; else silent++; }
+    Object.assign(motoInputs, { designated, nonmotor, silent });
+    log('upgrade    trail designations: ' + designated.toLocaleString() + ' motorized, '
+      + nonmotor.toLocaleString() + ' not, ' + silent.toLocaleString() + ' nothing recorded');
+    /* Bites on a real fetch, not on a fixture: Washington has 3,382 trail records and 123 of them are
+       motorized, so a hundred records with none designated means the fields did not arrive. A dirt
+       bike figure built on that would silently have no singletrack at all. */
+    if (designated === 0 && designated + nonmotor + silent >= 100) {
+      throw new Error('schema 5 read ' + (designated + nonmotor + silent) + ' trail records and found no '
+        + 'motorized designation on any of them — the fields did not arrive');
+    }
+    schemaNow = 5;
     saveCk();
   }
 
@@ -1496,15 +1556,30 @@ export async function build(opts, deps = {}) {
       if (offGain >= 0) withOffGain++;
       row.push(Math.round(proj.d), n, walk, gain, offGain);
     }
-    if (any || modes.has(k)) { row.push(...modeColumns(modes.get(k))); rows.push(row); }
+    if (any || modes.has(k)) { row.push(...worstColumns(modes.get(k))); rows.push(row); }
   }
   /* cells the network reaches from further than any category's nearest-way lookup looked */
   for (const [k, rec] of modes) {
     if (state.nearest.has(k)) continue;
     const [ri, rj] = k.split(':').map(Number);
-    rows.push([ri, rj, ...Array(CATS.length * ROW_STRIDE).fill(-1), ...modeColumns(rec)]);
+    rows.push([ri, rj, ...Array(CATS.length * ROW_STRIDE).fill(-1), ...worstColumns(rec)]);
   }
   rows.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+
+  /* One file per mode (v9). A cell with nothing to say in a mode is not written into it, so the
+     bushwhack-only corners of the state cost nothing in the drive's file. */
+  const modeRows = {};
+  for (const mode of MODES_IN_FILE) {
+    const list = [];
+    for (const [k, rec] of modes) {
+      if (!hasMode(mode, rec)) continue;
+      const [ri, rj] = k.split(':').map(Number);
+      if (!inBbox(...cellCenter(ri, rj), opts.bbox)) continue;
+      list.push([ri, rj, ...modeColumns(mode, rec)]);
+    }
+    list.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    modeRows[mode] = list;
+  }
 
   const provenance = {
     generator: GENERATOR, generator_version: GENERATOR_VERSION,
@@ -1521,11 +1596,12 @@ export async function build(opts, deps = {}) {
                   ways_with_trailhead: withTh },
     rules: ruleStats, trailhead_kinds: thStats, checkpoint_schema: schemaNow,
     usfs_fetch: usfsStats, checkpoint_upgrade: backfill, checkpoint_upgrade_3: hikeInputs,
-    checkpoint_upgrade_4: bikeInputs,
+    checkpoint_upgrade_4: bikeInputs, checkpoint_upgrade_5: motoInputs,
     wilderness: wildStats ? { areas: wildStats.areas.length, features: wildStats.features, points: wildStats.points,
                               simplify_m: WILD_SIMPLIFY_M }
                           : { areas: wilderness.length, from: 'checkpoint' },
-    modes: modeStats, row_width: ROW_WIDTH, routes: null,
+    modes: modeStats, base_width: BASE_WIDTH, mode_width: MODE_WIDTH,
+    mode_files: MODES_IN_FILE.map(m => ({ mode: m, cells: modeRows[m].length })), routes: null,
     tiles: tiles.length,
     requests: { overpass: osmRequests, overpass_retries: osmRetries,
                 overpass_mb: +(osmBytes / 1e6).toFixed(1),
@@ -1576,6 +1652,22 @@ export async function build(opts, deps = {}) {
     atomicWrite(geomPath, JSON.stringify(geomOut));
     log('wrote ' + opts.out + ' - ' + out.rows.length.toLocaleString() + ' cells, '
       + out.ways.length.toLocaleString() + ' ways, ' + (fs.statSync(opts.out).size / 1e6).toFixed(2) + ' MB');
+    /* A mode file is rows keyed by cell index and nothing else — no way indices, so a regional merge
+       is "replace mine, keep the rest" with nothing to re-point. */
+    for (const mode of MODES_IN_FILE) {
+      const file = path.join(path.dirname(opts.out), path.basename(modeFile(mode)));
+      let rowsOut = modeRows[mode];
+      if (routesMine && fs.existsSync(file)) {
+        const prev = JSON.parse(fs.readFileSync(file, 'utf8'));
+        const carried = (prev.rows || []).filter(r => !routesMine.has(r[0] + ':' + r[1]));
+        rowsOut = [...carried, ...rowsOut].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      }
+      const extra = mode === 'moto' && modeStats && modeStats.moto_trail_miles
+        ? { excluded: modeStats.moto_trail_miles } : {};
+      atomicWrite(file, JSON.stringify({ version: ACCESS_FORMAT, generated, mode, ...extra, rows: rowsOut }));
+      log('wrote ' + file + ' - ' + rowsOut.length.toLocaleString() + ' cells, '
+        + (fs.statSync(file).size / 1e6).toFixed(2) + ' MB, fetched when ' + mode + ' is on screen');
+    }
     log('wrote ' + geomPath + ' - geometry only, ' + (fs.statSync(geomPath).size / 1e6).toFixed(2)
       + ' MB, fetched by the app only on the first "show the approach"');
     /* The checkpoint is NOT deleted on success. It holds the fetched, unclipped geometry, and

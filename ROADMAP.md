@@ -141,9 +141,9 @@ files** — a median 8 KB a tap, 52 KB at worst
 
 What is left, in order of value:
 
-1. **Per-mode files for `access.json`**, so the up-front download holds at about
-   1.5 MB plus one mode however many modes exist. This is the one to do before a
-   fourth mode lands, and the dirt bike is asking.
+1. ~~**Per-mode files for `access.json`**~~ — done 2026-09-12, with the dirt bike. The base file is
+   1.50 MB over the wire and one mode 0.59–0.74 MB, so the up-front download is **2.09 MB with four
+   modes** against 2.93 MB with three in one file, and it stays there as modes are added.
 2. **Quantising the mode columns and dropping the redundant worst case** — measured
    at about 20% together, no new plumbing, no format change beyond the values.
 
@@ -450,3 +450,18 @@ Nothing here without the user's explicit sign-off — see hard rule 2.
 - **Still wanted, all needing a re-bake:** PRISM precipitation multipliers,
   SSURGO soil water capacity, NIFC fire perimeters. None of them belongs in the
   UI.
+
+### The worst case is always on foot, even for a rider
+
+**Open, and worth it for the user's own riding.** Every mode's "if the gravel is gated" figure is the
+same walk from the nearest paved road, because that is the honest pessimistic bound for a walker. For
+a **dirt bike** it is the wrong bound: a gated gravel road is a twenty-minute ride, not a five-hour
+walk. At Deming the worst case reads 5.5 h on foot in all four modes, when the machine in the user's
+garage would cover that gravel in under half an hour — if the closure does not name motor vehicles,
+which at Deming nothing mapped does either way.
+
+The fix is a per-mode worst case: the same "from the nearest paved road" start, travelled by the mode
+on screen rather than on foot. It is cheap — the vehicle passes already exist, and it is one more
+Dijkstra seeded at the pavement instead of at the car — and it would make the gated case legible for
+the two riding modes instead of overstating it by an order of magnitude. Held only because it changes
+a figure that has been read the same way since v6, and that deserves its own before-and-after.

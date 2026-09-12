@@ -295,12 +295,12 @@ test('bake: produces at most one row per cell, keyed by cell index', async () =>
      left out are exactly the ones the fixture's ways do not reach. */
   assert.ok(r.rows.length > 0 && r.rows.length <= rows.length,
     `${r.rows.length} rows for ${rows.length} cells`);
-  for (const row of r.rows) assert.equal(row.length, AC.ROW_WIDTH,
-    'rows are [i, j], then distance/way/walk/gain per category, then the mode columns');
+  for (const row of r.rows) assert.equal(row.length, AC.BASE_WIDTH,
+    'a base row is [i, j], then distance/way/walk/gain per category, then the worst case');
   for (const row of r.rows) {
-    const d = AC.decodeRow(row), m = AC.decodeModes(row);
-    assert.ok(AC.CATS.some(c => d[c] >= 0) || m.hike || m.worst,
-      'a row exists only when something was found — a nearby way, or a route over the network');
+    const d = AC.decodeRow(row);
+    assert.ok(AC.CATS.some(c => d[c] >= 0) || AC.decodeWorst(row),
+      'a base row exists only when something was found — a nearby way, or a route over the network');
   }
   const keys = new Set(r.rows.map(x => x[0] + ':' + x[1]));
   assert.equal(keys.size, r.rows.length, 'cell indices must be unique — one row per cell, no repeats');
@@ -806,15 +806,24 @@ test('format: the bake stamps the version the app reads, from one constant', asy
   const app = fs.readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
   assert.match(app, /j\.version!==ACCESS_FORMAT/,
     'the app must refuse a version it does not know rather than misdecoding it');
-  assert.equal((app.match(/j2?\.version!==ACCESS_FORMAT/g) || []).length, 3,
-    'access.json, access-geom.json and a route shard all need the check — a stale geometry or routes file draws a wrong line');
+  assert.equal((app.match(/j2?\.version!==ACCESS_FORMAT/g) || []).length, 4,
+    'access.json, access-geom.json, a route shard and a mode file all need the check — a stale file draws a wrong line');
 
-  /* And the width really does depend on the stride, so a future change cannot forget to bump it. */
-  assert.equal(out.rows[0].length, AC.ROW_WIDTH);
-  assert.equal(AC.ROW_WIDTH, 2 + AC.CATS.length * AC.ROW_STRIDE + AC.HIKE_STRIDE + 4 + 4
-    + AC.DRIVE_STRIDE + AC.BIKE_STRIDE,
-    'the categories, then hike (7), worst case (4), direct (4), the drive (11) and the bike (13)');
+  /* v9 splits the modes into their own files, and each one is version-checked and width-checked on
+     its own: the base row carries the categories and the worst case, and nothing else. */
+  assert.equal(out.rows[0].length, AC.BASE_WIDTH);
+  assert.equal(AC.BASE_WIDTH, 2 + AC.CATS.length * AC.ROW_STRIDE + 4,
+    'the categories, then the worst case');
   assert.equal(out.ways[0].length, 7);
+  for (const mode of AC.MODES_IN_FILE) {
+    const mf = path.join(dir, path.basename(AC.modeFile(mode)));
+    assert.ok(fs.existsSync(mf), mode + ' has its own file');
+    const mj = JSON.parse(fs.readFileSync(mf, 'utf8'));
+    assert.equal(mj.version, AC.ACCESS_FORMAT, 'stamped with the same constant');
+    assert.equal(mj.mode, mode);
+    for (const row of mj.rows) assert.equal(row.length, AC.MODE_WIDTH[mode],
+      mode + ' rows are [i, j] then its own columns');
+  }
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

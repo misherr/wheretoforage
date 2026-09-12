@@ -354,9 +354,10 @@ test('checkpoint: a schema-1 checkpoint is upgraded in place, never re-fetched',
   assert.ok(!ck.ways['unfsr-closed11'], 'the flattened record is replaced');
   assert.ok(ck.ways['unfsr-closed11.1'], 'by its pieces');
   assert.equal(ck.ways.o1.rd, 'motor_vehicle=no', 'the describing tag was backfilled');
-  assert.equal(pages.length, 4, 'USFS by page, and the wilderness layer with it');
-  assert.ok(queries.length >= 1 && queries.length <= 6,
-    'and a handful of Overpass tag queries — describing tags, then gates, restricted roads and paved: ' + queries.length);
+  assert.equal(pages.length, 5, 'USFS by page, the wilderness layer, and the trail attributes a dirt bike needs');
+  assert.ok(queries.length >= 1 && queries.length <= 8,
+    'and a handful of Overpass tag queries — describing tags, gates, restricted roads, paved, the '
+    + 'bicycle tag and the motorized one: ' + queries.length);
   assert.equal(r.provenance.checkpoint_schema, A.CHECKPOINT_SCHEMA);
   fs.rmSync(dir, { recursive: true, force: true });
 });

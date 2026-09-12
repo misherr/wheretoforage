@@ -222,8 +222,9 @@ export function decodeWay(w, geomFlat) {
    trailhead to the point on the way nearest the cell and stopped there — it never included getting
    from that point to the cell, which is why 924 cells reported a walk of exactly 0 while the way was
    up to 1.9 km away. See docs/access.md. */
-/* v8 appends the bike columns to v7's hike, worst case, direct and drive; see HIKE_AT and BIKE_AT. */
-export const ACCESS_FORMAT = 8;
+/* v9 splits the file: the base carries the categories and the worst case, and each mode's columns
+   live in their own file, fetched when that mode is on screen. See MODE_FILES and BASE_WIDTH. */
+export const ACCESS_FORMAT = 9;
 export const ROW_STRIDE = 5;
 export function decodeRow(row) {
   const d = {};
@@ -547,7 +548,8 @@ export function durationLabel(min) {
 
 /* Why the vehicle stopped where the walk starts, as the bake records it. The last three are a
    bicycle's reasons; the first five a car's. */
-export const STOP = { none: 0, gate: 1, private: 2, rough: 3, end: 4, wilderness: 5, bicycle: 6, closed: 7 };
+export const STOP = { none: 0, gate: 1, private: 2, rough: 3, end: 4, wilderness: 5, bicycle: 6, closed: 7,
+                      designation: 8, restricted: 9 };
 export const STOP_LABEL = {
   [STOP.none]: 'from the road',
   [STOP.gate]: 'from a mapped gate',
@@ -557,6 +559,8 @@ export const STOP_LABEL = {
   [STOP.wilderness]: 'from the wilderness boundary, where a bicycle is illegal',
   [STOP.bicycle]: 'from where the map says no bicycles',
   [STOP.closed]: 'from a road the Forest Service has closed to motorized use',
+  [STOP.designation]: 'from where the singletrack has no motorized designation recorded',
+  [STOP.restricted]: 'from where motor vehicles are not allowed',
 };
 export const AS_MAPPED_NOTE =
   'As mapped. A gate, washout or closure nobody mapped is not in these figures — a road gated six '
@@ -574,6 +578,35 @@ export function carRestriction(tags) {
   return v && CAR_RESTRICTED.test(v) ? v : null;
 }
 export const CAR_BARRIERS = /^(gate|lift_gate|swing_gate|chain|bollard|block|jersey_barrier|log|rope|debris)$/;
+/* Whether a way is DESIGNATED for motorized use, which is the only thing that lets a dirt bike onto
+   singletrack. Three answers, and the third is the important one:
+     1    designated: USFS says motorcycles are allowed, or OSM tags them yes.
+     0    designated NOT: USFS says non-motorized.
+     null nothing recorded — 69% of Washington's USFS trail mileage, and nearly every OSM-only path.
+   Silence is treated as CLOSED, at the user's instruction and mine: the optimistic reading would hand
+   a rider thousands of miles that are mostly illegal, and that is the error that earns a citation
+   rather than a wasted drive. What is excluded is said on the sheet — see MOTO_EXCLUDED_NOTE. */
+export const OSM_MOTORIZED_YES = /^(yes|designated|permissive|official)$/;
+export function motoDesignation(tags) {
+  if (!tags) return null;
+  for (const k of ['motorcycle', 'motor_vehicle', 'vehicle']) {
+    const v = tags[k];
+    if (!v) continue;
+    if (OSM_MOTORIZED_YES.test(v)) return 1;
+    if (/^(no|private|permit|forestry|agricultural|delivery|destination)$/.test(v)) return 0;
+  }
+  return null;
+}
+/* The USFS trail attributes: TERRA_MOTORIZED is Y / N / N/A, and ALLOWED_TERRA_USE is a digit string
+   whose 4 is the motorcycle — verified against the date fields, where every 4321 trail carries a
+   motorcycle season and no 321 trail does. */
+export function usfsMotoDesignation(a) {
+  const m = String((a && a.terra_motorized) || '').toUpperCase();
+  const use = String((a && a.allowed_terra_use) || '');
+  if (m === 'Y' || /4/.test(use)) return 1;
+  if (m === 'N' || (use && use !== 'N/A')) return 0;
+  return null;
+}
 /* Where a bicycle is forbidden by a tag, beside carRestriction and read the same way. `dismount`
    counts: pushing a bike is walking, and the bike figure then walks that stretch, which is right. */
 export const BIKE_FORBIDDEN = /^(no|private|dismount)$/;
@@ -745,52 +778,123 @@ export const BIKE_PARK_NOTE =
   'Wilderness and closed roads come from the Forest Service layer. It does not cover the national '
   + 'parks, and bicycles are banned on nearly every trail in them.';
 
-/* v8 rows carry the mode columns after the three categories:
-     hike:   on, onUp, off, offUp, parkEastM, parkNorthM, stop
-     worst:  on, onUp, off, offUp
-     direct: on, onUp, off, offUp      (only when straight through the brush saves 15 min or more)
-     drive:  pavedM, gradedM, roughM, driveUp, on, onUp, off, offUp, parkEastM, parkNorthM, stop
-     bike:   roadM, roughM, trailM, rideUp, on, onUp, off, offUp, parkEastM, parkNorthM,
-             dismountEastM, dismountNorthM, stop
-   in metres. The park point is metres east and north of the cell centre rather than an index into a
-   table, so a regional merge has nothing to re-point. -1 in a group's first column means no figure. */
-export const HIKE_AT = 2 + 3 * 5;
-export const HIKE_STRIDE = 7;
-export const WORST_AT = HIKE_AT + HIKE_STRIDE;
-export const DIRECT_AT = WORST_AT + 4;
-export const DRIVE_AT = DIRECT_AT + 4;
-export const DRIVE_STRIDE = 11;
-export const BIKE_AT = DRIVE_AT + DRIVE_STRIDE;
-export const BIKE_STRIDE = 13;
-export const ROW_WIDTH = BIKE_AT + BIKE_STRIDE;
+/* ===================== the dirt bike =====================
+
+   Between the bike and the drive: faster than pedalling, goes where a truck cannot, and stopped where
+   a bicycle is not. The user rides one, and it is how they get past a gate on a road too rough to
+   drive.
+
+     road    25 mph   pavement, a graded forest road, a street — no faster than the truck on good road
+     rough   20 mph   level 3 and below, tracks, unrated spurs, gated roads: where the mode earns its keep
+     trail   10 mph   singletrack, and only where motorized use is designated
+
+   plus 2 minutes per 100 m of climb: a motor barely notices grade, and what slows a climb is the tread,
+   which the speed classes already carry. (A bicycle pays 8 and a walker 10.)
+
+   What stops it, and this is where it differs from the bicycle:
+     - designated wilderness, as for everything;
+     - roads the Forest Service has closed to MOTORIZED use — this layer does apply here, and it is
+       the whole reason BIKE_BLOCKS_CLOSED_ROADS was kept after the bicycle stopped needing it;
+     - motor_vehicle=no and the rest of the access tags a car respects;
+     - singletrack with no recorded motorized designation, which is most of it.
+   A GATE does not stop it, any more than it stops a bicycle: riding round one is the point of the
+   machine. What stops it is a closure that names motor vehicles. */
+export const MOTO_MPH = { road: 25, rough: 20, trail: 10 };
+export const MOTO_CLASSES = ['road', 'rough', 'trail'];
+export const MOTO_CLASS_LABEL = { road: 'road', rough: 'rough road or track', trail: 'designated singletrack' };
+export const MOTO_CLIMB_MIN_PER_100M = 2;
+export function motoMinutes(b) {
+  if (!b) return null;
+  let m = 0;
+  for (const c of MOTO_CLASSES) m += (b[c] || 0) / (MOTO_MPH[c] * 1609.34 / 60);
+  return m + Math.max(0, b.up || 0) * MOTO_CLIMB_MIN_PER_100M / 100;
+}
+export const motoMetres = b => b ? MOTO_CLASSES.reduce((s, c) => s + (b[c] || 0), 0) : null;
+export const motoTravelMinutes = b => b ? motoMinutes(b) + footMinutes(b.walk) : null;
+export const MOTO_NOTE =
+  'The ride is from where a car stops, at 25 mph on a road, 20 on a rough one and 10 on singletrack, '
+  + 'plus 2 minutes per 100 m of climb. A gate is not counted as a stop; a closure that names motor '
+  + 'vehicles is.';
+/* A conservative mode has to be legible as conservative: say what is being left out rather than let a
+   rider assume the trails are not there. The mileage comes from the bake, in the mode file. */
+export function motoExcludedNote(x) {
+  if (!x) return 'Only singletrack recorded as open to motorcycles is counted. Trails with no '
+    + 'designation recorded are left out, and most have none.';
+  const mi = n => Math.round(n).toLocaleString();
+  return 'Only singletrack the Forest Service records as open to motorcycles is counted — '
+    + mi(x.designated_mi) + ' mi of it. Left out: ' + mi(x.undesignated_mi) + ' mi of USFS trail with '
+    + 'no designation recorded, ' + mi(x.nonmotorized_mi) + ' mi recorded as non-motorized, and '
+    + mi(x.osm_only_mi) + ' mi of path that only OpenStreetMap maps, which rarely says either way. '
+    + 'Motorized designation is the thing in this figure most likely to be wrong.';
+}
+
+/* ===================== the files, and what is in a row =====================
+
+   v9 SPLITS the data. Up to v8 every mode's columns sat in one row of one file, and with three modes
+   that file was 2.93 MB over the wire before a fourth was written — every byte of it fetched by a
+   viewer who uses one mode. So:
+
+     data/access.json        the base: the three category columns, the worst case, and which mode
+                             files exist. Fetched always.
+     data/access-hike.json   the hike figure and the straight-in alternative
+     data/access-drive.json  the drive
+     data/access-bike.json   the bicycle
+     data/access-moto.json   the dirt bike, plus what its designation rule excludes
+
+   Each mode file is fetched when that mode is on screen and cached for the session, so the up-front
+   download stops growing with the number of modes. Rows are keyed by cell index in every file, so a
+   mode file can be missing, stale-checked and refused on its own.
+
+   The rows, all metres, all -1 for "no figure" in the group's first column — and note that 0 is a
+   real answer for several of them (no pavement on the drive, no road on a ride), which is why the
+   sentinel is negative and not zero:
+
+     base:   i, j, then per category [d, wayIndex, walk, gain, offGain], then worst [on, onUp, off, offUp]
+     hike:   i, j, on, onUp, off, offUp, parkE, parkN, stop, then direct [on, onUp, off, offUp]
+     drive:  i, j, pavedM, gradedM, roughM, up, on, onUp, off, offUp, parkE, parkN, stop
+     bike:   i, j, roadM, roughM, trailM, up, on, onUp, off, offUp, parkE, parkN, dismountE, dismountN, stop
+     moto:   i, j, the same shape as bike
+
+   A park point is metres east and north of the cell centre rather than an index into a table, so a
+   regional merge has nothing to re-point. */
+export const WORST_AT = 2 + 3 * ROW_STRIDE;
+export const BASE_WIDTH = WORST_AT + 4;
+export const MODES_IN_FILE = ['hike', 'drive', 'bike', 'moto'];
+export const RIDE_MODES = ['bike', 'moto'];
+export const MODE_WIDTH = { hike: 13, drive: 13, bike: 15, moto: 15 };
+export const modeFile = mode => 'data/access-' + mode + '.json';
+
 const modeGroup = (row, at) => row[at] != null && row[at] >= 0
   ? { on: row[at], onUp: Math.max(0, row[at + 1]), off: row[at + 2], offUp: Math.max(0, row[at + 3]) } : null;
 const parkAt = (row, at, lat, lon) => lat != null && lon != null
   ? [lat + row[at + 1] / 111320, lon + row[at] / (111320 * Math.cos(lat * Math.PI / 180))] : null;
-export function decodeModes(row, lat, lon) {
-  const hike = modeGroup(row, HIKE_AT);
-  if (hike) {
-    hike.park = parkAt(row, HIKE_AT + 4, lat, lon);
-    hike.stop = row[HIKE_AT + 6] >= 0 ? row[HIKE_AT + 6] : STOP.none;
+
+/* The worst case lives in the base file: it is the same walk from the pavement whichever mode is on
+   screen, and every mode's block shows it. */
+export const decodeWorst = row => modeGroup(row, WORST_AT);
+
+/* One mode's row, decoded into the shape the sheet reads. The ride modes share a shape — a bicycle
+   and a dirt bike differ in their speeds and in what stops them, not in what is recorded. */
+export function decodeModeRow(mode, row, lat, lon) {
+  if (mode === 'hike') {
+    const hike = modeGroup(row, 2);
+    if (hike) { hike.park = parkAt(row, 6, lat, lon); hike.stop = row[8] >= 0 ? row[8] : STOP.none; }
+    return { hike, direct: modeGroup(row, 9) };
   }
-  /* The drive's first column is metres of pavement, which is legitimately 0 for a cell whose drive
-     starts where the pavement ends — so an absent figure is -1 and only a negative means absent. */
-  let drive = null;
-  if (row.length > DRIVE_AT && row[DRIVE_AT] != null && row[DRIVE_AT] >= 0) {
-    drive = { paved: row[DRIVE_AT], graded: row[DRIVE_AT + 1], rough: row[DRIVE_AT + 2],
-              up: Math.max(0, row[DRIVE_AT + 3]), walk: modeGroup(row, DRIVE_AT + 4) || { on: 0, onUp: 0, off: 0, offUp: 0 },
-              park: parkAt(row, DRIVE_AT + 8, lat, lon), stop: row[DRIVE_AT + 10] >= 0 ? row[DRIVE_AT + 10] : STOP.none };
+  if (mode === 'drive') {
+    if (!(row[2] >= 0)) return {};
+    return { drive: { paved: row[2], graded: row[3], rough: row[4], up: Math.max(0, row[5]),
+                      walk: modeGroup(row, 6) || { on: 0, onUp: 0, off: 0, offUp: 0 },
+                      park: parkAt(row, 10, lat, lon), stop: row[12] >= 0 ? row[12] : STOP.none } };
   }
-  /* The bike's first column is metres of road, legitimately 0 for a ride that is all singletrack, so
-     an absent figure is -1 here too. */
-  let bike = null;
-  if (row.length > BIKE_AT && row[BIKE_AT] != null && row[BIKE_AT] >= 0) {
-    bike = { road: row[BIKE_AT], rough: row[BIKE_AT + 1], trail: row[BIKE_AT + 2], up: Math.max(0, row[BIKE_AT + 3]),
-             walk: modeGroup(row, BIKE_AT + 4) || { on: 0, onUp: 0, off: 0, offUp: 0 },
-             park: parkAt(row, BIKE_AT + 8, lat, lon), dismount: parkAt(row, BIKE_AT + 10, lat, lon),
-             stop: row[BIKE_AT + 12] >= 0 ? row[BIKE_AT + 12] : STOP.none };
+  if (RIDE_MODES.includes(mode)) {
+    if (!(row[2] >= 0)) return {};
+    return { [mode]: { road: row[2], rough: row[3], trail: row[4], up: Math.max(0, row[5]),
+                       walk: modeGroup(row, 6) || { on: 0, onUp: 0, off: 0, offUp: 0 },
+                       park: parkAt(row, 10, lat, lon), dismount: parkAt(row, 12, lat, lon),
+                       stop: row[14] >= 0 ? row[14] : STOP.none } };
   }
-  return { hike, worst: modeGroup(row, WORST_AT), direct: modeGroup(row, DIRECT_AT), drive, bike };
+  return {};
 }
 
 /* ===================== external links =====================

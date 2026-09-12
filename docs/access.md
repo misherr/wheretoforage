@@ -1410,6 +1410,104 @@ priced and the cheapest wins.
   already shows them, while nobody believes a ride past a gate until they see the
   line.
 
+## On a dirt bike: the fourth mode
+
+The user rides one, and it is how they get past a gate on a road too rough to drive. It sits between
+the bicycle and the drive: faster than pedalling, goes where a truck cannot, and **stopped where a
+bicycle is not**.
+
+### Speeds
+
+| class | speed | why |
+| --- | --- | --- |
+| road | 25 mph | pavement, a graded forest road, a street — no faster than the truck on good road |
+| rough | 20 mph | level 3 and below, tracks, unrated spurs, gated roads: where the mode earns its keep |
+| designated singletrack | 10 mph | tight tread, and only where motorized use is recorded |
+
+Plus **2 minutes per 100 m of climb** — a motor barely notices grade, and what slows a climb is the
+tread, which the speed classes already carry. A bicycle pays 8 and a walker 10. The user's own case,
+six miles of gated rough road with 500 m of climb: **28 minutes**, against 85 by bicycle and 2.4 hours
+walking.
+
+### What stops it, and the rule that decides the mode
+
+- **Designated wilderness**, as for everything.
+- **Roads the Forest Service has closed to MOTORIZED use.** This is the mode that layer is for, and
+  the reason `BIKE_BLOCKS_CLOSED_ROADS` was kept after the bicycle stopped needing it: 82,766 edges.
+- **`motor_vehicle=no` and the other access tags a car respects**: 76,330 edges.
+- **Singletrack with no recorded motorized designation** — 152,198 edges, the largest block of the
+  four.
+
+A **gate does not stop it**, any more than it stops a bicycle: riding round one is the point of the
+machine. What stops it is a closure that names motor vehicles.
+
+### Silence means closed, and the sheet says what that costs
+
+The designation comes from the USFS trail layer (`TERRA_MOTORIZED`, and `ALLOWED_TERRA_USE` whose 4 is
+the motorcycle — verified against the season fields, where every 4321 trail carries a motorcycle
+season and no 321 trail does) and from OSM's `motorcycle` and `motor_vehicle` tags. Of 3,271 USFS
+trail pieces over Washington: **116 motorized, 988 recorded as not, 2,167 with nothing recorded at
+all.** In miles, counting OSM's paths too:
+
+| | miles |
+| --- | --- |
+| designated open to motorcycles | **996** |
+| USFS trail with no designation recorded | 4,762 |
+| recorded as non-motorized | 1,754 |
+| path only OpenStreetMap maps, which rarely says either way | 14,827 |
+
+**Silence is treated as closed**, at the user's instruction and on their reasoning: the optimistic
+reading hands a rider thousands of miles that are mostly illegal, and that is the error that earns a
+citation rather than a wasted drive.
+
+But a conservative mode has to be **legible as conservative**, or a rider reads "no trails here" where
+the truth is "nobody recorded whether these are open". So the sheet prints the exclusion, from the
+bake rather than from a constant that can go stale — `access-moto.json` carries an `excluded` block
+and `motoExcludedNote()` renders it:
+
+> *Only singletrack the Forest Service records as open to motorcycles is counted — 996 mi of it. Left
+> out: 4,762 mi of USFS trail with no designation recorded, 1,754 mi recorded as non-motorized, and
+> 14,827 mi of path that only OpenStreetMap maps, which rarely says either way. Motorized designation
+> is the thing in this figure most likely to be wrong.*
+
+### What it changes
+
+Against the **bicycle**, over all 46,634 cells that have both figures:
+
+- **quicker for 17,362 (37%)**, by a median 16 minutes, p90 54;
+- the same for 20,351 (44%) — mostly cells where the car already gets as far as either machine;
+- **slower for 8,921 (19%)**, by a median 19 minutes. That is the legal rules costing real time: the
+  bicycle may ride a closed road and undesignated singletrack, and the dirt bike may not. A mode that
+  was quicker everywhere would mean the rules were not being applied.
+
+Against the **drive**: quicker for 36,244 cells (78%), by a median 28 minutes and 133 at the 90th
+percentile — the 110,000 km of rough road a truck cannot use is the whole gain.
+
+Where the ride ends: 34,723 at the road (nothing blocked it), 6,013 at singletrack with no
+designation, 2,911 at a road closed to motor vehicles, 2,880 where motor vehicles are not allowed,
+107 at a wilderness boundary (low only because the other reasons are checked first and usually apply
+at the same edge). 25,349 cells have nothing to ride at all.
+
+### One file per mode
+
+A fourth mode's columns would have pushed `access.json` past 3.2 MB over the wire, every byte of it
+fetched by a viewer who uses one mode. So v9 splits it: the base file carries the categories and the
+worst case, and each mode's columns live in `data/access-<mode>.json`, fetched when that mode goes on
+screen and merged into the same per-cell objects the sheet reads.
+
+| file | raw | over the wire |
+| --- | --- | --- |
+| `access.json` (base) | 5.8 MB | **1.50 MB** |
+| `access-hike.json` | 2.2 MB | 0.59 MB |
+| `access-drive.json` | 2.2 MB | 0.69 MB |
+| `access-bike.json` | 2.4 MB | 0.74 MB |
+| `access-moto.json` | 2.4 MB | 0.74 MB |
+
+**Up front: 2.09 MB for the base and the hike**, against 2.93 MB for three modes in one file — and it
+stays there as modes are added. Switching mode costs one fetch of about 0.7 MB, once per session. The
+mode on screen is fetched **alongside** the base rather than after it, so startup is still one round
+trip.
+
 ## The routes are fetched one region at a time
 
 The routes file grew with every mode — 8.6 MB at the hike, 12.8 MB at the bike, 3.4

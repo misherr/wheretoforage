@@ -570,3 +570,23 @@ work **landed**. So:
   to end and asserts that a maintenance level changes a drive time and a
   `bicycle=no` tag changes a bike figure. Both fail when the field is dropped from
   the copy, which no amount of log-reading did.
+
+## An ArcGIS objectid is not a key
+
+The schema-5 upgrade needed two attributes for trail records the checkpoint already held, so the
+first version asked for those attributes alone — no geometry — and matched them to the stored ways by
+`objectid`. It reported four pages read and stamped **nothing**: EDW had republished the layer, and
+the objectids it now serves are about 86,000 higher than the ones in a checkpoint from the week
+before. The same trail, a different id.
+
+Two lessons, and the first is the one from the section above:
+
+- **The effect assertion caught it.** The log said "usfs_pages: 4"; the counter that mattered said
+  "usfs_designated: 0", and a dirt bike figure built on that would have had no singletrack at all
+  while looking perfectly healthy. The bake now **throws** if it reads a hundred trail records and
+  finds no motorized designation on any of them — a fixture of two trails does not trip it, a real
+  fetch that lost its fields does.
+- **Match an external record by something the publisher promises to keep.** For EDW that is not the
+  objectid. The fix was to re-fetch the trail records with their geometry and replace the old ones
+  outright, the way schema 2 re-paged the roads: the layer is 3,408 features statewide, so the
+  "expensive" option costs four requests.

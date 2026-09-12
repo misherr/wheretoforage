@@ -22,7 +22,8 @@ src/coords.mjs  the coordinate readout and the paste parser
 scripts/        build-cells.mjs, build-access.mjs, fetch-weather.mjs, serve.mjs,
                 access-network.mjs (the network, the drive and the bike), access-modes.mjs (per-cell figures)
 tests/model/    the model regression suite
-data/           cells.json, weather.json, evt-names.json, access.json (+ -geom, + access-routes/) — checked in
+data/           cells.json, weather.json, evt-names.json, access.json (+ -hike/-drive/-bike/-moto,
+                -geom, access-routes/) — checked in
 ```
 
 Washington is divided into ~48,000 one-square-mile cells. Each carries baked
@@ -127,6 +128,22 @@ while nothing throws.
   of the drivable network this code calls unpaved is `highway=residential` — timing those at 15 mph is
   not pessimism, it is wrong about a street.
   [docs/access.md](docs/access.md#getting-there-by-car-the-drive-mode)
+- **A dirt bike is the mode the closed-roads layer is for, and silence on a trail means closed.**
+  It rides roads, tracks and level 1–2 spurs at 25/20/10 mph with 2 min per 100 m of climb, is
+  stopped by wilderness, by the USFS closed-to-motorized layer, by `motor_vehicle=no` and the other
+  access tags, and **on singletrack unless motorized use is recorded** — which it is for 996 mi of
+  Washington's trail against 4,762 mi with nothing recorded. Treating silence as closed was the
+  user's instruction and the right error direction: the optimistic reading hands a rider thousands of
+  miles that are mostly illegal. **A conservative mode must be legible as conservative**, so the
+  sheet prints the excluded mileage from the bake (`excluded` in `access-moto.json`) rather than a
+  constant that can go stale. A gate does not stop it; a closure that names motor vehicles does.
+  [docs/access.md](docs/access.md#on-a-dirt-bike-the-fourth-mode)
+- **One file per mode, and the base file for what they share.** `access.json` carries the categories,
+  the worst case and nothing else; each mode's columns live in `data/access-<mode>.json`, fetched when
+  that mode goes on screen and merged into the same per-cell objects the sheet reads. That is what
+  let a fourth mode land without pushing the up-front download past 3 MB: **1.50 MB base + 0.59–0.74
+  MB for one mode**, against 2.93 MB for three modes in one file. A mode file is version-checked and
+  refused on its own.
 - **A bike is carried to where the car stops, then rides what it is allowed to ride.** Everything a
   walker may use except two absolutes: designated wilderness (federal law, from the USFS EDW layer,
   marked per EDGE because a trail crosses a boundary mid-way) and `bicycle=no|private|dismount`.

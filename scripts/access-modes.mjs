@@ -4,6 +4,8 @@
  *   hike    — the walk from wherever a car can get to, the way a forager would take it
  *   drive   — the drive from the nearest paved road, and the walk that is left after it
  *   bike    — the ride from where the car stops, and the walk that is left after that
+ *   moto    — the same on a dirt bike, which is faster, stopped by the closed-roads layer, and only
+ *             on singletrack the Forest Service records as open to motorcycles
  *   worst   — the same walk from the nearest paved road, for when the gravel is gated after all
  *   direct  — straight through the brush, when that saves DIRECT_SAVES_MIN or more over `hike`
  * each as { on, onUp, off, offUp } in metres, plus where the car stops, why, and the route walked,
@@ -16,9 +18,9 @@
  * The minutes and the difficulty bucket are NOT stored: the app computes them from these parts with
  * the constants in src/access.mjs, so the thresholds can move without a re-bake. */
 import { buildNetwork, carReach, carDrive, walkFrom, approaches, driveApproaches, vehicleApproaches,
-         bikeRide, bikeBlocks, rideStopReason, vehiclePathTo, routeOf, stopReason,
+         bikeRide, bikeBlocks, motoRide, motoBlocks, rideStopReason, vehiclePathTo, routeOf, stopReason,
          drivable, paved } from './access-network.mjs';
-import { STOP, encodeGeom, routeShardKey } from '../src/access.mjs';
+import { STOP, encodeGeom, routeShardKey, RIDE_MODES } from '../src/access.mjs';
 
 const M_LAT = 111320;
 const mLon = lat => 111320 * Math.cos(lat * Math.PI / 180);
@@ -54,6 +56,11 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
   const ride = bikeRide(net, all.filter(inR), blocks, hikeFree);   // carried by the car to any point it can reach
   const rideWalk = walkFrom(net, all.filter(n => isFinite(ride.min[n])), () => false, n => ride.min[n]);
   log('modes      bike blocks: ' + JSON.stringify(blocks.stats));
+  /* The dirt bike: the same two phases, its own blocks, and its own speeds. */
+  const mBlocks = motoBlocks(net, { wilderness });
+  const moto = motoRide(net, all.filter(inR), mBlocks, hikeFree);
+  const motoWalk = walkFrom(net, all.filter(n => isFinite(moto.min[n])), () => false, n => moto.min[n]);
+  log('modes      moto blocks: ' + JSON.stringify(mBlocks.stats));
 
   let drvE = 0, drvReached = 0;
   for (let e = 0; e < net.E; e++) if (drivable(net.W[net.eW[e]])) { drvE++; if (inR(net.eU[e]) && inR(net.eV[e])) drvReached++; }
@@ -61,10 +68,30 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
     drivable_edges: drvE, drivable_edges_reached: drvReached, cells: 0, hike: 0, worst: 0, direct: 0,
     drive: 0, drive_to_the_point: 0, drive_same_park: 0,
     bike: 0, bike_no_ride: 0, bike_blocks: null,
+    moto: 0, moto_no_ride: 0, moto_blocks: null, moto_trail_miles: null,
     stops: { none: 0, gate: 0, private: 0, rough: 0, end: 0 },
     drive_stops: { none: 0, gate: 0, private: 0, rough: 0, end: 0 },
-    bike_stops: {} };
+    bike_stops: {}, moto_stops: {} };
   stats.bike_blocks = blocks.stats;
+  stats.moto_blocks = mBlocks.stats;
+  /* What the designation rule leaves out, in miles, so the sheet can say it rather than let a rider
+     assume the trails are not there. A conservative mode has to be legible as conservative. */
+  {
+    const seg = g => { let s = 0; for (let i = 1; i < g.length; i++)
+      s += Math.hypot((g[i][1] - g[i - 1][1]) * mLon(g[i - 1][0]), (g[i][0] - g[i - 1][0]) * M_LAT); return s; };
+    const mi = { designated_mi: 0, undesignated_mi: 0, nonmotorized_mi: 0, osm_only_mi: 0 };
+    for (const [id, w] of ways) {
+      if (w.cat !== 'trail' || !w.geom || w.geom.length < 2) continue;
+      const d = seg(w.geom) / 1609.34;
+      if (w.mo === 1) mi.designated_mi += d;
+      else if (id[0] !== 'u') mi.osm_only_mi += d;
+      else if (w.mo === 0) mi.nonmotorized_mi += d;
+      else mi.undesignated_mi += d;
+    }
+    for (const k of Object.keys(mi)) mi[k] = Math.round(mi[k]);
+    stats.moto_trail_miles = mi;
+    log('modes      moto trail miles: ' + JSON.stringify(mi));
+  }
   log('modes      car reaches ' + (100 * drvReached / Math.max(1, drvE)).toFixed(1) + '% of drivable road from pavement');
 
   const out = new Map();
@@ -76,10 +103,11 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
     const wA = approaches(net, worst, worstFree, lat, lon, () => elev);
     const dA = driveApproaches(net, drv, driveWalk, lat, lon, () => elev);
     const bA = vehicleApproaches(net, ride, rideWalk, lat, lon, () => elev);
-    if (!hA.primary && !wA.primary && !dA.primary && !bA.primary) continue;
+    const mA = vehicleApproaches(net, moto, motoWalk, lat, lon, () => elev);
+    if (!hA.primary && !wA.primary && !dA.primary && !bA.primary && !mA.primary) continue;
     const rec = { hike: await parts(hA.primary, lat, lon), worst: await parts(wA.primary, lat, lon),
                   direct: await parts(hA.direct, lat, lon), park: null, stop: STOP.none, route: null,
-                  drive: null, driveRoute: null, bike: null, bikeRoute: null };
+                  drive: null, driveRoute: null, bike: null, bikeRoute: null, moto: null, motoRoute: null };
     if (hA.primary) {
       stats.hike++;
       const s = hA.primary.from === 'here' ? -1 : hike.start[hA.primary.from];
@@ -106,24 +134,27 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
       if (rec.park && rec.drive.park[0] === rec.park[0] && rec.drive.park[1] === rec.park[1]) stats.drive_same_park++;
       rec.driveRoute = routeOf(net, driveWalk, d);
     }
-    if (bA.primary) {
-      const b = bA.primary;
-      stats.bike++;
-      const why = b.stopNode >= 0 ? rideStopReason(net, b.stopNode, blocks) : STOP.none;
+    /* The two riders take the same shape, so they take the same code: what differs is upstream, in
+       what each may use and how fast it goes. */
+    for (const [mode, A, veh, vWalk, blk] of [['bike', bA, ride, rideWalk, blocks], ['moto', mA, moto, motoWalk, mBlocks]]) {
+      if (!A.primary) continue;
+      const b = A.primary;
+      stats[mode]++;
+      const why = b.stopNode >= 0 ? rideStopReason(net, b.stopNode, blk) : STOP.none;
       const sameEnd = hA.primary && hA.primary.edge === b.edge && Math.abs(hA.primary.arc - b.arc) < 1;
       const at = p => [Math.round((p[1] - lon) * mLon(lat)), Math.round((p[0] - lat) * M_LAT)];
-      rec.bike = { road: Math.round(b.drive.road), rough: Math.round(b.drive.rough), trail: Math.round(b.drive.trail),
-                   up: Math.round(b.drive.up), stop: why,
-                   park: at(b.source || b.park), dismount: at(b.park),
-                   walk: { on: Math.round(b.on), onUp: Math.round(b.onUp), off: Math.round(b.off),
-                           offUp: sameEnd && rec.hike ? rec.hike.offUp : await offTrailClimb(b.point, [lat, lon]) } };
-      stats.bike_stops[why] = (stats.bike_stops[why] || 0) + 1;
-      if (rec.bike.road + rec.bike.rough + rec.bike.trail === 0) stats.bike_no_ride++;
+      rec[mode] = { road: Math.round(b.drive.road), rough: Math.round(b.drive.rough), trail: Math.round(b.drive.trail),
+                    up: Math.round(b.drive.up), stop: why,
+                    park: at(b.source || b.park), dismount: at(b.park),
+                    walk: { on: Math.round(b.on), onUp: Math.round(b.onUp), off: Math.round(b.off),
+                            offUp: sameEnd && rec.hike ? rec.hike.offUp : await offTrailClimb(b.point, [lat, lon]) } };
+      stats[mode + '_stops'][why] = (stats[mode + '_stops'][why] || 0) + 1;
+      if (rec[mode].road + rec[mode].rough + rec[mode].trail === 0) stats[mode + '_no_ride']++;
       /* The ride IS drawn, unlike the drive: riding past a gate is what the figure is about. */
-      rec.bikeRoute = { edges: [...vehiclePathTo(net, ride, b.stopNode >= 0 ? b.stopNode : b.edgeFrom),
-                                ...(b.from === 'drive' ? [] : routeOf(net, rideWalk, b).edges)],
-                        last: b.edge, lastFrom: b.edgeFrom >= 0 ? b.edgeFrom : null, end: b.point,
-                        start: b.source || b.park };
+      rec[mode + 'Route'] = { edges: [...vehiclePathTo(net, veh, b.stopNode >= 0 ? b.stopNode : b.edgeFrom),
+                                      ...(b.from === 'drive' ? [] : routeOf(net, vWalk, b).edges)],
+                              last: b.edge, lastFrom: b.edgeFrom >= 0 ? b.edgeFrom : null, end: b.point,
+                              start: b.source || b.park };
     }
     if (rec.worst) stats.worst++;
     if (rec.direct) stats.direct++;
@@ -150,7 +181,7 @@ function edgeLine(net, e, a0, a1) {
    partial last edge up to where the off-trail line leaves. Fetched by the app only when someone asks
    to see an approach — 91,054 edges and ~1.9 MB of geometry statewide at the first measurement. */
 export function routesFile(net, modes) {
-  const index = new Map(), edges = [], cellsOut = [], driveOut = [], bikeOut = [];
+  const index = new Map(), edges = [], cellsOut = [], driveOut = [], bikeOut = [], motoOut = [];
   const encodeRoute = (key, r) => {
     if (!r || r.lastFrom == null) return null;
     const ids = r.edges.map(e => { let k = index.get(e); if (k === undefined) { k = edges.length; index.set(e, k); edges.push(encodeGeom(edgeLine(net, e, net.eA0[e], net.eA1[e]))); } return k; });
@@ -189,9 +220,11 @@ export function routesFile(net, modes) {
        differs, on the same rule. */
     const bike = encodeRoute(key, rec.bikeRoute);
     if (bike && (!hike || same(bike) !== same(hike))) bikeOut.push(bike);
+    const moto = encodeRoute(key, rec.motoRoute);
+    if (moto && (!hike || same(moto) !== same(hike)) && (!bike || same(moto) !== same(bike))) motoOut.push(moto);
   }
-  for (const list of [cellsOut, driveOut, bikeOut]) list.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  return { edges, cells: cellsOut, driveCells: driveOut, bikeCells: bikeOut };
+  for (const list of [cellsOut, driveOut, bikeOut, motoOut]) list.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  return { edges, cells: cellsOut, driveCells: driveOut, bikeCells: bikeOut, motoCells: motoOut };
 }
 
 /* The routes, split into the regional files the app fetches one of. Each shard carries its own edge
@@ -202,7 +235,7 @@ export function shardRoutes(routes) {
   const put = (list, c) => {
     const key = routeShardKey(c[0], c[1]);
     let s = out.get(key);
-    if (!s) out.set(key, s = { edges: [], index: new Map(), cells: [], driveCells: [], bikeCells: [] });
+    if (!s) out.set(key, s = { edges: [], index: new Map(), cells: [], driveCells: [], bikeCells: [], motoCells: [] });
     const ids = c[2].map(e => {
       let n = s.index.get(e);
       if (n === undefined) { n = s.edges.length; s.index.set(e, n); s.edges.push(routes.edges[e]); }
@@ -213,6 +246,7 @@ export function shardRoutes(routes) {
   for (const c of routes.cells) put('cells', c);
   for (const c of (routes.driveCells || [])) put('driveCells', c);
   for (const c of (routes.bikeCells || [])) put('bikeCells', c);
+  for (const c of (routes.motoCells || [])) put('motoCells', c);
   for (const s of out.values()) delete s.index;
   return out;
 }
@@ -235,20 +269,41 @@ export function mergeRoutes(prev, fresh, mine) {
   const cells = carry(prev.cells, fresh.cells);
   const driveCells = carry(prev.driveCells, fresh.driveCells);
   const bikeCells = carry(prev.bikeCells, fresh.bikeCells);
-  return { edges, cells, driveCells, bikeCells };
+  const motoCells = carry(prev.motoCells, fresh.motoCells);
+  return { edges, cells, driveCells, bikeCells, motoCells };
 }
 
-/* A v6 row's mode columns for one cell, in the order src/access.mjs decodes them. */
-export function modeColumns(rec) {
-  const h = rec && rec.hike, w = rec && rec.worst, d = rec && rec.direct, v = rec && rec.drive, k = rec && rec.bike;
-  return [
-    ...(h ? [h.on, h.onUp, h.off, h.offUp, rec.park ? rec.park[0] : 0, rec.park ? rec.park[1] : 0, rec.stop] : [-1, -1, -1, -1, 0, 0, -1]),
-    ...(w ? [w.on, w.onUp, w.off, w.offUp] : [-1, -1, -1, -1]),
-    ...(d ? [d.on, d.onUp, d.off, d.offUp] : [-1, -1, -1, -1]),
-    ...(v ? [v.paved, v.graded, v.rough, v.up, v.walk.on, v.walk.onUp, v.walk.off, v.walk.offUp,
-             v.park[0], v.park[1], v.stop] : [-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, -1]),
-    ...(k ? [k.road, k.rough, k.trail, k.up, k.walk.on, k.walk.onUp, k.walk.off, k.walk.offUp,
-             k.park[0], k.park[1], k.dismount[0], k.dismount[1], k.stop]
-          : [-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, -1]),
-  ];
+/* The worst case, which goes in the BASE file because it is the same walk whichever mode is on
+   screen, and every mode's block shows it. */
+export function worstColumns(rec) {
+  const w = rec && rec.worst;
+  return w ? [w.on, w.onUp, w.off, w.offUp] : [-1, -1, -1, -1];
+}
+
+/* One mode's columns for one cell, in the order src/access.mjs decodes them — v9 keeps each mode in
+   its own file, so these are rows of their own rather than a slice of a wide one. */
+export function modeColumns(mode, rec) {
+  if (mode === 'hike') {
+    const h = rec && rec.hike, d = rec && rec.direct;
+    return [
+      ...(h ? [h.on, h.onUp, h.off, h.offUp, rec.park ? rec.park[0] : 0, rec.park ? rec.park[1] : 0, rec.stop]
+            : [-1, -1, -1, -1, 0, 0, -1]),
+      ...(d ? [d.on, d.onUp, d.off, d.offUp] : [-1, -1, -1, -1]),
+    ];
+  }
+  if (mode === 'drive') {
+    const v = rec && rec.drive;
+    return v ? [v.paved, v.graded, v.rough, v.up, v.walk.on, v.walk.onUp, v.walk.off, v.walk.offUp,
+                v.park[0], v.park[1], v.stop] : [-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, -1];
+  }
+  const k = rec && rec[mode];
+  return k ? [k.road, k.rough, k.trail, k.up, k.walk.on, k.walk.onUp, k.walk.off, k.walk.offUp,
+              k.park[0], k.park[1], k.dismount[0], k.dismount[1], k.stop]
+           : [-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, -1];
+}
+/* Does this cell have anything to say in this mode? A row of -1s is not written. */
+export function hasMode(mode, rec) {
+  if (!rec) return false;
+  if (mode === 'hike') return !!(rec.hike || rec.direct);
+  return !!rec[mode];
 }
