@@ -1502,6 +1502,94 @@ rather than after it, so startup is still one round trip. The riding files grew 
 gained a worst case of their own; the current sizes are in [What it
 costs](#what-it-costs) under the next section, and there is deliberately only one table of them.
 
+## A trip is a chain: drive, then ride, then walk
+
+A real trip is a sequence. You drive until the road degrades or gates, ride past that, and walk when
+it is too rough to ride — which is the trip the user took at Deming and the one the four independent
+figures could not describe.
+
+**Two thirds of it was already there.** `bikeRide` and `motoRide` seed at every node the car can
+reach, at no cost, so a ride has always started where the car stops; the sheet has always said "from
+the car". What was missing is that the **drive leg was neither priced nor named**:
+
+| the drive leg the riding figures omitted | |
+| --- | --- |
+| median | 3 min |
+| p75 / p90 | 15 / 34 min |
+| max | 147 min |
+| cells hiding ten minutes or more | **15,160** |
+| cells hiding half an hour or more | 5,681 |
+
+### It was a defect, not only a gap
+
+`rankMinutes` — the "easiest access" sort — ranked the riding modes on ride plus walk, while its own
+comment argues that ordering by part of a journey is wrong. Measured against the corrected order:
+
+| of the top … the old order offered | belonged there |
+| --- | --- |
+| 20 | **7** |
+| 100 | 46 |
+| 500 | 288 |
+
+Median rank displacement was 1,969 places for the bicycle and 2,188 for the dirt bike. The worst
+single case ranked on 123 minutes and is 270 door to cell — true rank 43,631 of 46,634. The sort now
+uses `chainMinutes()`. The **filter** deliberately still means the ride alone: "within a 30-minute
+ride" says riding.
+
+### What it cost to build
+
+Nothing, in compute: `carDrive` already holds the minutes and the legs at every node it reached, and
+the approach scan now hands back which node the ride started from (`sourceNode`). Where the car
+carried the machine to a point part-way along an edge there is no node, and `driveToPoint()` prices
+the partial edge with the arithmetic the drive figure already uses.
+
+Five columns per riding row — the drive's four legs and why the car stopped — because the ride, the
+walk and **both transition points were already stored**. That is what kept a rider's file under the
+3 MB the user set as the trigger: eighteen columns for a free-standing chain would have crossed it.
+
+### What it describes
+
+| | bicycle | dirt bike |
+| --- | --- | --- |
+| three legs: drive, ride and walk | **14,164 (30.4%)** | **11,471 (24.6%)** |
+| two legs | 23,705 | 25,684 |
+| one | 8,765 | 9,479 |
+
+Why the car stops, on a bicycle's chain: the drivable road turns rough 22,820 · the end of the mapped
+drivable road 19,542 · a mapped gate 2,736 · a private or permit road 1,536.
+
+A trip where the machine earns its place, and the sheet's own words for it:
+
+> **Dirt bike** — **2 h** door to cell
+> 5 min driving — 0.2 mi of graded forest road · 100 ft of climb
+> *to where the drivable road turns rough*
+> 1.5 h riding — 24.8 mi of rough road or track · 4,200 ft of climb
+> Easy walk **30 min** on foot after that — 0.4 mi off trail
+> *From the car, 2 h. Driving alone: 12 h.*
+
+### Door to cell is the headline, and "from the car" stays
+
+A rider's figure now leads with the whole journey. "From the car" is kept beneath it because a
+forager already parked is asking a different and equally real question, and the answer costs nothing
+extra — it is the same legs without the drive.
+
+### Honesty: three legs, three places the map can be wrong
+
+Each transition is one **somebody mapped** — a gate OSM knows, a maintenance level USFS recorded. A
+chain therefore multiplies the as-mapped exposure rather than reducing it, and `CHAIN_NOTE` replaces
+`AS_MAPPED_NOTE` on any figure with three legs to say so.
+
+**Chaining does not fix Deming**, and it should not look as though it does. The gate is in neither
+source, so the car drives to the closest the road gets and the chain reads *30 min driving, nothing to
+ride, 35 min on foot* — one hour, identical to the drive figure. The "ride 45 minutes past the gate"
+answer is the **gated bound** from v10, which reads 1.5 h. The chain and the bound together bracket
+the day; neither does it alone.
+
+Two consequences of A1 pricing the park point the ride chose rather than re-choosing it, both
+measured and both small: 221 of 20,135 cells with nothing to ride disagree with the drive figure by
+more than five minutes, and 130 of 39,840 disagree about why the car stopped. Both are the A2 gap
+made visible.
+
 ## The worst case belongs to the mode
 
 A gate nobody mapped is invisible to the network. That is the Deming failure — the user's road was

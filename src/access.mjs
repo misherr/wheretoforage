@@ -227,8 +227,11 @@ export function decodeWay(w, geomFlat) {
 
    v10 gives each RIDING mode its own worst case. Up to v9 the "if the gravel is gated" figure was one
    walk from the pavement, shown under all four modes — and for a rider that is the wrong quantity, not
-   a conservative one. See RIDE_WORST_NOTE. */
-export const ACCESS_FORMAT = 10;
+   a conservative one. See RIDE_WORST_NOTE.
+
+   v11 CHAINS the riding modes: a real trip is drive, then ride, then walk, and up to v10 the first leg
+   was neither priced nor named. See CHAIN_NOTE. */
+export const ACCESS_FORMAT = 11;
 export const ROW_STRIDE = 5;
 export function decodeRow(row) {
   const d = {};
@@ -849,6 +852,54 @@ export function motoExcludedNote(x) {
     + 'Motorized designation is the thing in this figure most likely to be wrong.';
 }
 
+/* ===================== the chain: drive, then ride, then walk =====================
+
+   A trip is a sequence. You drive until the road degrades or gates, ride past that, and walk when it
+   is too rough to ride — which is the trip the user actually took at Deming.
+
+   **The riding figures were already two thirds of this.** `bikeRide`/`motoRide` seed at every node the
+   car can reach, at no cost, so the ride has always started where the car stops; the sheet has always
+   said "from the car". What was missing is that the DRIVE leg was neither priced nor named. It is not
+   small: a median 2 minutes, but 14,095 cells (30%) hide ten minutes or more and 4,756 hide half an
+   hour, up to a maximum of 134.
+
+   That was not only a gap in the story. `rankMinutes` — the "easiest access" sort — ranked the riding
+   modes on ride plus walk, so of the top twenty cells it offered, **seven belonged there**; of the top
+   hundred, 48. One cell in the top two hundred ranked on zero minutes while hiding 57 minutes of
+   driving, its true place 23,442nd. Ordering by part of a journey is the exact mistake the drive mode's
+   own comment warns about.
+
+   **v11 prices the drive to where the ride already starts** — no new pass, because `carDrive` already
+   holds the minutes and the legs at every node it reached. It moves no existing figure: the park point
+   is still the one the ride chose. Re-choosing that point to make the WHOLE journey fastest is a
+   better trip and a separate change, because it moves 14.6% of bike and 18.6% of dirt bike figures and
+   deserves its own before-and-after — queued in ROADMAP.md as A2.
+
+   Door to cell is the headline for a riding mode now, with "from the car" kept beside it: a parked
+   forager asking "how far in from here" is a real question and the answer costs nothing extra, being
+   the same legs without the drive. */
+export const chainMinutes = (mode, k) => {
+  if (!k) return null;
+  const ride = mode === 'moto' ? motoMinutes(k) : rideMinutes(k);
+  return (k.driveTo ? driveMinutes(k.driveTo) : 0) + ride + footMinutes(k.walk);
+};
+export const chainMetres = (mode, k) => k ? (k.driveTo ? driveMetres(k.driveTo) : 0)
+  + (mode === 'moto' ? motoMetres(k) : rideMetres(k)) + k.walk.on + k.walk.off : null;
+/* Does this figure describe a trip with all three legs in it? Under a tenth of a mile of any leg is
+   not a leg worth naming. */
+export const chainLegs = (mode, k) => {
+  if (!k) return 0;
+  const ride = mode === 'moto' ? motoMetres(k) : rideMetres(k);
+  return (k.driveTo && driveMetres(k.driveTo) >= 100 ? 1 : 0) + (ride >= 100 ? 1 : 0)
+    + (k.walk.on + k.walk.off >= 100 ? 1 : 0);
+};
+/* A chain asserts more about the map than a single figure does, and the sheet should say so rather
+   than leave AS_MAPPED_NOTE to carry three legs on its own. */
+export const CHAIN_NOTE =
+  'Three legs, three places the map can be wrong: where the road stops being drivable, where riding '
+  + 'has to stop, and whether the way exists at all. Every transition here is one somebody mapped, '
+  + 'and the gate that once turned a drive-up into a six-mile walk was in neither source.';
+
 /* ===================== the files, and what is in a row =====================
 
    v9 SPLITS the data. Up to v8 every mode's columns sat in one row of one file, and with three modes
@@ -874,7 +925,8 @@ export function motoExcludedNote(x) {
      hike:   i, j, on, onUp, off, offUp, parkE, parkN, stop, then direct [on, onUp, off, offUp]
      drive:  i, j, pavedM, gradedM, roughM, up, on, onUp, off, offUp, parkE, parkN, stop
      bike:   i, j, roadM, roughM, trailM, up, on, onUp, off, offUp, parkE, parkN, dismountE, dismountN, stop,
-             then the mode's own worst case [roadM, roughM, trailM, up, on, onUp, off, offUp, stop]
+             then the mode's own worst case [roadM, roughM, trailM, up, on, onUp, off, offUp, stop],
+             then the drive that reaches the ride [pavedM, gradedM, roughM, up, carStop]
      moto:   i, j, the same shape as bike
 
    The base file's worst case still serves the hike and the drive, because a gate strands both of them
@@ -889,9 +941,13 @@ export const WORST_AT = 2 + 3 * ROW_STRIDE;
 export const BASE_WIDTH = WORST_AT + 4;
 export const MODES_IN_FILE = ['hike', 'drive', 'bike', 'moto'];
 export const RIDE_MODES = ['bike', 'moto'];
-export const MODE_WIDTH = { hike: 13, drive: 13, bike: 24, moto: 24 };
+export const MODE_WIDTH = { hike: 13, drive: 13, bike: 29, moto: 29 };
 /* Where a riding mode's own worst case starts in its row: nine columns, the last the stop reason. */
 export const RIDE_WORST_AT = 15;
+/* And where the drive that reaches the ride starts: four legs and why the car stopped. Five columns
+   rather than eighteen, because the ride, the walk and both transition POINTS are already in the row
+   — which is what kept a rider's file under the 3 MB the user set as the trigger. */
+export const CHAIN_AT = 24;
 export const modeFile = mode => 'data/access-' + mode + '.json';
 
 const modeGroup = (row, at) => row[at] != null && row[at] >= 0
@@ -935,7 +991,14 @@ export function decodeModeRow(mode, row, lat, lon) {
     return { [mode]: { road: row[2], rough: row[3], trail: row[4], up: Math.max(0, row[5]), walk,
                        park: parkAt(row, 10, lat, lon), dismount: parkAt(row, 12, lat, lon),
                        stop: row[14] >= 0 ? row[14] : STOP.none,
-                       worst: rideWorst(row, RIDE_WORST_AT, walk) } };
+                       worst: rideWorst(row, RIDE_WORST_AT, walk),
+                       /* the drive that reaches the ride. Absent where the bake could not price it,
+                          which is not the same as a drive of zero — a cell with no pavement anywhere
+                          near has no chain, and saying "0 min driving" there would be a lie. */
+                       driveTo: row[CHAIN_AT] >= 0
+                         ? { paved: row[CHAIN_AT], graded: row[CHAIN_AT + 1], rough: row[CHAIN_AT + 2],
+                             up: Math.max(0, row[CHAIN_AT + 3]),
+                             stop: row[CHAIN_AT + 4] >= 0 ? row[CHAIN_AT + 4] : STOP.none } : null } };
   }
   return {};
 }

@@ -3,7 +3,7 @@
  * All three modes. For every cell:
  *   hike    — the walk from wherever a car can get to, the way a forager would take it
  *   drive   — the drive from the nearest paved road, and the walk that is left after it
- *   bike    — the ride from where the car stops, and the walk that is left after that
+ *   bike    — the drive to where the car stops, the ride on from there, and the walk left after that
  *   moto    — the same on a dirt bike, which is faster, stopped by the closed-roads layer, and only
  *             on singletrack the Forest Service records as open to motorcycles
  *   worst   — the same walk from the nearest paved road, for when the gravel is gated after all,
@@ -21,7 +21,7 @@
  * the constants in src/access.mjs, so the thresholds can move without a re-bake. */
 import { buildNetwork, carReach, carDrive, walkFrom, approaches, driveApproaches, vehicleApproaches,
          bikeRide, bikeBlocks, motoRide, motoBlocks, rideStopReason, vehiclePathTo, routeOf, stopReason,
-         drivable, paved } from './access-network.mjs';
+         driveLegsAt, driveToPoint, drivable, paved } from './access-network.mjs';
 import { STOP, encodeGeom, routeShardKey, RIDE_MODES } from '../src/access.mjs';
 
 const M_LAT = 111320;
@@ -92,6 +92,10 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
     bike: 0, bike_no_ride: 0, bike_blocks: null,
     moto: 0, moto_no_ride: 0, moto_blocks: null, moto_trail_miles: null,
     bike_worst: 0, moto_worst: 0, bike_worst_stops: {}, moto_worst_stops: {},
+    /* the chain (v11): how many trips really have three legs, why the car stopped, and how big the
+       drive leg the riding figures used to leave out actually is */
+    bike_three_leg: 0, moto_three_leg: 0, bike_no_chain: 0, moto_no_chain: 0,
+    bike_car_stops: {}, moto_car_stops: {}, drive_leg: { bike: null, moto: null },
     /* What the rider's bound comes to, PER MODE — a median over both riders together would be quoted
        later as one of them — and the two checks that say it is a bound at all: never quicker than the
        mode's own figure (it starts further back), never slower than walking from the same pavement (a
@@ -130,6 +134,7 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
 
   const out = new Map();
   const saved = { bike: [], moto: [] };   // minutes each rider's bound beats the walker's, summarised below
+  const driveLeg = { bike: [], moto: [] };   // the leg the ride figures never charged for, for the log
   const parts = async (a, lat, lon) => a ? { on: Math.round(a.on), onUp: Math.round(a.onUp), off: Math.round(a.off),
     offUp: await offTrailClimb(a.point, [lat, lon]) } : null;
   for (const [key, [lat, lon, elev]] of cells) {
@@ -183,6 +188,33 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
                             offUp: sameEnd && rec.hike ? rec.hike.offUp : await offTrailClimb(b.point, [lat, lon]) } };
       stats[mode + '_stops'][why] = (stats[mode + '_stops'][why] || 0) + 1;
       if (rec[mode].road + rec[mode].rough + rec[mode].trail === 0) stats[mode + '_no_ride']++;
+      /* The leg BEFORE the ride: the drive that reaches wherever this figure starts. No new traversal
+         — carDrive already holds the minutes and the legs at every node it reached, and the scan now
+         hands back which node the ride started from. Where the car carried the machine to a point
+         part-way along an edge there is no node, and driveToPoint prices the partial edge with the
+         same arithmetic the drive figure uses.
+         This does NOT move the park point: it prices the one the ride chose. Re-choosing it for the
+         whole journey is A2 in ROADMAP.md, and it would move 15-19% of these figures. */
+      {
+        const legs = b.sourceNode >= 0 ? driveLegsAt(drv, b.sourceNode)
+                                       : driveToPoint(net, drv, b.edge, b.arc);
+        if (legs) {
+          /* Why the car stopped — and "it arrived" is a reason. Where the machine was carried to a
+             point part-way along an edge there is no node, and nothing stopped the car: it got as
+             close as the road goes to this cell. Reporting the barrier at the nearest junction
+             instead disagreed with the drive figure's own reason on 17,859 cells, every one of
+             them this case. */
+          rec[mode].driveTo = { paved: Math.round(legs.paved), graded: Math.round(legs.graded),
+                                rough: Math.round(legs.rough), up: Math.round(legs.up),
+                                stop: b.sourceNode >= 0 ? STOP[stopReason(net, b.sourceNode)] : STOP.none };
+          const three = rec[mode].driveTo.paved + rec[mode].driveTo.graded + rec[mode].driveTo.rough >= 100
+            && rec[mode].road + rec[mode].rough + rec[mode].trail >= 100
+            && rec[mode].walk.on + rec[mode].walk.off >= 100;
+          if (three) stats[mode + '_three_leg']++;
+          stats[mode + '_car_stops'][rec[mode].driveTo.stop] = (stats[mode + '_car_stops'][rec[mode].driveTo.stop] || 0) + 1;
+          driveLeg[mode].push(legs.minutes);
+        } else stats[mode + '_no_chain']++;
+      }
       /* And this rider's worst case. The off-trail climb is the measured one whenever the worst-case
          approach leaves the network at the same place as a leg already measured, which is most of
          them — the ride ends at the same blocked edge, it only takes longer to get there. */
@@ -234,6 +266,18 @@ export async function computeModes(ways, cells, { gates = [], wilderness = null,
       + ' by a median ' + w.saved_p50 + ' min (p90 ' + w.saved_p90 + '), 15 min or more for '
       + w.saved_over_15.toLocaleString() + '; ' + w.no_ride.toLocaleString()
       + ' with nothing rideable leaving the pavement');
+  }
+  for (const mode of RIDE_MODES) {
+    const d = driveLeg[mode]; if (!d.length) continue;
+    d.sort((a, b) => a - b);
+    const at = p => Math.round(d[Math.min(d.length - 1, Math.floor(d.length * p))]);
+    stats.drive_leg[mode] = { cells: d.length, p50: at(.5), p90: at(.9), max: at(1),
+                              over_10min: d.filter(m => m >= 10).length,
+                              over_30min: d.filter(m => m >= 30).length };
+    log('modes      ' + mode + ' chain: ' + stats[mode + '_three_leg'].toLocaleString()
+      + ' trips with all three legs, drive leg a median ' + at(.5) + ' min (p90 ' + at(.9) + ', max '
+      + at(1) + '), ' + stats.drive_leg[mode].over_10min.toLocaleString() + ' over ten minutes'
+      + (stats[mode + '_no_chain'] ? ', ' + stats[mode + '_no_chain'].toLocaleString() + ' with no drive to price' : ''));
   }
   log('modes      and the bound is a bound, on the router\'s own totals: '
     + stats.worst_ride.faster_than_figure + ' quicker than the figure they bound, '
@@ -374,7 +418,7 @@ export function modeColumns(mode, rec) {
                 v.park[0], v.park[1], v.stop] : [-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, -1];
   }
   const k = rec && rec[mode];
-  if (!k) return [-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, -1, ...new Array(9).fill(-1)];
+  if (!k) return [-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, -1, ...new Array(9).fill(-1), ...new Array(5).fill(-1)];
   /* The walk left after the worst-case ride is usually the mode figure's own — the ride ends at the
      same blocked edge, it just started further back — so it is stored once, and -1 in its first
      column means "that walk". A walk of zero metres is a real answer here, which is why the sentinel
@@ -382,11 +426,15 @@ export function modeColumns(mode, rec) {
   const w = k.worst;
   const same = w && w.walk.on === k.walk.on && w.walk.onUp === k.walk.onUp
                  && w.walk.off === k.walk.off && w.walk.offUp === k.walk.offUp;
+  const c = k.driveTo;
   return [k.road, k.rough, k.trail, k.up, k.walk.on, k.walk.onUp, k.walk.off, k.walk.offUp,
           k.park[0], k.park[1], k.dismount[0], k.dismount[1], k.stop,
           ...(w ? [w.road, w.rough, w.trail, w.up,
                    ...(same ? [-1, -1, -1, -1] : [w.walk.on, w.walk.onUp, w.walk.off, w.walk.offUp]), w.stop]
-                : new Array(9).fill(-1))];
+                : new Array(9).fill(-1)),
+          /* the drive that reaches the ride. -1 rather than 0 where there is none to price: a cell with
+             no pavement within reach has no chain, and "0 min driving" would be a different claim. */
+          ...(c ? [c.paved, c.graded, c.rough, c.up, c.stop] : [-1, -1, -1, -1, -1])];
 }
 /* Does this cell have anything to say in this mode? A row of -1s is not written. */
 export function hasMode(mode, rec) {

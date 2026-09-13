@@ -254,8 +254,9 @@ import { classifyAccess, accessDetail, accessRank, accessDistance, gainLabel, ex
          NOT_EXAMINED_LABEL, NOT_EXAMINED_NOTE, OFF_TRAIL_NOTE,
          NO_ON_TRAIL_NOTE, onRouteLabel, LINE_STYLE, LINE_CASING,
          decodeWorst, decodeModeRow, MODES_IN_FILE, modeFile,
-         footMinutes, bucketOf, durationLabel, BUSHWHACK_M, STOP_LABEL, AS_MAPPED_NOTE,
+         footMinutes, bucketOf, durationLabel, BUSHWHACK_M, STOP, STOP_LABEL, AS_MAPPED_NOTE,
          WORST_CASE_NOTE, RIDE_WORST_NOTE, RIDE_WORST_BLOCKED_NOTE, RIDE_MODES,
+         chainMinutes, chainLegs, CHAIN_NOTE,
          DIRECT_SAVES_MIN, decodeGeom as decodeAccessGeom,
          driveMinutes, driveMetres, travelMinutes, DRIVE_NOTE, DRIVE_CLASSES, DRIVE_CLASS_LABEL,
          edgeDoubt, borderNote,
@@ -596,11 +597,16 @@ const minutesIn=(e,mode)=>{ const M=e&&e.modes; if(!M) return null;
   if(mode==='moto') return M.moto?motoMinutes(M.moto):null;
   return null; };
 /* What "easiest" means for a sort: the whole journey. Ordering cells by the drive alone would put a
-   five-minute drive and a four-hour walk above a ten-minute drive that ends at the cell. */
+   five-minute drive and a four-hour walk above a ten-minute drive that ends at the cell.
+
+   Until v11 the riding modes broke that rule in the other direction: they ranked on ride plus walk and
+   left the drive out, so a cell half an hour up a gravel road sorted level with one at the pavement.
+   Of the top twenty "easiest access" cells it offered, seven belonged there; of the top hundred, 48.
+   One in the top two hundred ranked on zero minutes while hiding 57 of driving. Now they rank on the
+   chain, which is the whole journey for them too. */
 const rankMinutes=(e,mode)=>{ const M=e&&e.modes; if(!M) return null;
   if(mode==='drive') return M.drive?travelMinutes(M.drive):null;
-  if(mode==='bike') return M.bike?bikeTravelMinutes(M.bike):null;
-  if(mode==='moto') return M.moto?motoTravelMinutes(M.moto):null;
+  if(RIDE_MODES.includes(mode)) return M[mode]?chainMinutes(mode,M[mode]):null;
   return minutesIn(e,mode); };
 const withinOK=(e,mode,within)=>{ if(within==null) return true; const m=minutesIn(e,mode); return m!=null&&m<=within; };
 const withinLabel=(mode,within)=>mode==='hike'?'within a '+durationLabel(within)+' hike'
@@ -1556,60 +1562,66 @@ function driveBlock(e,dim){
 /* The bike figure: the ride from where the car stops, and the walk left after it. The ride is the only
    vehicle leg this app draws — the drive's roads are already on the overlay, while riding past a gate
    is exactly what the bike figure is about, and nobody believes it until they see the line. */
-function bikeBlock(e,dim){
-  const M=e.modes; if(!M||!M.bike) return hikeBlock(e,dim);
-  const b=M.bike, rm=rideMinutes(b), w=b.walk, wm=footMinutes(w), bk=bucketOf(w);
+function bikeBlock(e,dim){ return rideBlock(e,dim,'bike'); }
+
+/* The two riding modes read as the trip they are: drive until the road gives out, ride past that, walk
+   what is left. One function, because the modes differ in their speeds and in what stops them, not in
+   the shape of the journey — which is the same reason the bake computes them in one loop.
+
+   Door to cell is the headline. "From the car" is kept beneath it, because a forager already parked is
+   asking a different and equally real question, and the answer is the same legs without the drive. */
+function rideBlock(e,dim,mode){
+  const M=e.modes; if(!M||!M[mode]) return hikeBlock(e,dim);
+  const moto=mode==='moto';
+  const b=M[mode], w=b.walk, wm=footMinutes(w), bk=bucketOf(w);
+  const rideM=(moto?motoMetres:rideMetres)(b), rm=(moto?motoMinutes:rideMinutes)(b);
+  const CLS=moto?MOTO_CLASSES:BIKE_CLASSES, LAB=moto?MOTO_CLASS_LABEL:BIKE_CLASS_LABEL;
   const climb=up=>up>=15?' · '+(gainLabel(up)||''):'';
-  const legs=BIKE_CLASSES.filter(c=>b[c]>=100);
-  let t=`<dt>Bike</dt><dd>`;
-  if(rideMetres(b)>=100){
-    t+=`<b>${durationLabel(rm)}</b> ${dim('riding, from where the car stops')}<br>`
-      +(legs.length===1
-        ? `${accessDistance(rideMetres(b))} ${dim('of '+BIKE_CLASS_LABEL[legs[0]])}${climb(b.up)}<br>`
-        : `${accessDistance(rideMetres(b))}${climb(b.up)} ${dim('by bike'+(legs.length?' — '+legs.map(c=>accessDistance(b[c])+' '+BIKE_CLASS_LABEL[c]).join(', '):''))}<br>`);
-  } else t+=`${dim('Nothing to ride: the car gets as far as a bike would, as mapped.')}<br>`;
+  const legs=CLS.filter(c=>b[c]>=100);
+  const c=b.driveTo, dm=c?driveMinutes(c):null, dMet=c?driveMetres(c):0;
+  const total=chainMinutes(mode,b);
+  let t=`<dt>${moto?'Dirt bike':'Bike'}</dt><dd>`;
+  /* the headline: the whole trip, when there is a drive to put in it */
+  if(c&&dMet>=100) t+=`<b>${durationLabel(total)}</b> ${dim('door to cell')}<br>`;
+  /* leg one: the drive to where the ride starts */
+  if(c&&dMet>=100){
+    const dLegs=DRIVE_CLASSES.filter(k=>c[k]>=100);
+    t+=`${durationLabel(dm)} ${dim('driving')} — ${accessDistance(dMet)}`
+      +`${dLegs.length===1?' '+dim('of '+DRIVE_CLASS_LABEL[dLegs[0]]):''}${climb(c.up)}`
+      +`<br>${dim(c.stop===STOP.none?'to the closest the road gets':'to '+STOP_LABEL[c.stop].replace(/^from /,''))}<br>`;
+  }
+  /* leg two: the ride */
+  if(rideM>=100){
+    t+=`${durationLabel(rm)} ${dim('riding')} — ${accessDistance(rideM)}`
+      +`${legs.length===1?' '+dim('of '+LAB[legs[0]]):''}${climb(b.up)}`
+      +(legs.length>1?' '+dim('('+legs.map(k=>accessDistance(b[k])+' '+LAB[k]).join(', ')+')'):'')
+      +(b.stop===STOP.none?'<br>':`<br>${dim('to '+STOP_LABEL[b.stop].replace(/^from /,''))}<br>`);
+  } else t+=`${dim('Nothing to ride: the car gets as far as '+(moto?'a dirt bike':'a bike')+' would, as mapped.')}<br>`;
+  /* leg three: the walk */
   if(wm>=1){
-    t+=`<span class="bucket">${bk.label}</span> <b>${durationLabel(wm)}</b> ${dim('on foot after that')}<br>`
-      +(w.on>0?`${accessDistance(w.on)}${climb(w.onUp)} ${dim('on trails, tracks and roads, '+STOP_LABEL[b.stop])}<br>`:'')
+    t+=`<span class="bucket">${bk.label}</span> <b>${durationLabel(wm)}</b> ${dim('on foot'+(rideM>=100?' after that':''))}<br>`
+      +(w.on>0?`${accessDistance(w.on)}${climb(w.onUp)} ${dim('on trails, tracks and roads')}<br>`:'')
       +`${accessDistance(w.off)}${climb(w.offUp)} <span class="caveat">off trail</span>`
       +(w.off>BUSHWHACK_M?` ${dim('— more than '+accessDistance(BUSHWHACK_M)+' of it, which is what makes this a bushwhack')}`:'')
       +` <a href="#" class="drawroute">Show the route</a><br>`;
   } else t+=`${dim('And then you are there: no walk at all, as mapped.')} <a href="#" class="drawroute">Show the route</a><br>`;
-  t+=`${dim('From the car, '+durationLabel(bikeTravelMinutes(b))+'. '+BIKE_NOTE)}<br>`
-    +`${dim(BIKE_PARK_NOTE)}<br>${dim(AS_MAPPED_NOTE)}`
-    +edgeLine(e,dim,rideMetres(b)+w.on)+`</dd>`;
-  return t+worstBlock(e,dim,bikeTravelMinutes(b));
+  /* the parked forager's question, and the comparison that says whether the machine earns its place */
+  const fromCar=(moto?motoTravelMinutes:bikeTravelMinutes)(b);
+  t+=`${dim('From the car, '+durationLabel(fromCar)+'.')}`
+    +(M.drive&&travelMinutes(M.drive)>total+15?` ${dim('Driving alone: '+durationLabel(travelMinutes(M.drive))+'.')}`:'')
+    +`<br>${dim(moto?MOTO_NOTE:BIKE_NOTE)}<br>`
+    +(moto?`<span class="caveat">${dim(motoExcludedNote(STATIC.access&&STATIC.access.excluded&&STATIC.access.excluded.moto))}</span><br>`
+          :`${dim(BIKE_PARK_NOTE)}<br>`)
+    +`${dim(chainLegs(mode,b)>=3?CHAIN_NOTE:AS_MAPPED_NOTE)}`
+    +edgeLine(e,dim,dMet+rideM+w.on)+`</dd>`;
+  return t+worstBlock(e,dim,total);
 }
 
 /* The dirt bike: the bicycle's shape at the dirt bike's speeds, and with the rule that decides what
    it may ride said out loud. A conservative mode has to be legible as conservative — otherwise a
    rider reads "no trails here" where the truth is "the Forest Service has not recorded whether these
    trails are open to motorcycles, and most of them it has not". */
-function motoBlock(e,dim){
-  const M=e.modes; if(!M||!M.moto) return hikeBlock(e,dim);
-  const b=M.moto, rm=motoMinutes(b), w=b.walk, wm=footMinutes(w), bk=bucketOf(w);
-  const climb=up=>up>=15?' · '+(gainLabel(up)||''):'';
-  const legs=MOTO_CLASSES.filter(c=>b[c]>=100);
-  let t=`<dt>Dirt bike</dt><dd>`;
-  if(motoMetres(b)>=100){
-    t+=`<b>${durationLabel(rm)}</b> ${dim('riding, from where the car stops')}<br>`
-      +(legs.length===1
-        ? `${accessDistance(motoMetres(b))} ${dim('of '+MOTO_CLASS_LABEL[legs[0]])}${climb(b.up)}<br>`
-        : `${accessDistance(motoMetres(b))}${climb(b.up)} ${dim('by dirt bike'+(legs.length?' — '+legs.map(c=>accessDistance(b[c])+' '+MOTO_CLASS_LABEL[c]).join(', '):''))}<br>`);
-  } else t+=`${dim('Nothing to ride: the car gets as far as a dirt bike would, as mapped.')}<br>`;
-  if(wm>=1){
-    t+=`<span class="bucket">${bk.label}</span> <b>${durationLabel(wm)}</b> ${dim('on foot after that')}<br>`
-      +(w.on>0?`${accessDistance(w.on)}${climb(w.onUp)} ${dim('on trails, tracks and roads, '+STOP_LABEL[b.stop])}<br>`:'')
-      +`${accessDistance(w.off)}${climb(w.offUp)} <span class="caveat">off trail</span>`
-      +(w.off>BUSHWHACK_M?` ${dim('— more than '+accessDistance(BUSHWHACK_M)+' of it, which is what makes this a bushwhack')}`:'')
-      +` <a href="#" class="drawroute">Show the route</a><br>`;
-  } else t+=`${dim('And then you are there: no walk at all, as mapped.')} <a href="#" class="drawroute">Show the route</a><br>`;
-  t+=`${dim('From the car, '+durationLabel(motoTravelMinutes(b))+'. '+MOTO_NOTE)}<br>`
-    +`<span class="caveat">${dim(motoExcludedNote(STATIC.access&&STATIC.access.excluded&&STATIC.access.excluded.moto))}</span><br>`
-    +`${dim(AS_MAPPED_NOTE)}`
-    +edgeLine(e,dim,motoMetres(b)+w.on)+`</dd>`;
-  return t+worstBlock(e,dim,motoTravelMinutes(b));
-}
+function motoBlock(e,dim){ return rideBlock(e,dim,'moto'); }
 
 /* The route a figure describes: the walk over the network, the ride before it, where the vehicle
    stops, and the straight off-trail line to the cell centre.

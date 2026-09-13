@@ -185,3 +185,88 @@ test('the worst case is ridden, not walked, for the modes that ride', async () =
   assert.equal(row2[A.RIDE_WORST_AT + 4], 77, 'stored in full when it differs');
   assert.equal(A.decodeModeRow('moto', row2, ...at(1060, 5800)).moto.worst.walk.on, 77);
 });
+
+test('the chain prices the drive to where the ride starts, and names why the car stopped', async () => {
+  /* Pavement, two kilometres of graded gravel to a gate, and trail on beyond it. The rider's figure
+     has always started at the gate; until v11 nothing said the two kilometres existed, and the
+     "easiest access" sort ranked on the part after them. */
+  const ways = new Map([
+    ['ohwy', { geom: line(0, 0, 1000, 0), cat: 'road', type: 'secondary' }],
+    ['ofr', { geom: line(1000, 0, 1000, 2000, 8), cat: 'road', type: 'unclassified', ml: '4' }],
+    ['otrail', { geom: line(1000, 2000, 1000, 5000, 12), cat: 'trail', type: 'path' }],
+  ]);
+  /* past the END of the trail, so there is a walk worth naming as the third leg */
+  const cells = new Map([['1:1', [...at(1060, 5600), 500]]]);
+  const m = await M.computeModes(ways, cells, { gates: [at(1000, 2000)], elevationOf: null,
+                                                offTrailClimb: async () => -1 });
+  const rec = m.modes.get('1:1');
+
+  for (const mode of A.RIDE_MODES) {
+    const k = rec[mode];
+    assert.ok(k, mode + ' reaches the cell');
+    assert.ok(k.driveTo, mode + ' carries the drive that reaches its ride');
+    /* the drive is the gravel, not the pavement: carDrive starts ON the pavement at no cost */
+    assert.ok(k.driveTo.graded > 1800 && k.driveTo.graded < 2200,
+      'about two kilometres of graded gravel, and in the graded class because ml=4 reached the network: '
+      + JSON.stringify(k.driveTo));
+    assert.equal(k.driveTo.rough, 0);
+    assert.equal(k.driveTo.stop, A.STOP.gate, 'and the car stopped at the mapped gate');
+    /* the effect the change exists for: door to cell now includes that drive, exactly */
+    const chain = A.chainMinutes(mode, k);
+    const fromCar = mode === 'moto' ? A.motoTravelMinutes(k) : A.bikeTravelMinutes(k);
+    assert.ok(chain > fromCar, mode + ': the chain charges for the drive');
+    assert.ok(Math.abs((chain - fromCar) - A.driveMinutes(k.driveTo)) < 1e-9, 'by exactly the drive');
+    assert.ok(A.driveMinutes(k.driveTo) > 2, 'which is a real number of minutes, not a rounding: '
+      + A.driveMinutes(k.driveTo).toFixed(1));
+  }
+
+  /* And here the two riders part company on identical ground, for legal reasons rather than physical
+     ones: the trail carries no motorized designation, so the bicycle rides it and the dirt bike walks
+     it. Same drive, same gate, different law — which is why chaining happens inside a mode and there
+     is no "fastest machine" that would hide this. */
+  assert.equal(A.chainLegs('bike', rec.bike), 3, 'the bicycle drives, rides and walks');
+  assert.ok(A.rideMetres(rec.bike) > 2500, 'riding the trail past the gate: ' + A.rideMetres(rec.bike) + ' m');
+  assert.equal(A.chainLegs('moto', rec.moto), 2, 'the dirt bike drives and walks — it may not ride this trail');
+  assert.ok(A.motoMetres(rec.moto) < 100, 'six metres of gravel between the gate node and the junction '
+    + 'is not a ride, which is what the hundred-metre threshold in chainLegs is for: ' + A.motoMetres(rec.moto));
+  assert.equal(rec.moto.stop, A.STOP.designation, 'and says so: no motorized designation recorded');
+  assert.ok(A.chainMinutes('moto', rec.moto) > A.chainMinutes('bike', rec.bike),
+    'so the slower machine wins here, which a mode that picked for you would have hidden');
+
+  /* counted in the bake's own stats, so a statewide run reports the share rather than asserting it */
+  assert.equal(m.stats.bike_three_leg, 1);
+  assert.equal(m.stats.moto_three_leg, 0, 'the dirt bike never rides, so it has no three-leg trip here');
+  assert.equal(m.stats.bike_no_chain, 0);
+  assert.ok(m.stats.drive_leg.bike.p50 > 2, 'and the drive leg is summarised: '
+    + JSON.stringify(m.stats.drive_leg.bike));
+  assert.equal(m.stats.bike_car_stops[A.STOP.gate], 1, 'with why the car stopped, counted');
+
+  /* the columns round-trip */
+  const row = [1, 1, ...M.modeColumns('bike', rec)];
+  assert.equal(row.length, A.MODE_WIDTH.bike);
+  const back = A.decodeModeRow('bike', row, ...at(1060, 5600)).bike;
+  assert.deepEqual(back.driveTo, rec.bike.driveTo);
+  assert.equal(Math.round(A.chainMinutes('bike', back)), Math.round(A.chainMinutes('bike', rec.bike)));
+});
+
+test('the chain still prices the drive where there is nothing to ride', async () => {
+  /* A cell beside a road the car drives to the end of: no ride, but the drive is most of the trip and
+     door to cell has to include it. This is the case the drive figure already answered, and the
+     riding modes must not disagree with it. */
+  const ways = new Map([
+    ['ohwy', { geom: line(0, 0, 1000, 0), cat: 'road', type: 'secondary' }],
+    ['ofr', { geom: line(1000, 0, 5000, 0, 16), cat: 'road', type: 'unclassified', ml: '4' }],
+  ]);
+  const cells = new Map([['2:2', [...at(4900, 200), 500]]]);
+  const m = await M.computeModes(ways, cells, { gates: [], elevationOf: null, offTrailClimb: async () => -1 });
+  const k = m.modes.get('2:2').bike, d = m.modes.get('2:2').drive;
+  assert.equal(A.rideMetres(k), 0, 'nothing to ride: the car gets as far as a bike would');
+  assert.ok(k.driveTo, 'but the drive is still priced');
+  assert.ok(A.driveMinutes(k.driveTo) > 3, 'and it is the bulk of the journey: '
+    + A.driveMinutes(k.driveTo).toFixed(1) + ' min');
+  assert.equal(A.chainLegs('bike', k), 2, 'two legs, so the sheet keeps the plain as-mapped note');
+  /* and it agrees with the drive figure, which answered this cell already */
+  assert.ok(Math.abs(A.chainMinutes('bike', k) - A.travelMinutes(d)) < 2,
+    'the chain and the drive agree where there is no ride: ' + A.chainMinutes('bike', k).toFixed(1)
+    + ' against ' + A.travelMinutes(d).toFixed(1));
+});

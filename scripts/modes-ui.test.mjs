@@ -20,10 +20,10 @@ const P = (on, off, onUp = 0, offUp = 0) => ({ on, off, onUp, offUp });
    right one — the same gap as a log line reporting work the code did not do. `MODE` is a parameter
    here because the app reads it as a module-scope variable, and `edgeLine` is stubbed: the border
    note has its own test. */
-function sheetBlock(name, MODE) {
+function sheetBlock(name, MODE, extra = {}) {
   const from = app.indexOf('function ' + name);
   const src = app.slice(from, app.indexOf('\n}', from) + 2);
-  const deps = { ...AC, MODE, edgeLine: () => '' };
+  const deps = { ...AC, MODE, edgeLine: () => '', ...extra };
   const keys = Object.keys(deps).filter(k => /^[A-Za-z_$][\w$]*$/.test(k));
   return new Function(...keys, src + '\nreturn ' + name + ';')(...keys.map(k => deps[k]));
 }
@@ -251,7 +251,9 @@ test('bike: blocked by wilderness and by a tag — and NOT by a road closed to m
 test('format: the bike columns decode, including where the bike is left', () => {
   const row = [1, 2, 0, 6000, 1200, 300, 900, 60, 200, 30, 100, 200, -400, 900, AC.STOP.closed,
                /* and the mode's own worst case, whose walk here is the same walk */
-               0, 9000, 1200, 400, -1, -1, -1, -1, AC.STOP.closed];
+               0, 9000, 1200, 400, -1, -1, -1, -1, AC.STOP.closed,
+               /* and the drive that reaches the ride */
+               2000, 6000, 1500, 200, AC.STOP.rough];
   assert.equal(row.length, AC.MODE_WIDTH.bike);
   const b = AC.decodeModeRow('bike', row, 47.5, -121.5).bike;
   assert.ok(b, 'a ride with no road in it is still a ride — 0 is not -1');
@@ -266,14 +268,16 @@ test('format: the bike columns decode, including where the bike is left', () => 
 });
 
 test('sheet: the bike figure names the ride, the walk left, and what the layer does not cover', () => {
-  const block = app.slice(app.indexOf('function bikeBlock'), app.indexOf('/* The route the hike figure describes'));
-  assert.match(block, /rideMinutes\(b\)/, 'minutes from the stored metres');
-  assert.match(block, /BIKE_CLASS_LABEL\[/, 'and what kind of riding it is');
+  const block = app.slice(app.indexOf('function rideBlock'), app.indexOf('/* The route the hike figure describes'));
+  assert.match(app, /function bikeBlock\(e,dim\)\{ return rideBlock\(e,dim,'bike'\); \}/,
+    'one block for both riders: they differ in speeds and in what stops them, not in the shape');
+  assert.match(block, /rideMinutes\)\(b\)/, 'minutes from the stored metres');
+  assert.match(block, /BIKE_CLASS_LABEL/, 'and what kind of riding it is');
   assert.match(block, /STOP_LABEL\[b\.stop\]/, 'why the ride ended');
   assert.match(block, /BIKE_PARK_NOTE/, 'the national parks are not in the wilderness layer');
   assert.match(block, /BIKE_NOTE/);
   assert.match(block, /AS_MAPPED_NOTE/);
-  assert.match(block, /worstBlock\(e,dim,bikeTravelMinutes\(b\)\)/);
+  assert.match(block, /worstBlock\(e,dim,total\)/, 'the bound is compared against the whole journey now');
   /* the ride is drawn, unlike the drive */
   assert.match(app, /onBike&&R\.byBike\.get\(k\)/, 'the bike has its own line');
   assert.match(app, /Where the car stops and the ride begins/, 'with the car marked where the ride starts');
@@ -314,7 +318,8 @@ test('moto: silence about motorized use means closed, and the sheet says what th
 
 test('format: the moto row decodes like the bike row, because the machines record the same things', () => {
   const row = [1, 2, 1000, 8000, 2400, 400, 600, 40, 150, 20, 50, -80, 300, 900, AC.STOP.designation,
-               1000, 12000, 2400, 700, 1500, 90, 150, 20, AC.STOP.closed];
+               1000, 12000, 2400, 700, 1500, 90, 150, 20, AC.STOP.closed,
+               0, 9000, 3000, 300, AC.STOP.gate];
   assert.equal(row.length, AC.MODE_WIDTH.moto);
   const m = AC.decodeModeRow('moto', row, 47.5, -121.5).moto;
   assert.equal(m.road, 1000); assert.equal(m.rough, 8000); assert.equal(m.trail, 2400);
@@ -328,15 +333,14 @@ test('format: the moto row decodes like the bike row, because the machines recor
 });
 
 test('sheet: the dirt bike block says the ride, the walk, and what the designation rule excludes', () => {
-  const block = app.slice(app.indexOf('function motoBlock'), app.indexOf('/* The route a figure describes'));
-  assert.match(block, /motoMinutes\(b\)/, 'minutes from the stored metres');
-  assert.match(block, /MOTO_CLASS_LABEL\[/);
+  const block = app.slice(app.indexOf('function rideBlock'), app.indexOf('/* The route a figure describes'));
+  assert.match(app, /function motoBlock\(e,dim\)\{ return rideBlock\(e,dim,'moto'\); \}/);
+  assert.match(block, /motoMinutes:rideMinutes\)\(b\)/, 'minutes from the stored metres');
+  assert.match(block, /MOTO_CLASS_LABEL/);
   assert.match(block, /STOP_LABEL\[b\.stop\]/, 'why the ride ended');
   assert.match(block, /motoExcludedNote\(STATIC\.access&&STATIC\.access\.excluded&&STATIC\.access\.excluded\.moto\)/,
     'the excluded mileage comes from the bake, not from a constant that can go stale');
   assert.match(block, /MOTO_NOTE/);
-  assert.match(block, /AS_MAPPED_NOTE/);
-  assert.match(block, /worstBlock\(e,dim,motoTravelMinutes\(b\)\)/);
 });
 
 test('files: one per mode, fetched when the mode is on screen', () => {
@@ -359,7 +363,7 @@ test('worst case: a walk for the modes a gate strands, a ride for the machines i
      the pavement — and it was wrong by an order of magnitude for the two riding modes: at Deming the
      sheet told a rider his own gravel was a 5.5-hour walk. An overstatement is not automatically the
      safe direction. */
-  assert.equal(AC.MODE_WIDTH.bike, 24); assert.equal(AC.MODE_WIDTH.moto, 24);
+  assert.equal(AC.MODE_WIDTH.bike, 29); assert.equal(AC.MODE_WIDTH.moto, 29);
   assert.equal(AC.MODE_WIDTH.hike, 13, 'the hike and the drive still read the base file\'s one walk');
   assert.equal(AC.MODE_WIDTH.drive, 13);
   assert.equal(AC.RIDE_WORST_AT, 15);
@@ -386,8 +390,10 @@ test('sheet: the worst case is the ride for a rider and the walk for a walker', 
   assert.match(fn, /RIDE_WORST_BLOCKED_NOTE/, 'and the walk when nothing rideable leaves the pavement');
   assert.match(fn, /WORST_CASE_NOTE/, 'the hike and the drive keep the walk');
   /* every mode's block still shows it, which is what makes an unmapped gate visible at all */
-  for (const m of ['hikeBlock', 'driveBlock', 'bikeBlock', 'motoBlock'])
+  for (const m of ['hikeBlock', 'driveBlock', 'rideBlock'])
     assert.match(app.slice(app.indexOf('function ' + m)), /worstBlock\(e,dim,/, m + ' shows the worst case');
+  for (const m of ['bikeBlock', 'motoBlock'])
+    assert.match(app.slice(app.indexOf('function ' + m)), /rideBlock\(e,dim,'\w+'\)/, m + ' goes through it');
 });
 
 test('sheet: the gated case is RUN, and a rider is given a ride where a walker is given the walk', () => {
@@ -433,4 +439,93 @@ test('sheet: the gated case is RUN, and a rider is given a ride where a walker i
 
   /* and a figure the gate does not change says so rather than repeating itself */
   assert.match(sheetBlock('worstBlock', 'moto')(e, plain, 999), /No different/);
+});
+
+test('chain: the drive leg is priced, and a missing one is not a drive of zero', () => {
+  /* v11. The riding figures always started where the car stops — what was missing is how long getting
+     there takes. A median 2 minutes, but 30% of cells hide ten or more and 4,756 hide half an hour. */
+  assert.equal(AC.CHAIN_AT, 24);
+  assert.equal(AC.MODE_WIDTH.bike, AC.CHAIN_AT + 5, 'five columns: four legs and why the car stopped');
+  const row = [1, 2, 1000, 8000, 2400, 400, 600, 40, 150, 20, 50, -80, 300, 900, AC.STOP.designation,
+               -1, -1, -1, -1, -1, -1, -1, -1, -1,
+               0, 9656, 0, 300, AC.STOP.gate];
+  const m = AC.decodeModeRow('moto', row, 47.5, -121.5).moto;
+  assert.ok(m.driveTo, 'the drive that reaches the ride');
+  assert.equal(m.driveTo.graded, 9656);
+  assert.equal(m.driveTo.stop, AC.STOP.gate, 'and why the car stopped there');
+  /* door to cell is the drive plus the ride plus the walk */
+  const drive = AC.driveMinutes(m.driveTo), ride = AC.motoMinutes(m), walk = AC.footMinutes(m.walk);
+  assert.ok(Math.abs(AC.chainMinutes('moto', m) - (drive + ride + walk)) < 1e-9);
+  assert.ok(AC.chainMinutes('moto', m) > AC.motoTravelMinutes(m),
+    'and it is longer than "from the car", which never charged for the drive');
+  assert.equal(Math.round(AC.chainMinutes('moto', m) - AC.motoTravelMinutes(m)), Math.round(drive),
+    'by exactly the drive');
+  assert.equal(AC.chainLegs('moto', m), 3, 'drive, ride and walk all real here');
+
+  /* no chain is not a chain of zero: a cell with no pavement within reach has no drive to name */
+  const none = row.slice(); none[AC.CHAIN_AT] = -1;
+  const m2 = AC.decodeModeRow('moto', none, 47.5, -121.5).moto;
+  assert.equal(m2.driveTo, null);
+  assert.equal(AC.chainMinutes('moto', m2), AC.motoTravelMinutes(m2), 'so the chain is what is known');
+  assert.equal(AC.chainLegs('moto', m2), 2);
+  /* and a leg under a tenth of a mile is not a leg */
+  const tiny = row.slice(); tiny[AC.CHAIN_AT] = 0; tiny[AC.CHAIN_AT + 1] = 40; tiny[AC.CHAIN_AT + 2] = 0;
+  assert.equal(AC.chainLegs('moto', AC.decodeModeRow('moto', tiny, 47.5, -121.5).moto), 2);
+});
+
+test('rank: "easiest access" ranks a rider on the whole journey, not the part after the drive', () => {
+  /* The defect this fixes: of the top twenty cells the sort offered, seven belonged there; of the top
+     hundred, 48. One ranked on zero minutes while hiding 57 of driving. */
+  const fn = app.slice(app.indexOf('const rankMinutes='), app.indexOf('const withinOK='));
+  assert.match(fn, /RIDE_MODES\.includes\(mode\)\) return M\[mode\]\?chainMinutes\(mode,M\[mode\]\):null/,
+    'the riding modes rank on the chain');
+  assert.ok(!/bikeTravelMinutes|motoTravelMinutes/.test(fn),
+    'and no longer on the from-the-car figure, which omitted the drive');
+  assert.match(fn, /travelMinutes\(M\.drive\)/, 'the drive still ranks on its own whole journey');
+  /* the filter is deliberately NOT the chain: "within a 30-minute ride" means the ride */
+  const within = app.slice(app.indexOf('const minutesIn='), app.indexOf('const rankMinutes='));
+  assert.match(within, /rideMinutes\(M\.bike\)/, 'the filter still means what it says');
+});
+
+test('sheet: a riding mode is RUN, and reads as three legs with a door-to-cell headline', () => {
+  const drive = { paved: 2000, graded: 9656, rough: 0, up: 300, stop: AC.STOP.gate };
+  const b = { road: 0, rough: 6000, trail: 0, up: 200,
+              walk: { on: 800, onUp: 40, off: 300, offUp: 20 }, stop: AC.STOP.designation,
+              park: [47.5, -121.5], dismount: [47.51, -121.51], worst: null, driveTo: drive };
+  const e = { lat: 47.5, lon: -121.5, modes: { moto: b, bike: b,
+              drive: { paved: 2000, graded: 9656, rough: 0, up: 300,
+                       walk: { on: 9000, onUp: 600, off: 300, offUp: 20 }, park: [47.5, -121.5], stop: AC.STOP.gate } } };
+  const stubs = { hikeBlock: () => '(hike)', worstBlock: () => '(worst)',
+                  STATIC: { access: { excluded: { moto: { designated_mi: 996, undesignated_mi: 4762,
+                            nonmotorized_mi: 1754, osm_only_mi: 14827 } } } } };
+  const out = sheetBlock('rideBlock', 'moto', stubs)(e, s => s, 'moto');
+
+  const total = AC.chainMinutes('moto', b);
+  assert.match(out, new RegExp('<b>' + AC.durationLabel(total) + '</b> door to cell'),
+    'the headline is the whole trip');
+  assert.match(out, /driving/, 'leg one');
+  assert.match(out, /riding/, 'leg two');
+  assert.match(out, /on foot after that/, 'leg three');
+  assert.match(out, /to a mapped gate/, 'and the transition between one and two is named');
+  assert.match(out, /to where the singletrack has no motorized designation recorded/,
+    'as is the transition between two and three');
+  assert.match(out, new RegExp('From the car, ' + AC.durationLabel(AC.motoTravelMinutes(b))),
+    'the parked forager keeps their answer');
+  assert.ok(out.includes(AC.CHAIN_NOTE), 'three legs, three places the map can be wrong');
+  assert.ok(!out.includes(AC.AS_MAPPED_NOTE), 'which replaces the single-leg note, not doubles it');
+  assert.match(out, /Driving alone: /, 'and the contrast that says whether the machine earns its place');
+  assert.match(out, /most likely to be wrong/, 'the dirt bike still says what its rule excludes');
+
+  /* a cell with nothing to ride reads as the drive and the walk, with no invented ride */
+  const noRide = { ...b, road: 0, rough: 0, trail: 0 };
+  const out2 = sheetBlock('rideBlock', 'moto', stubs)({ ...e, modes: { ...e.modes, moto: noRide } }, s => s, 'moto');
+  assert.match(out2, /Nothing to ride/);
+  assert.ok(!out2.includes(AC.CHAIN_NOTE), 'two legs is not three, so it keeps the plain note');
+  assert.ok(out2.includes(AC.AS_MAPPED_NOTE));
+
+  /* and the bicycle gets its own note and its own speeds through the same block */
+  const out3 = sheetBlock('rideBlock', 'bike', stubs)(e, s => s, 'bike');
+  assert.ok(out3.includes(AC.BIKE_PARK_NOTE), 'the parks are not in the wilderness layer');
+  assert.match(out3, new RegExp('<b>' + AC.durationLabel(AC.chainMinutes('bike', b)) + '</b> door to cell'));
+  assert.ok(AC.chainMinutes('bike', b) > AC.chainMinutes('moto', b), 'pedals are slower over the same ground');
 });

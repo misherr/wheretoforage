@@ -203,6 +203,34 @@ that are certainly false, for a few tag-only queries. The **Geofabrik extract**
 below is the other end of the scale: it makes the question disappear rather than
 answering it.
 
+### QUEUED: A2 — re-choose the park point for the whole journey, not for the ride
+
+**Open. Measured 2026-09-13, deliberately not done with A1.**
+
+v11 chains the riding modes: drive, then ride, then walk, with door to cell as the headline. It prices
+the drive to **the park point the ride already chose** — the one that minimises ride plus walk. That
+was the cheap half and it moved no existing figure.
+
+A2 is the other half: choose the park point to minimise **drive plus ride plus walk**, which is what
+the drive mode already does ("the parking point is the one that makes the WHOLE journey fastest"). It
+is one more seeded pass per rider — `vehicleReach` would take an `initial` hook the way `walkFrom`
+already does, seeding each car-reachable node at its drive minutes instead of at zero.
+
+**Why it is separate: it would move 14.6% of bicycle and 18.6% of dirt bike figures.** The ride's
+car-stop and the drive's own park point already disagree for that many cells, so re-optimising changes
+what those cells say. A figure that has been read one way since v8 deserves its own before-and-after,
+which is the same reasoning that split the per-mode worst case out of the dirt bike.
+
+Two measurements are already waiting for it, both taken on the v11 files and both symptoms of the gap:
+
+- **221 of 20,135 cells** with nothing rideable have a chain that disagrees with the drive figure by
+  more than five minutes — the same journey, answered twice, because the ride left the car somewhere
+  the drive would not have.
+- **130 of 39,840** disagree about why the car stopped, for the same reason.
+
+Both should go to zero, or close to it, when the park point is chosen once for the whole trip. If they
+do not, the re-optimisation is not doing what it claims.
+
 ### The bake holds Washington's roads only, so a border cell drives the long way
 
 **Measured, said out loud, not fixed.** The five deepest drives in the state — up

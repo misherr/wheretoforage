@@ -716,12 +716,42 @@ export function vehicleApproaches(net, drv, driveWalk, lat, lon, elevAt, radiusM
       const x = { total, drive: legs, driveMin: (drv.minutesOf || driveMinutes)(legs), on: walkOn, onUp: walkUp,
                   off: bd, edge: e, arc: ba, from, park, point: cn.point, stopNode, edgeFrom,
                   /* where the vehicle started: the pavement for a car, where the car was left for a bike */
-                  source: source >= 0 ? nodePt[source] : null };
+                  source: source >= 0 ? nodePt[source] : null,
+                  /* and the node itself, which is what prices the leg BEFORE this one. A rider's figure
+                     starts where the car stops, and until v11 nothing said how long getting there took
+                     — 30% of cells were hiding ten minutes or more of driving, and the "easiest
+                     access" sort was ranking on the part after it. -1 means the car carried the
+                     machine to a point mid-edge, which driveToPoint() prices instead. */
+                  sourceNode: source };
       if (better(best)) best = x;
       if (bd <= limitM && better(within)) within = x;
     }
   }
   return { primary: within || best };
+}
+
+/* What the car spent getting to a node it reached: the legs per speed class and the climb, so the app
+   can recompute the minutes from the speeds rather than trusting a baked total. */
+export const driveLegsAt = (drv, node) =>
+  node >= 0 && isFinite(drv.min[node]) ? { ...legsAt(drv, node), minutes: drv.min[node] } : null;
+
+/* The same, for a point part-way along an edge — where the car carried the machine rather than
+   stopping at a junction. The arithmetic is the one vehicleApproaches already uses to price a vehicle
+   going to a point, kept in one place so the two cannot drift. */
+export function driveToPoint(net, drv, e, arc) {
+  const { W, eW, eU, eV, eA0, eA1, cum, climbAt, up, down } = net;
+  if (e < 0 || !drv.can(e)) return null;
+  const u = eU[e], v = eV[e], wi = eW[e], c = cum[wi];
+  if (!isFinite(drv.min[u]) && !isFinite(drv.min[v])) return null;
+  const upU = climbAt(up[wi], c, arc) - climbAt(up[wi], c, eA0[e]);
+  const upV = climbAt(down[wi], c, eA1[e]) - climbAt(down[wi], c, arc);
+  const cls = drv.classOf(W[wi]), mpm = drv.mPerMin[cls], climb = (drv.climbMinPer100m || 0) / 100;
+  const viaU = drv.min[u] + (arc - eA0[e]) / mpm + Math.max(0, upU) * climb;
+  const viaV = drv.min[v] + (eA1[e] - arc) / mpm + Math.max(0, upV) * climb;
+  if (!isFinite(viaU) && !isFinite(viaV)) return null;
+  const atU = viaU <= viaV, n = atU ? u : v;
+  return { ...plusLeg(legsAt(drv, n), cls, atU ? arc - eA0[e] : eA1[e] - arc, atU ? upU : upV),
+           minutes: Math.min(viaU, viaV), node: n };
 }
 
 /* The route an approach takes, start to finish, as edges — the last one only as far as the point the

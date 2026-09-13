@@ -161,6 +161,17 @@ while nothing throws.
   1.04 MB (bike)** as Pages serves them, so 2.23 MB up front on foot and 2.64 MB for a rider, against
   2.93 MB for three modes in one file. Size these against the deployed host and never against
   `gzip -9`, which flattered the figure once. A mode file is version-checked and refused on its own.
+- **A riding figure is a chain: drive, then ride, then walk, and door to cell is the headline.** The
+  riding modes always started where the car stops — the `carried` predicate — but until v11 the drive
+  leg was neither priced nor named, and it is a median 3 minutes with **15,160 cells hiding ten or
+  more and 5,681 hiding half an hour**. That was a live defect, not just a gap: `rankMinutes` ordered
+  "easiest access" on ride plus walk, so of the top twenty cells it offered **seven belonged there**.
+  `chainMinutes()` is what ranks now. The drive is priced to the park point the ride already chose,
+  so **no existing figure moved**; re-choosing it for the whole journey is A2 in ROADMAP.md and would
+  move 15–19%. 30.4% of bike and 24.6% of dirt bike trips have all three legs. "From the car" stays
+  on the sheet beneath the total, because a forager already parked is asking a different question. A
+  chain asserts three transitions, so `CHAIN_NOTE` says it has three places to be wrong.
+  [docs/access.md](docs/access.md#a-trip-is-a-chain-drive-then-ride-then-walk)
 - **A bike is carried to where the car stops, then rides what it is allowed to ride.** Everything a
   walker may use except two absolutes: designated wilderness (federal law, from the USFS EDW layer,
   marked per EDGE because a trail crosses a boundary mid-way) and `bicycle=no|private|dismount`.
