@@ -1546,6 +1546,20 @@ the partial edge with the arithmetic the drive figure already uses.
 Five columns per riding row — the drive's four legs and why the car stopped — because the ride, the
 walk and **both transition points were already stored**. That is what kept a rider's file under the
 3 MB the user set as the trigger: eighteen columns for a free-standing chain would have crossed it.
+Measured against the deployed host, which is the only measurement that counts here:
+
+| over the wire | v10 | v11 |
+| --- | --- | --- |
+| `access.json` (base) | 1.60 MB | 1.60 MB |
+| `access-hike.json` | 0.63 MB | 0.63 MB |
+| `access-drive.json` | 0.73 MB | 0.73 MB |
+| `access-bike.json` | 1.04 MB | **1.21 MB** |
+| `access-moto.json` | 1.02 MB | **1.17 MB** |
+| **startup, on foot** | 2.23 MB | **2.23 MB** |
+| **startup, riding** | 2.64 MB | **2.81 MB** |
+
+The walking modes pay nothing. A rider pays 0.17 MB and is now 0.19 MB from the trigger, which makes
+quantising the mode columns the next size work rather than a someday — it would cut all four files.
 
 ### What it describes
 
