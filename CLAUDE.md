@@ -240,7 +240,7 @@ species identity, and a joint stand-structure factor replacing
 Next, all of which need cells re-baked and none of which belongs in a UI: PRISM
 precipitation multipliers, SSURGO soil water capacity, NIFC fire perimeters, and
 the **30 m habitat rebuild** — queued with its measurements in
-[ROADMAP.md](ROADMAP.md#queued-the-30-m-habitat-rebuild--fetch-to-a-checkpoint-first-decide-what-to-emit-after).
+[ROADMAP.md](ROADMAP.md#queued-the-30-m-habitat-rebuild-fetch-to-a-checkpoint-first-decide-what-to-emit-after).
 `data/cells.json` is format 2 and carries per-sample vegetation types, so
 host-rule changes no longer need a re-bake. **Batch whatever needs a re-bake into
 one**, since hard rule 3 makes a re-bake an event: the elevation plausibility
@@ -342,7 +342,7 @@ per-pixel-tiles decision waits on the October band reading, and until then no sc
 `cells.json` does not change. `node scripts/fetch-habitat.mjs --resume` tops it up; a satisfied
 resume costs four seconds. The grid's phase is the trap — native pixel edges are at 15 mod 30 in
 EPSG:5070, not multiples of 30 — and `habitat-grid.mjs` is the only place that knows it.
-[ROADMAP.md](ROADMAP.md), [docs/verification.md](docs/verification.md#a-test-that-agrees-with-you-by-construction)
+[ROADMAP.md](ROADMAP.md), [docs/verification.md](docs/verification.md#the-30-m-grid-measured)
 
 **The access checkpoint is kept on success and re-assembling from it is free.**
 Everything after the fetch — the category rules, trailhead inference, which way
@@ -385,7 +385,7 @@ grids and one forecast-only. [docs/weather-archive.md](docs/weather-archive.md)
 | [terrain.md](docs/terrain.md) | slope and aspect, the browser-order artifact, `pointKey` |
 | [scoring-model.md](docs/scoring-model.md) | the hand-tuned constants, in long form |
 | [testing.md](docs/testing.md) | the regression suite and its two halves |
-| [verification.md](docs/verification.md) | checks that caught real bugs; traps not to rediscover |
+| [verification.md](docs/verification.md) | checks that caught real bugs; **four that could not have failed**; traps not to rediscover |
 | [development.md](docs/development.md) | local setup, fetch-script environment variables |
 | [deploys.md](docs/deploys.md) | branches, staging, rollback |
 | [access.md](docs/access.md) | how a cell is reached, and why it never touches a score |

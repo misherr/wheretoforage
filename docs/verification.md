@@ -1,6 +1,9 @@
 # Verification that has actually caught bugs
 Checks that look like overkill and are not: each one here caught something real.
-Followed by the traps worth not rediscovering.
+Followed by the traps worth not rediscovering — and by
+[four checks that could not have failed](#four-checks-that-could-not-have-failed),
+which is the half of this file worth reading first. A check that passes for the
+wrong reason is more expensive than no check, because it reads as evidence.
 
 ## Verification that has actually caught bugs
 
@@ -538,38 +541,128 @@ And two checks that confirmed what they should:
   scratch path with `--checkpoint` pointed at the real one makes such a variant
   bake free of consequences.
 
-## Assert on the effect, not on the log
+## Four checks that could not have failed
 
-The `computeModes` copy bug reported itself as success: the upgrade log said
-**"where a bicycle is forbidden: {no: 8914, private: 155, dismount: 37}"** — nine
-thousand ways found, correctly — while the blocks summary two screens later said
-`"bicycle": 0`. Both lines were true. The fetch had done its work and the network
-never saw it, because `computeModes` copies each way by hand and `bk` was not in the
-copy.
+Four times now, a check in this project has passed while the thing it was supposed to be checking was
+broken. Not through carelessness: each check was deliberate, each looked like the obvious thing to
+verify, and each was measuring something **adjacent** to what mattered.
 
-This is the same shape as the most expensive failures in this file:
+**The shape: a verification that shares a mechanism with the thing it verifies cannot detect a fault
+in that mechanism.** If the check and the subject reach their answer by the same route, they agree
+about that route whether or not it is right. The check is not weak — it is *silent*, which is worse,
+because a silent check reads as evidence.
 
-- the LANDFIRE bake that reported 39,981 forested cells while every one of them
-  scored as though its trees were ideal;
-- trailheads counted and logged during the fetch while 8.4% of them rested on a road
-  no car could use;
-- the anchor join that reported every tap correctly while the overlay drew nothing.
+It happens two ways, and the difference is worth keeping straight because the fixes differ. Either the
+check **shares** the faulty mechanism, so it cannot disagree with it (cases 2, 3 and 4 below), or the
+check **bypasses** it, so it never gets a chance to (case 1). Sharing is answered by finding an
+independent derivation; bypassing is answered by moving the check to where the fault can occur.
 
-In each case the log described the **work attempted** and nothing checked that the
-work **landed**. So:
+**What unifies all four, and the question to ask of any check: what result would prove this wrong, and
+is that result reachable?** If you cannot describe the failing output, or you can describe it but no
+fault you are worried about could produce it, the check is decoration. It is the familiar "what would
+this test look like if the bug were present" — asked of the *mechanism* rather than of the code, which
+is where these four hid.
 
-- **Assert one hop past the thing you just did.** Not "the query returned 9,106
-  ways" but "9,106 ways now block something". Not "the bake wrote 46,923 rows" but
-  "a row taken at random decodes into the figure the sheet shows".
-- **A zero in a summary is a bug report.** `"bicycle": 0` beside a fetch that found
-  thousands, and `graded 0.0%` in a profile of a three-class speed model, were each
-  the whole bug, printed, for a version. Read the profile, not just the totals, and
-  treat a share that is exactly zero as a failed assertion until proved otherwise.
-- **Where data crosses a boundary by hand — a copy, a column list, a row format —
-  test the far side.** `scripts/access-modes.test.mjs` bakes a four-way fixture end
-  to end and asserts that a maintenance level changes a drive time and a
-  `bicycle=no` tag changes a bike figure. Both fail when the field is dropped from
-  the copy, which no amount of log-reading did.
+| the check | its relation to the fault | the result that would prove it wrong | why that result was unreachable |
+| --- | --- | --- | --- |
+| load the page from `localhost` after a re-bake | **bypasses** the HTTP cache entirely | stale bytes served to the app | a local server sends no far-future caching, so it has nothing stale to serve |
+| probe Overpass with `/status` | **shares** the host, not the query queue | a saturated mirror failing its probe | `/status` is a static string, served without touching the queue |
+| log the ways the rules stamped | **shares** the counter, not the network | a zero beside a fetch that found thousands | the counter incremented whether or not the field reached the network |
+| `identify` at each exported pixel's centre | **shares** the nearest-neighbour containing-pixel lookup | a disagreement | both sides resolve the same point by the same rule, at any alignment |
+
+### 1. Verifying a cache fix on a server that has no cache
+
+`access-geom.json` is fetched `force-cache` — "use the cached copy whatever its age" — which is right
+for a 5.5 MB file that never changes at a given URL and wrong for one that gets re-baked. After a v4
+bake the server was serving v4 (50,614 entries, confirmed with `cache: 'reload'`) and the browser
+handed the app **v3 from its disk cache** (53,200 entries), and would have gone on doing so
+indefinitely.
+
+Every local check passed, and could only pass: `scripts/serve.mjs` sends no far-future caching, so
+the stale-copy failure mode does not exist there. It appeared the moment the **deployed** site was
+opened. The fix is that the URL carries `access.json`'s own `generated` stamp, so the cache entry
+changes exactly when the data does; `access.json` itself is `no-cache`, so the stamp is always live.
+The format check is what turned it from silent to visible — without it the app would have drawn a
+previous bake's geometry for the wrong ways.
+
+**Reachable result:** open the real host, not localhost. A deploy is a mechanism, and a check that
+never runs against it cannot see its faults.
+
+### 2. A health probe that does not touch the queue
+
+A bake stalled at 10 of 316 tiles. Two Overpass mirrors refused connections and the third answered
+`/status` in 16 s and then timed out at 90 s on a query returning six ways — so it was kept as "up"
+while being useless, every tile paid two long timeouts before rotating off it, and 5 sub-areas were
+abandoned.
+
+`/status` is a static string a queue-saturated server still serves happily. The probe shared the
+*host* with the work but not the *queue*, which is the part that was broken. **The probe is now a real
+query** — a tiny bbox, one cheap request per mirror per run — and there is a fourth mirror, because
+three is not redundancy if all three can be down together. Long form:
+[access.md](access.md#overpass-is-the-awkward-part).
+
+**Reachable result:** probe with the operation you actually depend on, at the smallest size that still
+exercises it.
+
+### 3. A log that counts the work attempted
+
+The `computeModes` copy bug reported itself as success: the upgrade log said **"where a bicycle is
+forbidden: {no: 8914, private: 155, dismount: 37}"** — nine thousand ways found, correctly — while the
+blocks summary two screens later said `"bicycle": 0`. Both lines were true. The fetch had done its
+work and the network never saw it, because `computeModes` copies each way by hand and `bk` was not in
+the copy.
+
+The same variety, three more times: the LANDFIRE bake that reported 39,981 forested cells while every
+one of them scored as though its trees were ideal; trailheads counted and logged during the fetch
+while 8.4% of them rested on a road no car could use; the anchor join that reported every tap
+correctly while the overlay drew nothing. In each case the log described the work **attempted** and
+nothing checked that the work **landed**.
+
+**Reachable result:** assert one hop past the thing you just did — not "the query returned 9,106 ways"
+but "9,106 ways now block something".
+
+### 4. Two lookups that share a rule
+
+The 30 m habitat fetch had one thing to get right: whether an `exportImage` request returns
+LANDFIRE's own pixels or a resampling of them. ROADMAP.md named the test — snap the request to the
+grid, check the pixel size is 30.000 m, compare pixel centres against the `identify` point service.
+It scored 8 of 8, then 24 of 24 on deliberately heterogeneous ground where 83% of neighbouring pixels
+differ.
+
+**It proves nothing about alignment.** Nearest-neighbour gives an output pixel the value of the native
+pixel containing its centre; `identify` returns the value of the native pixel containing the point
+you ask about. Ask about a pixel's own centre and both are resolving the same point by the same rule
+— they agree whatever the grid is doing. The pixel size is no better: it is computed from the request's
+own extent and size, so a half-pixel-shifted request reports 30.000 m as happily as an aligned one.
+Both checks were re-run against a deliberately misaligned request. **Both passed.**
+
+**Reachable result:** oversample. Ask for 3 m pixels and the positions where values change are the
+native pixel edges, measured instead of assumed — a quantity neither the export's georeferencing nor
+the point service gets a vote on. See [the 30 m grid, measured](#the-30-m-grid-measured).
+
+### What to do instead
+
+The four fixes are two moves: **get outside the shared mechanism**, or **put the check where the
+fault lives.**
+
+- **Assert one hop past the thing you just did.** Not "the bake wrote 46,923 rows" but "a row taken at
+  random decodes into the figure the sheet shows".
+- **A zero in a summary is a bug report.** `"bicycle": 0` beside a fetch that found thousands, and
+  `graded 0.0%` in a profile of a three-class speed model, were each the whole bug, printed, for a
+  version. Read the profile, not just the totals, and treat a share that is exactly zero as a failed
+  assertion until proved otherwise.
+- **Where data crosses a boundary by hand — a copy, a column list, a row format — test the far side.**
+  `scripts/access-modes.test.mjs` bakes a four-way fixture end to end and asserts that a maintenance
+  level changes a drive time and a `bicycle=no` tag changes a bike figure. Both fail when the field
+  is dropped from the copy, which no amount of log-reading did.
+- **Check in the environment where the fault can occur.** Against the deployed host for anything
+  cache- or header-shaped; with the real operation for anything load-shaped.
+- **Prefer a quantity with an independent derivation.** The oversampled boundary phase, the seam
+  measured across every anchor, the count of unresolved cells: each is computed by a route the
+  suspect mechanism does not control.
+- **Then break it on purpose.** Every one of these was confirmed by reintroducing the fault and
+  watching the check fail — which is the only way to know the difference between a check that passes
+  and a check that cannot fail. It is why `npm test` being green is the floor and not the bar.
 
 ## An ArcGIS objectid is not a key
 
@@ -638,28 +731,14 @@ assertion is on the rendered text: a rider is told a ride, a walker is told the 
 nothing rideable at the pavement is told the walk *and why*. The regex-only version of that test
 passed unchanged when the rider branch was disabled with `const ridden=false&&…`; the runnable one
 fails on the first assertion. That is the same gap as a log line reporting 9,106 blocked ways that
-blocked nothing — see [Assert on the effect, not on the log](#assert-on-the-effect-not-on-the-log).
+blocked nothing — see [Four checks that could not have failed](#four-checks-that-could-not-have-failed).
 
-## A test that agrees with you by construction
+## The 30 m grid, measured
 
-The 30 m habitat fetch had one thing to get right before it could be trusted: whether an
-`exportImage` request returns LANDFIRE's own 30 m pixels or a resampling of them. ROADMAP.md named
-the test to write — snap the request to the grid, check the pixel size is 30.000 m, and compare pixel
-centres against the `identify` point service. It scored 8 of 8, then 24 of 24 on deliberately
-heterogeneous ground where 83% of neighbouring pixels differ.
-
-**It proves nothing about alignment.** Nearest-neighbour resampling gives an output pixel the value of
-the native pixel containing its centre. `identify` returns the value of the native pixel containing
-the point you ask about. Ask about a pixel's own centre and the two are looking up the same native
-pixel by the same rule — they agree whatever the grid is doing. The pixel size is no better: it is
-computed from the extent and size of the request, so a half-pixel-shifted request reports 30.000 m as
-happily as an aligned one.
-
-Both checks were re-run against a deliberately misaligned request. Both passed.
-
-**What does work is oversampling.** Ask for 3 m pixels over a strip — ten samples across each native
-pixel — and the positions where values change are the native pixel edges, measured rather than
-declared. Then look at the phase of those positions:
+The alignment question and why the obvious test cannot answer it are in
+[Four checks that could not have failed](#four-checks-that-could-not-have-failed); this is what the
+test that does work actually found. Oversample a strip at 3 m — ten samples across each native pixel —
+and the positions where values change are the native pixel edges:
 
 | | aligned | half a pixel out |
 | --- | --- | --- |
@@ -667,11 +746,11 @@ declared. Then look at the phase of those positions:
 | at phase 15 mod 30 | **615** | 0 |
 | runs a whole number of native pixels | yes | no |
 
-That test distinguishes the two cases absolutely, and it is what `phaseOfBoundaries()` does — in
+That distinguishes the two cases absolutely, and it is what `phaseOfBoundaries()` does — in
 `habitat-grid.mjs`, so the fetch's live preflight and the offline tests run the same code. The fetch
 **aborts** if the probe fails, because a gigabyte pulled on a moved grid looks exactly like a good one.
 
-Three things fell out of doing it properly, each of which the plan had wrong:
+Three things fell out of it, each of which the plan had wrong:
 
 - **The grid is at phase 15, not 0.** LANDFIRE's extent corner is x −2,362,425, y 3,267,405, both
   15 mod 30: native pixel edges at 15 mod 30, native centres at multiples of 30. Snapping to multiples
